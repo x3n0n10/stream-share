@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/buger/jsonparser"
 	"github.com/gin-gonic/gin"
 	"github.com/pierre-emmanuelJ/iptv-proxy/pkg/utils"
 )
@@ -70,6 +71,7 @@ func NewClient(username, password, baseURL string) (*XtreamClient, error) {
 	a := &AuthenticationResponse{}
 
 	if jsonErr := json.Unmarshal(authData, &a); jsonErr != nil {
+		debugLog("-> NewClient unmarshalling error for AuthenticationResponse - error: %s", jsonErr.Error())
 		return nil, fmt.Errorf("error unmarshaling json: %s", jsonErr.Error())
 	}
 
@@ -158,13 +160,35 @@ func (c *XtreamClient) GetCategories(catType string) ([]Category, error) {
 
 	cats := make([]Category, 0)
 
-	jsonErr := json.Unmarshal(catData, &cats)
+	if useAdvancedParsing {
+		debugLog("- GetCategories using Advanced Parsing for: []Category")
 
-	for idx := range cats {
-		cats[idx].Type = catType
+		_, jsonErr := jsonparser.ArrayEach(catData, func(value []byte, dataType jsonparser.ValueType, offset int, err error) {
+			if err != nil {
+				debugLog(">> GetCategories - Error iterating through array: %s", err.Error())
+				return
+			}
+
+			cat := Category{
+				Fields: value, // Directly assign the raw JSON bytes
+			}
+			cats = append(cats, cat)
+		})
+
+		return cats, jsonErr
+	} else {
+		jsonErr := json.Unmarshal(catData, &cats)
+		if jsonErr != nil {
+			debugLog("-> GetCategories unmarshalling error for []Category - error: %s", jsonErr.Error())
+		}
+
+		for idx := range cats {
+			cats[idx].Type = catType
+		}
+
+		return cats, jsonErr
 	}
 
-	return cats, jsonErr
 }
 
 // GetLiveStreams will return a slice of live streams.
@@ -200,15 +224,60 @@ func (c *XtreamClient) GetStreams(streamAction, categoryID string) ([]Stream, er
 
 	streams := make([]Stream, 0)
 
-	if jsonErr := json.Unmarshal(streamData, &streams); jsonErr != nil {
-		return nil, jsonErr
-	}
+	if useAdvancedParsing {
+		debugLog("- GetStreams using Advanced Parsing for: []Stream")
 
-	for _, stream := range streams {
-		c.streams[int(stream.ID)] = stream
-	}
+		_, jsonErr := jsonparser.ArrayEach(streamData, func(value []byte, dataType jsonparser.ValueType, offset int, err error) {
+			if err != nil {
+				debugLog(">> GetStreams - Error iterating through array: %s", err.Error())
+				return
+			}
 
-	return streams, nil
+			stream := Stream{
+				Fields: value,
+			}
+
+			streams = append(streams, stream)
+
+			// The below code is to replicate the behavior of the old code:
+			//   c.streams[int(stream.ID)] = stream
+
+			streamID, _, _, err := jsonparser.Get(value, StreamFieldID)
+			if err != nil {
+				streamID = []byte("0")
+			}
+			streamType, _, _, err := jsonparser.Get(value, StreamFieldType)
+			if err != nil {
+				streamType = []byte("live")
+			}
+
+			// Now you can use streamID and streamType as []byte
+			// To convert to string if needed:
+			streamTypeStr := string(streamType)
+
+			var flexID FlexInt
+			flexID.UnmarshalJSON(streamID)
+
+			s := Stream{
+				ID:   flexID,
+				Type: streamTypeStr,
+			}
+			c.streams[int(s.ID)] = s
+		})
+
+		return streams, jsonErr
+	} else {
+		if jsonErr := json.Unmarshal(streamData, &streams); jsonErr != nil {
+			debugLog("-> GetStreams unmarshalling error for []Stream - error: %s", jsonErr.Error())
+			return nil, jsonErr
+		}
+
+		for _, stream := range streams {
+			c.streams[int(stream.ID)] = stream
+		}
+
+		return streams, nil
+	}
 }
 
 // GetSeries will return a slice of all available Series.
@@ -227,62 +296,90 @@ func (c *XtreamClient) GetSeries(categoryID string) ([]SeriesInfo, error) {
 
 	seriesInfos := make([]SeriesInfo, 0)
 
-	if jsonErr := json.Unmarshal(seriesData, &seriesInfos); jsonErr != nil {
-		return nil, jsonErr
-	}
+	if useAdvancedParsing {
+		debugLog("- GetSeries using Advanced Parsing for: []SeriesInfo")
 
-	return seriesInfos, nil
+		_, jsonErr := jsonparser.ArrayEach(seriesData, func(value []byte, dataType jsonparser.ValueType, offset int, err error) {
+			if err != nil {
+				debugLog(">> GetSeries - Error iterating through array: %s", err.Error())
+				return
+			}
+
+			seriesInfo := SeriesInfo{
+				Fields: value,
+			}
+
+			seriesInfos = append(seriesInfos, seriesInfo)
+		})
+
+		return seriesInfos, jsonErr
+	} else {
+		jsonErr := json.Unmarshal(seriesData, &seriesInfos)
+		if jsonErr != nil {
+			debugLog("-> GetSeries unmarshalling error for []SeriesInfo - error: %s", jsonErr.Error())
+		}
+
+		return seriesInfos, jsonErr
+	}
 }
 
 // GetSeriesInfo will return a series info for the given seriesID.
-func (c *XtreamClient) GetSeriesInfo(seriesID string) (interface{} /**Series*/, error) {
+func (c *XtreamClient) GetSeriesInfo(seriesID string) (*Series, error) {
 	if seriesID == "" {
 		return nil, fmt.Errorf("series ID can not be empty")
 	}
 
-	seriesData, _, seriesErr := c.sendRequestWithURL("get_series_info", url.Values{"series_id": []string{seriesID}})
+	seriesData, seriesErr := c.sendRequest("get_series_info", url.Values{"series_id": []string{seriesID}})
 	if seriesErr != nil {
 		return nil, seriesErr
 	}
 
 	if useAdvancedParsing {
-		debugLog("- Using Advanced Parsing for: Series")
-		var rawData map[string]json.RawMessage
-		jsonErr := json.Unmarshal(seriesData, &rawData)
+		debugLog("- GetSeriesInfo using Advanced Parsing for: Series")
 
-		return rawData, jsonErr
+		seriesInfo := &Series{
+			Fields: seriesData,
+		}
 
+		return seriesInfo, nil
 	} else {
 		seriesInfo := &Series{}
 
 		jsonErr := json.Unmarshal(seriesData, &seriesInfo)
+		if jsonErr != nil {
+			debugLog("-> GetSeriesInfo unmarshalling error for Series - error: %s", jsonErr.Error())
+		}
 
 		return seriesInfo, jsonErr
 	}
 }
 
 // GetVideoOnDemandInfo will return VOD info for the given vodID.
-func (c *XtreamClient) GetVideoOnDemandInfo(vodID string) (interface{} /**VideoOnDemandInfo*/, error) {
+func (c *XtreamClient) GetVideoOnDemandInfo(vodID string) (*VideoOnDemandInfo, error) {
 	if vodID == "" {
 		return nil, fmt.Errorf("vod ID can not be empty")
 	}
 
-	vodData, _, vodErr := c.sendRequestWithURL("get_vod_info", url.Values{"vod_id": []string{vodID}})
+	vodData, vodErr := c.sendRequest("get_vod_info", url.Values{"vod_id": []string{vodID}})
 	if vodErr != nil {
 		return nil, vodErr
 	}
 
 	if useAdvancedParsing {
-		debugLog("- Using Advanced Parsing for: VideoOnDemandInfo")
-		var rawData map[string]json.RawMessage
-		jsonErr := json.Unmarshal(vodData, &rawData)
+		debugLog("- GetVideoOnDemandInfo using Advanced Parsing for: VideoOnDemandInfo")
 
-		return rawData, jsonErr
+		vodInfo := &VideoOnDemandInfo{
+			Fields: vodData,
+		}
+
+		return vodInfo, nil
 	} else {
 		vodInfo := &VideoOnDemandInfo{}
 
 		jsonErr := json.Unmarshal(vodData, &vodInfo)
-
+		if jsonErr != nil {
+			debugLog("- GetVideoOnDemandInfo unmarshalling error for VideoOnDemandInfo - error: %s", jsonErr.Error())
+		}
 		return vodInfo, jsonErr
 	}
 }
@@ -325,6 +422,9 @@ func (c *XtreamClient) getEPG(action, streamID string, limit int) ([]EPGInfo, er
 	epgContainer := &epgContainer{}
 
 	jsonErr := json.Unmarshal(epgData, &epgContainer)
+	if jsonErr != nil {
+		debugLog("-> getEPG unmarshalling error for epgContainer - error: %s", jsonErr.Error())
+	}
 
 	return epgContainer.EPGListings, jsonErr
 }
@@ -383,7 +483,7 @@ func (c *XtreamClient) sendRequestWithURL(action string, parameters url.Values) 
 	}
 
 	// Write response to file
-	utils.WriteResponseToFile(mockCtx, buf.Bytes(), request.URL.String())
+	utils.WriteResponseToFile(mockCtx, buf.Bytes())
 
 	return buf.Bytes(), url, nil
 }

@@ -3,7 +3,7 @@ package xtreamcodes
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"os"
 	"reflect"
 	"strings"
 )
@@ -47,6 +47,7 @@ type AuthenticationResponse struct {
 
 // Category describes a grouping of Stream.
 type Category struct {
+	Fields []byte  `json:"-"`
 	ID     FlexInt `json:"category_id"`
 	Name   string  `json:"category_name"`
 	Parent FlexInt `json:"parent_id"`
@@ -57,6 +58,7 @@ type Category struct {
 
 // Stream is a streamble video source.
 type Stream struct {
+	Fields             []byte     `json:"-"`
 	Added              *Timestamp `json:"added"`
 	CategoryID         FlexInt    `json:"category_id"`
 	CategoryName       string     `json:"category_name"`
@@ -77,6 +79,7 @@ type Stream struct {
 
 // SeriesInfo contains information about a TV series.
 type SeriesInfo struct {
+	Fields         []byte           `json:"-"`
 	BackdropPath   *JSONStringSlice `json:"backdrop_path,omitempty"`
 	Cast           string           `json:"cast"`
 	CategoryID     *FlexInt         `json:"category_id"`
@@ -109,6 +112,7 @@ type SeriesEpisode struct {
 }
 
 type Series struct {
+	Fields   []byte                     `json:"-"`
 	Episodes map[string][]SeriesEpisode `json:"episodes"`
 	Info     SeriesInfo                 `json:"info"`
 	Seasons  []interface{}              `json:"seasons"`
@@ -116,6 +120,7 @@ type Series struct {
 
 // VideoOnDemandInfo contains information about a video on demand stream.
 type VideoOnDemandInfo struct {
+	Fields    []byte   `json:"-"`
 	Info      *VODInfo `json:"info,omitempty"`
 	MovieData struct {
 		Added              Timestamp `json:"added"`
@@ -198,7 +203,7 @@ func (vod *VideoOnDemandInfo) UnmarshalJSON(data []byte) error {
 	if len(aux.Info) > 0 && string(aux.Info) != "\"\"" && string(aux.Info) != "[]" && string(aux.Info) != "[null]" {
 		var info VODInfo
 		if err := json.Unmarshal(aux.Info, &info); err != nil {
-			log.Printf("Warning: Failed to unmarshal Info field. Using reflective unmarshalling.")
+			debugLog("Warning: Failed to unmarshal Info field. Using reflective unmarshalling - Error: %v", err)
 
 			if unmarshalErr := unmarshalReflectiveFields(aux.Info, &info, "Info"); unmarshalErr != nil {
 				logInitialError = true
@@ -209,8 +214,8 @@ func (vod *VideoOnDemandInfo) UnmarshalJSON(data []byte) error {
 
 	// Log initial error and data only if subsequent unmarshalling fails
 	if logInitialError && initialErr != nil {
-		log.Println(errMsg)
-		log.Println(dataMsg)
+		debugLog(errMsg)
+		debugLog(dataMsg)
 	}
 
 	return nil
@@ -236,7 +241,7 @@ func (vi *VODInfo) UnmarshalJSON(data []byte) error {
 	if len(aux.Audio) > 0 && string(aux.Audio) != "\"\"" && string(aux.Audio) != "[]" && string(aux.Audio) != "[null]" {
 		var audio FFMPEGStreamInfo
 		if err := json.Unmarshal(aux.Audio, &audio); err != nil {
-			log.Printf("Warning: Failed to unmarshal Audio field. Using reflective unmarshalling.")
+			debugLog("Warning: Failed to unmarshal Audio field. Using reflective unmarshalling - Error: %v", err)
 
 			if unmarshalErr := unmarshalReflectiveFields(aux.Audio, &audio, "Audio"); unmarshalErr != nil {
 				logInitialError = true
@@ -249,7 +254,7 @@ func (vi *VODInfo) UnmarshalJSON(data []byte) error {
 	if len(aux.Video) > 0 && string(aux.Video) != "\"\"" && string(aux.Video) != "[]" && string(aux.Video) != "[null]" {
 		var video FFMPEGStreamInfo
 		if err := json.Unmarshal(aux.Video, &video); err != nil {
-			log.Printf("Warning: Failed to unmarshal Video field. Using reflective unmarshalling.")
+			debugLog("Warning: Failed to unmarshal Video field. Using reflective unmarshalling - Error: %v", err)
 
 			if unmarshalErr := unmarshalReflectiveFields(aux.Video, &video, "Video"); unmarshalErr != nil {
 				logInitialError = true
@@ -260,14 +265,14 @@ func (vi *VODInfo) UnmarshalJSON(data []byte) error {
 
 	// Unmarshal remaining fields using reflective unmarshalling
 	if err := unmarshalReflectiveFields(data, vi, "VODInfo"); err != nil {
-		log.Printf("Warning: Error during reflective unmarshalling of VODInfo: %v", err)
+		debugLog("Warning: Error during reflective unmarshalling of VODInfo: %v", err)
 		logInitialError = true
 	}
 
 	// Log initial error and data only if subsequent unmarshalling fails
 	if logInitialError && initialErr != nil {
-		log.Println(errMsg)
-		log.Println(dataMsg)
+		debugLog(errMsg)
+		debugLog(dataMsg)
 	}
 
 	return nil
@@ -292,7 +297,7 @@ func (se *SeriesEpisode) UnmarshalJSON(data []byte) error {
 	if len(aux.Info) > 0 && string(aux.Info) != "\"\"" && string(aux.Info) != "[]" && string(aux.Info) != "[null]" {
 		var info EpisodeInfo
 		if err := json.Unmarshal(aux.Info, &info); err != nil {
-			log.Printf("Warning: Failed to unmarshal Info field. Using reflective unmarshalling.")
+			debugLog("Warning: Failed to unmarshal Info field. Using reflective unmarshalling - Error: %v", err)
 
 			if unmarshalErr := unmarshalReflectiveFields(aux.Info, &info, "Info"); unmarshalErr != nil {
 				logInitialError = true
@@ -303,8 +308,8 @@ func (se *SeriesEpisode) UnmarshalJSON(data []byte) error {
 
 	// Log initial error and data only if subsequent unmarshalling fails
 	if logInitialError && initialErr != nil {
-		log.Println(errMsg)
-		log.Println(dataMsg)
+		debugLog(errMsg)
+		debugLog(dataMsg)
 	}
 
 	return nil
@@ -330,7 +335,7 @@ func (ei *EpisodeInfo) UnmarshalJSON(data []byte) error {
 	if len(aux.Video) > 0 && string(aux.Video) != "\"\"" && string(aux.Video) != "[]" && string(aux.Video) != "[null]" {
 		var video FFMPEGStreamInfo
 		if err := json.Unmarshal(aux.Video, &video); err != nil {
-			log.Printf("Warning: Failed to unmarshal Video field. Using reflective unmarshalling.")
+			debugLog("Warning: Failed to unmarshal Video field. Using reflective unmarshalling - Error: %v", err)
 
 			if unmarshalErr := unmarshalReflectiveFields(aux.Video, &video, "Video"); unmarshalErr != nil {
 				logInitialError = true
@@ -343,7 +348,7 @@ func (ei *EpisodeInfo) UnmarshalJSON(data []byte) error {
 	if len(aux.Audio) > 0 && string(aux.Audio) != "\"\"" && string(aux.Audio) != "[]" && string(aux.Audio) != "[null]" {
 		var audio FFMPEGStreamInfo
 		if err := json.Unmarshal(aux.Audio, &audio); err != nil {
-			log.Printf("Warning: Failed to unmarshal Audio field. Using reflective unmarshalling.")
+			debugLog("Warning: Failed to unmarshal Audio field. Using reflective unmarshalling - Error: %v", err)
 
 			if unmarshalErr := unmarshalReflectiveFields(aux.Audio, &audio, "Audio"); unmarshalErr != nil {
 				logInitialError = true
@@ -354,8 +359,8 @@ func (ei *EpisodeInfo) UnmarshalJSON(data []byte) error {
 
 	// Log initial error and data only if subsequent unmarshalling fails
 	if logInitialError && initialErr != nil {
-		log.Println(errMsg)
-		log.Println(dataMsg)
+		debugLog(errMsg)
+		debugLog(dataMsg)
 	}
 
 	return nil
@@ -376,15 +381,15 @@ func (si *ServerInfo) UnmarshalJSON(data []byte) error {
 	dataMsg := fmt.Sprintf("Problematic JSON data for ServerInfo: %s", string(data))
 
 	if initialErr != nil {
-		log.Printf("Warning: Failed to unmarshal ServerInfo. Using reflective unmarshalling.")
+		debugLog("Warning: Failed to unmarshal ServerInfo. Using reflective unmarshalling - Error: %v", initialErr)
 		if unmarshalErr := unmarshalReflectiveFields(data, si, "ServerInfo"); unmarshalErr != nil {
 			logInitialError = true
 		}
 	}
 
 	if logInitialError {
-		log.Println(errMsg)
-		log.Println(dataMsg)
+		debugLog(errMsg)
+		debugLog(dataMsg)
 	}
 
 	return nil
@@ -405,15 +410,15 @@ func (ui *UserInfo) UnmarshalJSON(data []byte) error {
 	dataMsg := fmt.Sprintf("Problematic JSON data for UserInfo: %s", string(data))
 
 	if initialErr != nil {
-		log.Printf("Warning: Failed to unmarshal UserInfo. Using reflective unmarshalling.")
+		debugLog("Warning: Failed to unmarshal UserInfo. Using reflective unmarshalling - Error: %v", initialErr)
 		if unmarshalErr := unmarshalReflectiveFields(data, ui, "UserInfo"); unmarshalErr != nil {
 			logInitialError = true
 		}
 	}
 
 	if logInitialError {
-		log.Println(errMsg)
-		log.Println(dataMsg)
+		debugLog(errMsg)
+		debugLog(dataMsg)
 	}
 
 	return nil
@@ -434,15 +439,15 @@ func (ar *AuthenticationResponse) UnmarshalJSON(data []byte) error {
 	dataMsg := fmt.Sprintf("Problematic JSON data for AuthenticationResponse: %s", string(data))
 
 	if initialErr != nil {
-		log.Printf("Warning: Failed to unmarshal AuthenticationResponse. Using reflective unmarshalling.")
+		debugLog("Warning: Failed to unmarshal AuthenticationResponse. Using reflective unmarshalling - Error: %v", initialErr)
 		if unmarshalErr := unmarshalReflectiveFields(data, ar, "AuthenticationResponse"); unmarshalErr != nil {
 			logInitialError = true
 		}
 	}
 
 	if logInitialError {
-		log.Println(errMsg)
-		log.Println(dataMsg)
+		debugLog(errMsg)
+		debugLog(dataMsg)
 	}
 
 	return nil
@@ -463,15 +468,15 @@ func (c *Category) UnmarshalJSON(data []byte) error {
 	dataMsg := fmt.Sprintf("Problematic JSON data for Category: %s", string(data))
 
 	if initialErr != nil {
-		log.Printf("Warning: Failed to unmarshal Category. Using reflective unmarshalling.")
+		debugLog("Warning: Failed to unmarshal Category. Using reflective unmarshalling - Error: %v", initialErr)
 		if unmarshalErr := unmarshalReflectiveFields(data, c, "Category"); unmarshalErr != nil {
 			logInitialError = true
 		}
 	}
 
 	if logInitialError {
-		log.Println(errMsg)
-		log.Println(dataMsg)
+		debugLog(errMsg)
+		debugLog(dataMsg)
 	}
 
 	return nil
@@ -492,15 +497,15 @@ func (s *Stream) UnmarshalJSON(data []byte) error {
 	dataMsg := fmt.Sprintf("Problematic JSON data for Stream: %s", string(data))
 
 	if initialErr != nil {
-		log.Printf("Warning: Failed to unmarshal Stream. Using reflective unmarshalling.")
+		debugLog("Warning: Failed to unmarshal Stream. Using reflective unmarshalling - Error: %v", initialErr)
 		if unmarshalErr := unmarshalReflectiveFields(data, s, "Stream"); unmarshalErr != nil {
 			logInitialError = true
 		}
 	}
 
 	if logInitialError {
-		log.Println(errMsg)
-		log.Println(dataMsg)
+		debugLog(errMsg)
+		debugLog(dataMsg)
 	}
 
 	return nil
@@ -521,15 +526,15 @@ func (si *SeriesInfo) UnmarshalJSON(data []byte) error {
 	dataMsg := fmt.Sprintf("Problematic JSON data for SeriesInfo: %s", string(data))
 
 	if initialErr != nil {
-		log.Printf("Warning: Failed to unmarshal SeriesInfo. Using reflective unmarshalling.")
+		debugLog("Warning: Failed to unmarshal SeriesInfo. Using reflective unmarshalling - Error: %v", initialErr)
 		if unmarshalErr := unmarshalReflectiveFields(data, si, "SeriesInfo"); unmarshalErr != nil {
 			logInitialError = true
 		}
 	}
 
 	if logInitialError {
-		log.Println(errMsg)
-		log.Println(dataMsg)
+		debugLog(errMsg)
+		debugLog(dataMsg)
 	}
 
 	return nil
@@ -550,15 +555,15 @@ func (s *Series) UnmarshalJSON(data []byte) error {
 	dataMsg := fmt.Sprintf("Problematic JSON data for Series: %s", string(data))
 
 	if initialErr != nil {
-		log.Printf("Warning: Failed to unmarshal Series. Using reflective unmarshalling.")
+		debugLog("Warning: Failed to unmarshal Series. Using reflective unmarshalling - Error: %v", initialErr)
 		if unmarshalErr := unmarshalReflectiveFields(data, s, "Series"); unmarshalErr != nil {
 			logInitialError = true
 		}
 	}
 
 	if logInitialError {
-		log.Println(errMsg)
-		log.Println(dataMsg)
+		debugLog(errMsg)
+		debugLog(dataMsg)
 	}
 
 	return nil
@@ -579,15 +584,15 @@ func (ei *EPGInfo) UnmarshalJSON(data []byte) error {
 	dataMsg := fmt.Sprintf("Problematic JSON data for EPGInfo: %s", string(data))
 
 	if initialErr != nil {
-		log.Printf("Warning: Failed to unmarshal EPGInfo. Using reflective unmarshalling.")
+		debugLog("Warning: Failed to unmarshal EPGInfo. Using reflective unmarshalling - Error: %v", initialErr)
 		if unmarshalErr := unmarshalReflectiveFields(data, ei, "EPGInfo"); unmarshalErr != nil {
 			logInitialError = true
 		}
 	}
 
 	if logInitialError {
-		log.Println(errMsg)
-		log.Println(dataMsg)
+		debugLog(errMsg)
+		debugLog(dataMsg)
 	}
 
 	return nil
@@ -608,15 +613,15 @@ func (fsi *FFMPEGStreamInfo) UnmarshalJSON(data []byte) error {
 	dataMsg := fmt.Sprintf("Problematic JSON data for FFMPEGStreamInfo: %s", string(data))
 
 	if initialErr != nil {
-		log.Printf("Warning: Failed to unmarshal FFMPEGStreamInfo. Using reflective unmarshalling.")
+		debugLog("Warning: Failed to unmarshal FFMPEGStreamInfo. Using reflective unmarshalling - Error: %v", initialErr)
 		if unmarshalErr := unmarshalReflectiveFields(data, fsi, "FFMPEGStreamInfo"); unmarshalErr != nil {
 			logInitialError = true
 		}
 	}
 
 	if logInitialError {
-		log.Println(errMsg)
-		log.Println(dataMsg)
+		debugLog(errMsg)
+		debugLog(dataMsg)
 	}
 
 	return nil
@@ -628,18 +633,20 @@ func unmarshalReflectiveFields(data []byte, v interface{}, fieldName string) err
 		return fmt.Errorf("error unmarshaling %s: %v", fieldName, err)
 	}
 
+	testAllValues := (os.Getenv("TEST_ALL_VALUES") == "true")
+	detectNewFields := (os.Getenv("DETECT_NEW_FIELDS") == "true")
+
 	valuePtr := reflect.ValueOf(v)
 	if valuePtr.Kind() != reflect.Ptr {
 		return fmt.Errorf("%s must be a pointer", fieldName)
 	}
 	value := valuePtr.Elem()
 
-	// Create a map to track which fields have been processed
 	processedFields := make(map[string]bool)
-
-	// Create a slice to store errors
 	var errors []string
+	var fieldsFoundDetails []string
 
+	fieldsFoundDetails = append(fieldsFoundDetails, fmt.Sprintf("Fields for %s:", fieldName))
 	for i := 0; i < value.NumField(); i++ {
 		field := value.Type().Field(i)
 		jsonTag := field.Tag.Get("json")
@@ -654,41 +661,44 @@ func unmarshalReflectiveFields(data []byte, v interface{}, fieldName string) err
 		processedFields[jsonTag] = true
 
 		if rawValue, ok := objMap[jsonTag]; ok {
-			// Check if the value is empty or an empty array
-			if len(rawValue) == 0 || string(rawValue) == "\"\"" || string(rawValue) == "[]" || string(rawValue) == "[null]" {
+			if !testAllValues && (len(rawValue) == 0 || string(rawValue) == "\"\"" || string(rawValue) == "[]" || string(rawValue) == "[null]") {
 				continue
 			}
 
 			fieldValue := value.Field(i)
+			fieldsFoundDetails = append(fieldsFoundDetails, fmt.Sprintf("  %s: %s - Unmarshalling value: %s", jsonTag, field.Type, string(rawValue)))
+
 			if fieldValue.CanSet() {
 				err := json.Unmarshal(rawValue, fieldValue.Addr().Interface())
 				if err != nil {
-					errMsg := fmt.Sprintf("Error unmarshaling field %s.%s (value: %s): %v", fieldName, field.Name, string(rawValue), err)
-					log.Printf("Warning: %s", errMsg)
+					errMsg := fmt.Sprintf("Error unmarshaling field %s.%s (type: %s, json tag: %s, value: %s): %v",
+						fieldName, field.Name, field.Type, jsonTag, string(rawValue), err)
+					debugLog("  Warning: %s", errMsg)
 					errors = append(errors, errMsg)
-					// Continue with other fields instead of returning an error
 				}
 			}
 		}
 	}
 
-	/*
-	   // Log fields in the JSON that are not in the struct
-	   for jsonField, rawValue := range objMap {
-	       if !processedFields[jsonField] {
-	           var value interface{}
-	           err := json.Unmarshal(rawValue, &value)
-	           if err != nil {
-	               log.Printf("Warning: Error unmarshaling extra field %s.%s: %v", fieldName, jsonField, err)
-	               // } else {
-	               //  log.Printf("Extra field in %s: %s = %v", fieldName, jsonField, value)
-	           }
-	       }
-	   }
-	*/
+	if detectNewFields {
+		for jsonField, rawValue := range objMap {
+			if !processedFields[jsonField] {
+				var value interface{}
+				err := json.Unmarshal(rawValue, &value)
+				if err != nil {
+					debugLog("  Warning: Error unmarshaling extra field %s.%s: %v (type: %T)", fieldName, jsonField, err, value)
+				} else {
+					debugLog("  Extra field in %s: %s = %v (type: %T)", fieldName, jsonField, value, value)
+				}
+			}
+		}
+	}
 
-	// If there were any errors during the process, return an error
 	if len(errors) > 0 {
+		// If we have detected an error, then also show the fields that were found.
+		for _, fieldDetail := range fieldsFoundDetails {
+			debugLog(fieldDetail)
+		}
 		return fmt.Errorf("unmarshalReflectiveFields encountered %d error(s) for %s: %s", len(errors), fieldName, strings.Join(errors, "; "))
 	}
 

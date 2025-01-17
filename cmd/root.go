@@ -71,6 +71,15 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
+		config.DebugLoggingEnabled = viper.GetBool("debug-logging")
+		config.CacheFolder = viper.GetString("cache-folder")
+		if config.CacheFolder != "" {
+			// Ensure CacheFolder ends with a '/'
+			if config.CacheFolder != "" && !strings.HasSuffix(config.CacheFolder, "/") {
+				config.CacheFolder += "/"
+			}
+		}
+
 		conf := &config.ProxyConfig{
 			HostConfig: &config.HostConfiguration{
 				Hostname: viper.GetString("hostname"),

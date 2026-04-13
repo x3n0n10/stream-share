@@ -131,7 +131,7 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
     c.stream(ctx, rpURL)
 }
 
-func (c *Config) xtreamStreamMovie(ctx *gin.Context) {
+func (c *Config) xtreamStreamMovieWithCache(ctx *gin.Context) {
     id := ctx.Param("id")
     // Normalize DB key: cached entries are stored by bare stream_id without extension
     idRaw := strings.TrimSuffix(id, path.Ext(id))
@@ -206,7 +206,19 @@ func (c *Config) xtreamStreamMovie(ctx *gin.Context) {
     c.xtreamStream(ctx, rpURL)
 }
 
-func (c *Config) xtreamStreamSeries(ctx *gin.Context) {
+func (c *Config) xtreamStreamMovie(ctx *gin.Context) {
+    if utils.GetEnvOrDefault("USE_VOD_CACHING", "false") == "true" {
+        c.xtreamStreamMovieWithCache(ctx);
+    } else {
+        id := ctx.Param("id")
+        rpURL, err := url.Parse(fmt.Sprintf("%s/movie/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
+        if err != nil { _ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)); return }
+        utils.DebugLog("Movie streaming request - using Xtream credentials for upstream: %s", rpURL.String())
+        c.xtreamStream(ctx, rpURL)
+    }
+}
+
+func (c *Config) xtreamStreamSeriesWithCache(ctx *gin.Context) {
     id := ctx.Param("id")
     idRaw := strings.TrimSuffix(id, path.Ext(id))
     // Reject IDs containing path separators or dot-dot to prevent path traversal.
@@ -273,6 +285,17 @@ func (c *Config) xtreamStreamSeries(ctx *gin.Context) {
     rpURL, err := url.Parse(fmt.Sprintf("%s/series/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
     if err != nil { _ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)); return }
     c.xtreamStream(ctx, rpURL)
+}
+
+func (c *Config) xtreamStreamSeries(ctx *gin.Context) {
+    if utils.GetEnvOrDefault("USE_VOD_CACHING", "false") == "true" {
+        c.xtreamStreamSeriesWithCache(ctx);
+    } else {
+        id := ctx.Param("id")
+        rpURL, err := url.Parse(fmt.Sprintf("%s/series/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
+        if err != nil { _ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)); return }
+        c.xtreamStream(ctx, rpURL)
+    }
 }
 
 // Direct handlers using proxy credentials

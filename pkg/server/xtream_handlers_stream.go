@@ -82,14 +82,7 @@ func (c *Config) xtreamApiGet(ctx *gin.Context) {
 func (c *Config) xtreamStream(ctx *gin.Context, oriURL *url.URL) {
 	utils.DebugLog("-> Xtream streaming request: %s", ctx.Request.URL.Path)
 	utils.DebugLog("-> Proxying to Xtream upstream: %s", oriURL.String())
-
-	if c.sessionManager != nil && os.Getenv("FORCE_MULTIPLEXING") == "true" {
-		utils.DebugLog("Using multiplexed streaming (FORCE_MULTIPLEXING=true)")
-		c.multiplexedStream(ctx, oriURL)
-		return
-	}
-
-	c.stream(ctx, oriURL)
+	c.multiplexedStream(ctx, oriURL)
 }
 
 func (c *Config) xtreamXMLTV(ctx *gin.Context) {

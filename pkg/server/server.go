@@ -417,11 +417,11 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	username := ctx.GetString("username")
 	if username == "" {
-		// Try to get from path parameters
 		username = ctx.Param("username")
 	}
-
-	// If username is still empty, use a temporary random ID
+	if username == "" {
+		username = ctx.Query("username")
+	}
 	if username == "" {
 		username = fmt.Sprintf("temp-%s", uuid.NewV4().String())
 	}

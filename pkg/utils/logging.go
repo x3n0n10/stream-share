@@ -147,7 +147,7 @@ func logWithCaller(level LogLevel, format string, v ...interface{}) {
 	}
 	
 	// Format message with timestamp and level
-	timestamp := time.Now().Format("2006-01-02 15:04:05.000")
+	timestamp := time.Now().Format("2006-02-01 15:04:05")
 	levelStr := levelToString(level)
 	
 	// Format the final message

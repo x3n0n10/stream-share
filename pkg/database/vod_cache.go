@@ -85,14 +85,14 @@ func (m *DBManager) CleanupExpiredCache() (int64, error) {
 // In-progress downloads (status != 'ready') are excluded.
 func (m *DBManager) GetStaleVODCache(threshold time.Time) ([]types.VODCacheEntry, error) {
     if m == nil || m.db == nil { return nil, fmt.Errorf("database not initialized") }
-    rows, err := m.db.Query(`SELECT stream_id, type, title, series_title, season, episode, file_path, requested_by, downloaded_bytes, total_bytes, size_bytes, status, created_at, expires_at, last_access
+    rows, err := m.db.Query(`SELECT stream_id, file_path, last_access
         FROM vod_cache WHERE status = 'ready' AND last_access < $1`, threshold)
     if err != nil { return nil, err }
     defer rows.Close()
     var list []types.VODCacheEntry
     for rows.Next() {
         var e types.VODCacheEntry
-        if err := rows.Scan(&e.StreamID, &e.Type, &e.Title, &e.SeriesTitle, &e.Season, &e.Episode, &e.FilePath, &e.RequestedBy, &e.DownloadedBytes, &e.TotalBytes, &e.SizeBytes, &e.Status, &e.CreatedAt, &e.ExpiresAt, &e.LastAccess); err != nil {
+        if err := rows.Scan(&e.StreamID, &e.FilePath, &e.LastAccess); err != nil {
             return nil, err
         }
         list = append(list, e)

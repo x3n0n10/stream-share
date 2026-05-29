@@ -462,7 +462,7 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 		sm.stopStreamLocking(buffer.streamID)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Accept 200 (expected) and 206 (some providers return it unconditionally).
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {

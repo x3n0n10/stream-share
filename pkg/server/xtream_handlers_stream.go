@@ -662,7 +662,7 @@ func (c *Config) xtreamHlsStream(ctx *gin.Context) {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(doErr))
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusFound {
 		loc, locErr := resp.Location()
@@ -686,7 +686,7 @@ func (c *Config) xtreamHlsStream(ctx *gin.Context) {
 				_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(hlsDoErr))
 				return
 			}
-			defer hlsResp.Body.Close()
+			defer func() { _ = hlsResp.Body.Close() }()
 
 			b, readErr := io.ReadAll(hlsResp.Body)
 			if readErr != nil {
@@ -700,7 +700,7 @@ func (c *Config) xtreamHlsStream(ctx *gin.Context) {
 			ctx.Data(http.StatusOK, hlsResp.Header.Get("Content-Type"), []byte(body))
 			return
 		}
-		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(errors.New("Unable to HLS stream")))
+		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(errors.New("unable to HLS stream")))
 		return
 	}
 
@@ -722,7 +722,7 @@ func (c *Config) hlsXtreamStream(ctx *gin.Context, oriURL *url.URL) {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(doErr))
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusFound {
 		loc, locErr := resp.Location()
@@ -746,7 +746,7 @@ func (c *Config) hlsXtreamStream(ctx *gin.Context, oriURL *url.URL) {
 				_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(hlsDoErr))
 				return
 			}
-			defer hlsResp.Body.Close()
+			defer func() { _ = hlsResp.Body.Close() }()
 
 			b, readErr := io.ReadAll(hlsResp.Body)
 			if readErr != nil {
@@ -760,7 +760,7 @@ func (c *Config) hlsXtreamStream(ctx *gin.Context, oriURL *url.URL) {
 			ctx.Data(http.StatusOK, hlsResp.Header.Get("Content-Type"), []byte(body))
 			return
 		}
-		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(errors.New("Unable to HLS stream")))
+		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(errors.New("unable to HLS stream")))
 		return
 	}
 

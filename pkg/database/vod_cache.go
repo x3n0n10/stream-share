@@ -88,7 +88,7 @@ func (m *DBManager) GetStaleVODCache(threshold time.Time) ([]types.VODCacheEntry
     rows, err := m.db.Query(`SELECT stream_id, file_path, last_access
         FROM vod_cache WHERE status = 'ready' AND last_access < $1`, threshold)
     if err != nil { return nil, err }
-    defer rows.Close()
+    defer func() { _ = rows.Close() }()
     var list []types.VODCacheEntry
     for rows.Next() {
         var e types.VODCacheEntry
@@ -120,7 +120,7 @@ func (m *DBManager) ListVODCache(limit int) ([]types.VODCacheEntry, error) {
             FROM vod_cache WHERE expires_at > CURRENT_TIMESTAMP ORDER BY expires_at ASC`)
     }
     if err != nil { return nil, err }
-    defer rows.Close()
+    defer func() { _ = rows.Close() }()
     list := make([]types.VODCacheEntry, 0)
     for rows.Next() {
         var e types.VODCacheEntry

@@ -68,7 +68,7 @@ func NewDBManager(_ string) (*DBManager, error) {
 
     manager := &DBManager{db: db}
     if err := manager.initSchema(); err != nil {
-        db.Close()
+        _ = db.Close()
         return nil, err
     }
 

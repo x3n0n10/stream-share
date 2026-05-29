@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 
@@ -46,10 +47,11 @@ type SessionManager struct {
 	userLock         sync.RWMutex
 	streamLock       sync.RWMutex
 	tempLinkLock     sync.RWMutex
-	cleanupInterval  time.Duration
-	sessionTimeout   time.Duration
-	streamTimeout    time.Duration
-	tempLinkTimeout  time.Duration
+	cleanupInterval    time.Duration
+	sessionTimeout     time.Duration
+	streamTimeout      time.Duration
+	tempLinkTimeout    time.Duration
+	vodCacheStaleAge   time.Duration
 	httpClient       *http.Client
 	stopChan         chan struct{} // closed by Stop() to terminate background goroutines
 }
@@ -86,11 +88,12 @@ func NewSessionManager(db *database.DBManager) *SessionManager {
 		streamBuffers:   make(map[string]*StreamBuffer),
 		tempLinks:       make(map[string]*types.TemporaryLink),
 		db:              db,
-		cleanupInterval: 24 * time.Hour,
-		sessionTimeout:  30 * time.Minute,
-		streamTimeout:   2 * time.Minute,  // Time after which an unused stream is closed
-		tempLinkTimeout: 24 * time.Hour,
-		stopChan:        make(chan struct{}),
+		cleanupInterval:  24 * time.Hour,
+		sessionTimeout:   30 * time.Minute,
+		streamTimeout:    2 * time.Minute,
+		tempLinkTimeout:  24 * time.Hour,
+		vodCacheStaleAge: 24 * time.Hour,
+		stopChan:         make(chan struct{}),
 		httpClient: &http.Client{
 			// No global Timeout: long-running streams must not be cut after 60s
 			Transport: &http.Transport{
@@ -128,14 +131,20 @@ func (sm *SessionManager) cleanupRoutine() {
 		}
 		sm.cleanupExpiredSessions()
 		sm.cleanupUnusedStreams()
-		
-		// Also clean up expired temporary links in the database
+
 		if sm.db != nil {
+			// Remove temporary links past their expiry date
 			if count, err := sm.db.CleanupExpiredLinks(); err != nil {
 				utils.ErrorLog("Failed to clean expired links: %v", err)
 			} else if count > 0 {
 				utils.InfoLog("Cleaned %d expired temporary links", count)
 			}
+			// Remove DB rows whose expires_at has passed
+			if _, err := sm.db.CleanupExpiredCache(); err != nil {
+				utils.ErrorLog("Failed to clean expired VOD cache entries: %v", err)
+			}
+			// Delete files (and their DB rows) not accessed within the stale age
+			sm.cleanupStaleVODFiles()
 		}
 	}
 }
@@ -293,7 +302,7 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		}
 
 		// Add user as a client
-		clientChan := make(chan []byte, 256) // larger buffer to smooth jitter
+		clientChan := make(chan []byte, 8) // small buffer: keeps serveClient ~1MB ahead of the HTTP writer
 		existingBuffer.clientsLock.Lock()
 		if existingBuffer.clientDone == nil {
 			existingBuffer.clientDone = make(map[string]chan struct{})
@@ -352,7 +361,7 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 	streamBuffer.cond = sync.NewCond(&streamBuffer.bufMu)
 
 	// Add the requesting user as the first client
-	clientChan := make(chan []byte, 256)
+	clientChan := make(chan []byte, 8)
 	streamBuffer.clients[username] = clientChan
 	streamBuffer.clientDone[username] = make(chan struct{})
 	streamBuffer.clientIndex[username] = 0 // will follow head as it grows
@@ -798,4 +807,30 @@ func (sm *SessionManager) SetStreamTimeout(timeout time.Duration) {
 // SetTempLinkTimeout sets the temporary link expiration duration
 func (sm *SessionManager) SetTempLinkTimeout(timeout time.Duration) {
 	sm.tempLinkTimeout = timeout
+}
+
+// SetVODCacheStaleAge sets how long a cached file can go unaccessed before cleanup.
+func (sm *SessionManager) SetVODCacheStaleAge(d time.Duration) {
+	sm.vodCacheStaleAge = d
+}
+
+// cleanupStaleVODFiles deletes cached VOD files (and their DB rows) that have
+// not been accessed within vodCacheStaleAge. In-progress downloads are skipped.
+func (sm *SessionManager) cleanupStaleVODFiles() {
+	threshold := time.Now().Add(-sm.vodCacheStaleAge)
+	entries, err := sm.db.GetStaleVODCache(threshold)
+	if err != nil {
+		utils.ErrorLog("Failed to query stale VOD cache: %v", err)
+		return
+	}
+	for _, e := range entries {
+		if err := os.Remove(e.FilePath); err != nil && !os.IsNotExist(err) {
+			utils.WarnLog("Could not delete stale VOD file %s: %v", e.FilePath, err)
+		}
+		if err := sm.db.DeleteVODCacheEntry(e.StreamID); err != nil {
+			utils.ErrorLog("Failed to remove stale VOD cache row for %s: %v", e.StreamID, err)
+		} else {
+			utils.InfoLog("Removed stale VOD cache entry %s (last accessed %s)", e.StreamID, e.LastAccess.Format(time.RFC3339))
+		}
+	}
 }

@@ -64,6 +64,7 @@ services:
       # VOD Caching
       USE_VOD_CACHING: "true"          # Enable on-demand VOD caching
       CACHE_FOLDER: "/cache"           # Folder to store cached VOD files
+      VOD_CACHE_STALE_HOURS: "24"      # Delete cached VOD files not accessed for this many hours
 
     volumes:
       - ss_config:/root     # Persistent configuration storage (config, state)

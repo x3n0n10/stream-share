@@ -372,7 +372,7 @@ func (c *Config) xtreamProxyCredentialsStreamHandler(ctx *gin.Context) {
 		ctx.AbortWithStatus(500)
 		return
 	}
-	c.multiplexedStream(ctx, rpURL)
+	c.xtreamStream(ctx, rpURL)
 }
 
 func (c *Config) xtreamProxyCredentialsLiveStreamHandler(ctx *gin.Context) {
@@ -384,7 +384,7 @@ func (c *Config) xtreamProxyCredentialsLiveStreamHandler(ctx *gin.Context) {
 		ctx.AbortWithStatus(500)
 		return
 	}
-	c.multiplexedStream(ctx, rpURL)
+	c.xtreamStream(ctx, rpURL)
 }
 
 func (c *Config) xtreamProxyCredentialsMovieStreamHandler(ctx *gin.Context) {

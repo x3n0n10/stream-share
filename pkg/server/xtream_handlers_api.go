@@ -144,7 +144,7 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
         }
 
         utils.InfoLog("Action\tlogin (local) requested by %s", ctx.ClientIP())
-        if config.CacheFolder != "" {
+        if config.CacheFolder != "" && utils.IsDebugLogEnabled() {
             readableJSON, _ := json.Marshal(loginResp)
             filename := fmt.Sprintf("login_%s.json", time.Now().Format("20060102_150405"))
             utils.WriteResponseToFile(filename, readableJSON, "application/json")
@@ -179,7 +179,7 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
     utils.InfoLog("Action\t%s requested by %s", action, ctx.ClientIP())
     processedResp := xproc.ProcessResponse(resp)
 
-    if config.CacheFolder != "" {
+    if config.CacheFolder != "" && utils.IsDebugLogEnabled() {
         readableJSON, _ := json.Marshal(processedResp)
         filename := fmt.Sprintf("%s_%s.json", action, time.Now().Format("20060102_150405"))
         utils.WriteResponseToFile(filename, readableJSON, contentType)

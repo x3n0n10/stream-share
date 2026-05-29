@@ -52,16 +52,20 @@ func (c *Config) xtreamGetAuto(ctx *gin.Context) {
 
 // xtreamGet proxies get.php, caching the M3U on disk and guarding empty results.
 func (c *Config) xtreamGet(ctx *gin.Context) {
-    utils.DebugLog("Xtream backend request using Xtream credentials: user=%s, password=%s, baseURL=%s", c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL)
-    rawURL := fmt.Sprintf("%s/get.php?username=%s&password=%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword)
+    utils.DebugLog("Xtream backend request: user=%s, baseURL=%s", c.XtreamUser.String(), c.XtreamBaseURL)
 
-    q := ctx.Request.URL.Query()
-    for k, v := range q {
+    upstreamQ := url.Values{}
+    upstreamQ.Set("username", c.XtreamUser.String())
+    upstreamQ.Set("password", c.XtreamPassword.String())
+    for k, vals := range ctx.Request.URL.Query() {
         if k == "username" || k == "password" {
             continue
         }
-        rawURL = fmt.Sprintf("%s&%s=%s", rawURL, k, strings.Join(v, ","))
+        for _, v := range vals {
+            upstreamQ.Add(k, v)
+        }
     }
+    rawURL := c.XtreamBaseURL + "/get.php?" + upstreamQ.Encode()
 
     m3uURL, err := url.Parse(rawURL)
     if err != nil {

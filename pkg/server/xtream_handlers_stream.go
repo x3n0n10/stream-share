@@ -191,9 +191,13 @@ func (c *Config) xtreamStreamMovieWithCache(ctx *gin.Context) {
 			}
 		}
 		// Not cached yet: auto-start 7-day caching in background
-		// Determine extension from cached M3U if available, fallback to .mp4
+		// Use the extension from the request if present; only fall back to the
+		// M3U cache lookup and then a hardcoded default when the client omitted it.
 		basePath := "movie"
-		resolvedExt := c.findVODExtensionInCache(basePath, idRaw)
+		resolvedExt := path.Ext(id)
+		if resolvedExt == "" {
+			resolvedExt = c.findVODExtensionInCache(basePath, idRaw)
+		}
 		finalID := idRaw
 		if resolvedExt == "" {
 			resolvedExt = ".mp4"
@@ -300,7 +304,10 @@ func (c *Config) xtreamStreamSeriesWithCache(ctx *gin.Context) {
 		}
 		// Not cached yet: auto-start 7-day caching in background
 		basePath := "series"
-		resolvedExt := c.findVODExtensionInCache(basePath, idRaw)
+		resolvedExt := path.Ext(id)
+		if resolvedExt == "" {
+			resolvedExt = c.findVODExtensionInCache(basePath, idRaw)
+		}
 		finalID := idRaw
 		if resolvedExt == "" {
 			resolvedExt = ".mkv"
@@ -445,7 +452,10 @@ func (c *Config) xtreamProxyCredentialsMovieStreamHandlerWithCache(ctx *gin.Cont
 		}
 		// Auto-start caching
 		basePath := "movie"
-		resolvedExt := c.findVODExtensionInCache(basePath, idRaw)
+		resolvedExt := path.Ext(id)
+		if resolvedExt == "" {
+			resolvedExt = c.findVODExtensionInCache(basePath, idRaw)
+		}
 		finalID := idRaw
 		if resolvedExt == "" {
 			resolvedExt = ".mp4"
@@ -551,7 +561,10 @@ func (c *Config) xtreamProxyCredentialsSeriesStreamHandlerWithCache(ctx *gin.Con
 			}
 		}
 		basePath := "series"
-		resolvedExt := c.findVODExtensionInCache(basePath, idRaw)
+		resolvedExt := path.Ext(id)
+		if resolvedExt == "" {
+			resolvedExt = c.findVODExtensionInCache(basePath, idRaw)
+		}
 		finalID := idRaw
 		if resolvedExt == "" {
 			resolvedExt = ".mkv"

@@ -21,6 +21,7 @@ package database
 import (
     "database/sql"
     "fmt"
+    "time"
 
     "github.com/lucasduport/stream-share/pkg/types"
     "github.com/lucasduport/stream-share/pkg/utils"
@@ -78,6 +79,32 @@ func (m *DBManager) CleanupExpiredCache() (int64, error) {
     n, _ := res.RowsAffected()
     if n > 0 { utils.InfoLog("Cleaned up %d expired vod_cache entries", n) }
     return n, nil
+}
+
+// GetStaleVODCache returns ready entries whose last_access is older than threshold.
+// In-progress downloads (status != 'ready') are excluded.
+func (m *DBManager) GetStaleVODCache(threshold time.Time) ([]types.VODCacheEntry, error) {
+    if m == nil || m.db == nil { return nil, fmt.Errorf("database not initialized") }
+    rows, err := m.db.Query(`SELECT stream_id, type, title, series_title, season, episode, file_path, requested_by, downloaded_bytes, total_bytes, size_bytes, status, created_at, expires_at, last_access
+        FROM vod_cache WHERE status = 'ready' AND last_access < $1`, threshold)
+    if err != nil { return nil, err }
+    defer rows.Close()
+    var list []types.VODCacheEntry
+    for rows.Next() {
+        var e types.VODCacheEntry
+        if err := rows.Scan(&e.StreamID, &e.Type, &e.Title, &e.SeriesTitle, &e.Season, &e.Episode, &e.FilePath, &e.RequestedBy, &e.DownloadedBytes, &e.TotalBytes, &e.SizeBytes, &e.Status, &e.CreatedAt, &e.ExpiresAt, &e.LastAccess); err != nil {
+            return nil, err
+        }
+        list = append(list, e)
+    }
+    return list, nil
+}
+
+// DeleteVODCacheEntry removes a single cache row by stream ID.
+func (m *DBManager) DeleteVODCacheEntry(streamID string) error {
+    if m == nil || m.db == nil { return fmt.Errorf("database not initialized") }
+    _, err := m.db.Exec(`DELETE FROM vod_cache WHERE stream_id = $1`, streamID)
+    return err
 }
 
 // ListVODCache returns non-expired cache entries ordered by soonest expiry first. If limit<=0, returns all.

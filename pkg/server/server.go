@@ -157,6 +157,14 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 				utils.WarnLog("Invalid VOD_CACHE_STALE_HOURS: %s", v)
 			}
 		}
+		if v := os.Getenv("MULTIPLEX_STALL_TIMEOUT_SECONDS"); v != "" {
+			if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+				serverConfig.sessionManager.SetClientStallTimeout(time.Duration(secs) * time.Second)
+				utils.InfoLog("Multiplex client stall timeout set to %d seconds", secs)
+			} else {
+				utils.WarnLog("Invalid MULTIPLEX_STALL_TIMEOUT_SECONDS: %s", v)
+			}
+		}
 	}
 
 	// Initialize Discord bot if token is provided
@@ -494,13 +502,15 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 		utils.WarnLog("Multiplex: buffer returned is NIL for streamID=%s (user=%s)", streamID, username)
 	}
 
-	// Get the channel for this client
+	// Get the data channel and termination signal for this client
 	dataChan, exists := c.sessionManager.GetClientChannel(streamID, username)
 	if !exists {
 		utils.ErrorLog("Failed to get client channel for user=%s, streamID=%s", username, streamID)
 		ctx.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
+	doneChan, _ := c.sessionManager.GetClientDone(streamID, username)
+	clientGone := ctx.Request.Context().Done()
 
 	// Set content-type and disable intermediary buffering
 	setNoBufferingHeaders(ctx, contentTypeForPath(targetURL.Path))
@@ -509,28 +519,31 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	utils.InfoLog("Starting multiplexed stream for user %s (stream %s)", username, streamID)
 
 	ctx.Stream(func(w io.Writer) bool {
-		// Wait for data from channel
-		data, ok := <-dataChan
-		if !ok {
-			// Channel closed, end streaming
-			utils.DebugLog("Stream channel closed for user %s (stream %s)", username, streamID)
+		select {
+		case data, ok := <-dataChan:
+			if !ok {
+				utils.DebugLog("Stream channel closed for user %s (stream %s)", username, streamID)
+				return false
+			}
+			if _, err := w.Write(data); err != nil {
+				// Client disconnected
+				utils.DebugLog("Client write error for user %s (stream %s): %v", username, streamID, err)
+				return false
+			}
+			// Force immediate delivery to client to avoid periodic buffering
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			return true
+		case <-doneChan:
+			// Pump dropped this client (slow viewer) or the stream stopped
+			utils.DebugLog("Stream done signal for user %s (stream %s)", username, streamID)
+			return false
+		case <-clientGone:
+			// Client closed the connection while we were waiting for data
+			utils.DebugLog("Client disconnected (idle) for user %s (stream %s)", username, streamID)
 			return false
 		}
-
-		// Write data to client
-		if _, err := w.Write(data); err != nil {
-			// Client disconnected
-			utils.DebugLog("Client write error for user %s (stream %s): %v", username, streamID, err)
-			c.sessionManager.RemoveClient(streamID, username)
-			return false
-		}
-
-		// Force immediate delivery to client to avoid periodic buffering
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-
-		return true
 	})
 
 	// Clean up after streaming is done

@@ -60,6 +60,7 @@ services:
       SESSION_TIMEOUT_MINUTES: "30"    # User session timeout in minutes
       STREAM_TIMEOUT_MINUTES: "2"      # Stream timeout (after all users disconnect)
       TEMP_LINK_HOURS: "24"            # Temporary download link expiration in hours
+      MULTIPLEX_STALL_TIMEOUT_SECONDS: "30"  # Drop a multiplexed viewer whose buffer stalls this long (protects co-viewers)
 
       # VOD Caching
       USE_VOD_CACHING: "true"          # Enable on-demand VOD caching

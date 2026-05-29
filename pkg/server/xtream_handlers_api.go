@@ -34,7 +34,6 @@ import (
     "github.com/lucasduport/stream-share/pkg/config"
     "github.com/lucasduport/stream-share/pkg/utils"
     xtreamapi "github.com/lucasduport/stream-share/pkg/xtream"
-    xproc "github.com/lucasduport/stream-share/pkg/xtream"
 )
 
 // xtreamGetAuto forwards get.php with non-credential query params preserved.
@@ -82,7 +81,7 @@ func (c *Config) xtreamGet(ctx *gin.Context) {
             return
         }
         if len(playlist.Tracks) == 0 {
-            _ = ctx.AbortWithError(http.StatusBadGateway, utils.PrintErrorAndReturn(fmt.Errorf("Xtream backend returned empty playlist")))
+            _ = ctx.AbortWithError(http.StatusBadGateway, utils.PrintErrorAndReturn(fmt.Errorf("empty playlist returned by Xtream backend")))
             return
         }
         if err := c.cacheXtreamM3u(&playlist, m3uURL.String()); err != nil {
@@ -110,7 +109,7 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 
     if strings.TrimSpace(action) == "" {
         protocol := "http"
-        if c.ProxyConfig.HTTPS {
+        if c.HTTPS {
             protocol = "https"
         }
         now := time.Now()
@@ -167,17 +166,17 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 
     if contentType == "application/json" {
         if s, ok := resp.(string); ok && strings.TrimSpace(s) == "" {
-            _ = ctx.AbortWithError(http.StatusBadGateway, utils.PrintErrorAndReturn(fmt.Errorf("Xtream backend returned empty JSON response for action: %s", action)))
+            _ = ctx.AbortWithError(http.StatusBadGateway, utils.PrintErrorAndReturn(fmt.Errorf("empty JSON response from Xtream backend for action: %s", action)))
             return
         }
         if b, ok := resp.([]byte); ok && len(bytes.TrimSpace(b)) == 0 {
-            _ = ctx.AbortWithError(http.StatusBadGateway, utils.PrintErrorAndReturn(fmt.Errorf("Xtream backend returned empty JSON response for action: %s", action)))
+            _ = ctx.AbortWithError(http.StatusBadGateway, utils.PrintErrorAndReturn(fmt.Errorf("empty JSON response from Xtream backend for action: %s", action)))
             return
         }
     }
 
     utils.InfoLog("Action\t%s requested by %s", action, ctx.ClientIP())
-    processedResp := xproc.ProcessResponse(resp)
+    processedResp := xtreamapi.ProcessResponse(resp)
 
     if config.CacheFolder != "" && utils.IsDebugLogEnabled() {
         readableJSON, _ := json.Marshal(processedResp)

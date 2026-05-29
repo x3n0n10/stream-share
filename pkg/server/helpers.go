@@ -141,7 +141,7 @@ func serveLocalFileRange(ctx *gin.Context, filePath string, contentType string, 
         ctx.Status(http.StatusInternalServerError)
         return
     }
-    defer f.Close()
+    defer func() { _ = f.Close() }()
 
     size := fi.Size()
     modTime := fi.ModTime()

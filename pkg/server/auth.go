@@ -92,16 +92,16 @@ func (c *Config) authenticate(ctx *gin.Context) {
     }
 
     // Only use LDAP authentication to validate client access
-    if c.ProxyConfig.LDAPEnabled {
+    if c.LDAPEnabled {
         utils.DebugLog("LDAP authentication enabled for user: %s", authReq.Username)
         ok := ldapAuthenticate(
-            c.ProxyConfig.LDAPServer,
-            c.ProxyConfig.LDAPBaseDN,
-            c.ProxyConfig.LDAPBindDN,
-            c.ProxyConfig.LDAPBindPassword,
-            c.ProxyConfig.LDAPUserAttribute,
-            c.ProxyConfig.LDAPGroupAttribute,
-            c.ProxyConfig.LDAPRequiredGroup,
+            c.LDAPServer,
+            c.LDAPBaseDN,
+            c.LDAPBindDN,
+            c.LDAPBindPassword,
+            c.LDAPUserAttribute,
+            c.LDAPGroupAttribute,
+            c.LDAPRequiredGroup,
             authReq.Username,
             authReq.Password,
         )
@@ -116,7 +116,7 @@ func (c *Config) authenticate(ctx *gin.Context) {
 
     // If LDAP is not enabled, fallback to local credentials
     utils.DebugLog("Local authentication for user: %s", authReq.Username)
-    if c.ProxyConfig.User.String() != authReq.Username || c.ProxyConfig.Password.String() != authReq.Password {
+    if c.User.String() != authReq.Username || c.Password.String() != authReq.Password {
         utils.DebugLog("Local authentication failed for user: %s", authReq.Username)
         ctx.AbortWithStatus(http.StatusUnauthorized)
     }
@@ -145,16 +145,16 @@ func (c *Config) appAuthenticate(ctx *gin.Context) {
     log.Printf("[stream-share] %v | %s |App Auth\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP())
 
     // Use LDAP authentication if enabled
-    if c.ProxyConfig.LDAPEnabled {
+    if c.LDAPEnabled {
         utils.DebugLog("LDAP app authentication for user: %s", q["username"][0])
         ok := ldapAuthenticate(
-            c.ProxyConfig.LDAPServer,
-            c.ProxyConfig.LDAPBaseDN,
-            c.ProxyConfig.LDAPBindDN,
-            c.ProxyConfig.LDAPBindPassword,
-            c.ProxyConfig.LDAPUserAttribute,
-            c.ProxyConfig.LDAPGroupAttribute,
-            c.ProxyConfig.LDAPRequiredGroup,
+            c.LDAPServer,
+            c.LDAPBaseDN,
+            c.LDAPBindDN,
+            c.LDAPBindPassword,
+            c.LDAPUserAttribute,
+            c.LDAPGroupAttribute,
+            c.LDAPRequiredGroup,
             q["username"][0],
             q["password"][0],
         )
@@ -164,7 +164,7 @@ func (c *Config) appAuthenticate(ctx *gin.Context) {
             return
         }
         utils.DebugLog("LDAP app authentication succeeded for user: %s", q["username"][0])
-    } else if c.ProxyConfig.User.String() != q["username"][0] || c.ProxyConfig.Password.String() != q["password"][0] {
+    } else if c.User.String() != q["username"][0] || c.Password.String() != q["password"][0] {
         utils.DebugLog("Local app authentication failed for user: %s", q["username"][0])
         ctx.AbortWithStatus(http.StatusUnauthorized)
         return

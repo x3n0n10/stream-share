@@ -177,7 +177,7 @@ func (b *Bot) Stop() {
 	if err := b.unregisterSlashCommands(); err != nil {
 		utils.WarnLog("Failed to unregister slash commands: %v", err)
 	}
-	b.session.Close()
+	_ = b.session.Close()
 }
 
 // cleanupRoutine periodically cleans up expired data.

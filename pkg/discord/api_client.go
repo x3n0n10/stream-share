@@ -49,7 +49,7 @@ func (b *Bot) makeAPIRequest(method, endpoint string, body interface{}) (bool, i
     if err != nil {
         return false, nil, err
     }
-    defer resp.Body.Close()
+    defer func() { _ = resp.Body.Close() }()
 
     var apiResp map[string]interface{}
     if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {

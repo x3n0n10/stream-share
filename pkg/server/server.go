@@ -338,15 +338,15 @@ func (c *Config) authWithPathCredentials() gin.HandlerFunc {
 		utils.DebugLog("Path credentials auth check: username=%s, IP=%s", username, ip)
 
 		// If LDAP is enabled, authenticate against LDAP
-		if c.ProxyConfig.LDAPEnabled {
+		if c.LDAPEnabled {
 			ok := ldapAuthenticate(
-				c.ProxyConfig.LDAPServer,
-				c.ProxyConfig.LDAPBaseDN,
-				c.ProxyConfig.LDAPBindDN,
-				c.ProxyConfig.LDAPBindPassword,
-				c.ProxyConfig.LDAPUserAttribute,
-				c.ProxyConfig.LDAPGroupAttribute,
-				c.ProxyConfig.LDAPRequiredGroup,
+				c.LDAPServer,
+				c.LDAPBaseDN,
+				c.LDAPBindDN,
+				c.LDAPBindPassword,
+				c.LDAPUserAttribute,
+				c.LDAPGroupAttribute,
+				c.LDAPRequiredGroup,
 				username,
 				password,
 			)
@@ -356,7 +356,7 @@ func (c *Config) authWithPathCredentials() gin.HandlerFunc {
 				return
 			}
 			utils.DebugLog("LDAP authentication succeeded for user in path: %s", username)
-		} else if c.ProxyConfig.User.String() != username || c.ProxyConfig.Password.String() != password {
+		} else if c.User.String() != username || c.Password.String() != password {
 			utils.DebugLog("Local authentication failed for user in path: %s", username)
 			ctx.AbortWithStatus(http.StatusUnauthorized)
 			return
@@ -417,13 +417,13 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	username := ctx.GetString("username")
 	if username == "" {
-		// Try to get from path parameters
 		username = ctx.Param("username")
 	}
-
-	// If username is still empty, use a temporary random ID
 	if username == "" {
-		username = fmt.Sprintf("temp-%s", uuid.NewV4().String())
+		username = ctx.Query("username")
+	}
+	if username == "" {
+		username = ctx.ClientIP()
 	}
 
 	// Extract stream ID and type
@@ -561,7 +561,7 @@ func (c *Config) playlistInitialization() error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	return c.marshallInto(f, false)
 }
@@ -594,7 +594,7 @@ func (c *Config) marshallInto(into *os.File, xtream bool) error {
 			continue
 		}
 
-		into.WriteString(fmt.Sprintf("%s, %s\n%s\n", buffer.String(), track.Name, uri)) // nolint: errcheck
+		_, _ = fmt.Fprintf(into, "%s, %s\n%s\n", buffer.String(), track.Name, uri)
 
 		filteredTrack = append(filteredTrack, track)
 	}

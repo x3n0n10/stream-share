@@ -77,29 +77,15 @@ func (c *Config) xtreamApiGet(ctx *gin.Context) {
 
 }
 
-// Prefer multiplexed streaming if enabled via env, otherwise fall back to legacy stream
-// xtreamStream proxies a live stream directly while registering a lightweight session
-// so that Discord/status endpoints see the active viewer.
+// xtreamStream proxies a live stream through the session manager, which shares a
+// single upstream connection across all viewers of the same channel and records
+// the session so Discord/status endpoints see the active viewer. With a single
+// viewer the multiplexed path applies full back-pressure and behaves like a
+// direct proxy; additional viewers reuse the same upstream connection.
 func (c *Config) xtreamStream(ctx *gin.Context, oriURL *url.URL) {
 	utils.DebugLog("-> Xtream streaming request: %s", ctx.Request.URL.Path)
 	utils.DebugLog("-> Proxying to Xtream upstream: %s", oriURL.String())
-	if c.sessionManager != nil {
-		username := ctx.GetString("username")
-		if username == "" {
-			username = ctx.Param("username")
-		}
-		if username != "" {
-			streamIDRaw := path.Base(oriURL.Path)
-			streamIDRaw = strings.TrimSuffix(streamIDRaw, path.Ext(streamIDRaw))
-			title := streamIDRaw
-			if name, ok := c.getChannelNameByID(streamIDRaw); ok && strings.TrimSpace(name) != "" {
-				title = name
-			}
-			c.sessionManager.RegisterVODView(username, streamIDRaw, "live", title)
-			defer c.sessionManager.UnregisterVODView(username, streamIDRaw)
-		}
-	}
-	c.stream(ctx, oriURL)
+	c.multiplexedStream(ctx, oriURL)
 }
 
 func (c *Config) xtreamXMLTV(ctx *gin.Context) {

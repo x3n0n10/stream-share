@@ -39,61 +39,84 @@ import (
 //
 //	userLock → streamLock
 type SessionManager struct {
-	userSessions     map[string]*types.UserSession     // username -> session
-	streamSessions   map[string]*types.StreamSession   // streamID -> session
-	streamBuffers    map[string]*StreamBuffer          // streamID -> buffer
-	db               *database.DBManager
-	tempLinks        map[string]*types.TemporaryLink   // token -> temp link
-	userLock         sync.RWMutex
-	streamLock       sync.RWMutex
-	tempLinkLock     sync.RWMutex
+	userSessions       map[string]*types.UserSession   // username -> session
+	streamSessions     map[string]*types.StreamSession // streamID -> session
+	streamBuffers      map[string]*StreamBuffer        // streamID -> buffer
+	db                 *database.DBManager
+	tempLinks          map[string]*types.TemporaryLink // token -> temp link
+	userLock           sync.RWMutex
+	streamLock         sync.RWMutex
+	tempLinkLock       sync.RWMutex
 	cleanupInterval    time.Duration
 	sessionTimeout     time.Duration
 	streamTimeout      time.Duration
 	tempLinkTimeout    time.Duration
 	vodCacheStaleAge   time.Duration
-	httpClient       *http.Client
-	stopChan         chan struct{} // closed by Stop() to terminate background goroutines
+	clientStallTimeout time.Duration // drop a multiplexed client whose buffer stays full this long
+	httpClient         *http.Client
+	stopChan           chan struct{} // closed by Stop() to terminate background goroutines
 }
 
-// StreamBuffer handles buffering and distribution of stream data
+// Stream multiplexing tuning.
+//
+// The upstream is read once and fanned out to every client attached to the same
+// stream. Delivery is back-pressured: the pump does not advance to the next
+// upstream chunk until every client has accepted the current one (or been
+// dropped). With a single client this reproduces a direct proxy — the upstream
+// read rate is gated by how fast that client drains, so TCP back-pressure flows
+// all the way to the provider and the stream stays smooth. With multiple clients
+// the pump runs at the rate of the slowest healthy client; the per-client buffer
+// absorbs jitter, and a client that stalls longer than clientStallTimeout is
+// dropped so it cannot freeze the shared connection for everyone else.
+const (
+	streamChunkSize           = 128 * 1024       // upstream read size
+	clientBufferChunks        = 32               // per-client jitter buffer (~4MB)
+	defaultClientStallTimeout = 30 * time.Second // default for SessionManager.clientStallTimeout
+)
+
+// streamClient is a single viewer attached to a StreamBuffer.
+type streamClient struct {
+	ch       chan []byte   // buffered video chunks awaiting the HTTP writer
+	done     chan struct{} // closed once when the client leaves or is dropped
+	doneOnce sync.Once
+}
+
+// close signals the client to terminate. Safe to call multiple times and from
+// either the HTTP side (client disconnected) or the pump (slow-client drop).
+func (c *streamClient) close() {
+	c.doneOnce.Do(func() { close(c.done) })
+}
+
+// StreamBuffer fans a single upstream connection out to multiple clients.
 type StreamBuffer struct {
 	streamID    string
 	upstreamURL string
 	active      bool
 
-	// Per-client data channels and lifecycle
-	clients     map[string]chan []byte
-	clientDone  map[string]chan struct{}
+	// Attached clients, keyed by username.
+	clients     map[string]*streamClient
 	clientsLock sync.RWMutex
 
-	// Stop signal for upstream reader
+	// Stop signal for the upstream pump.
 	stopChan chan struct{}
 	stopOnce sync.Once
-
-	// Ring buffer allowing clients to read at their own pace
-	ringCap     int
-	head        uint64               // next sequence number to write
-	ring        [][]byte             // ring storage
-	bufMu       sync.Mutex
-	cond        *sync.Cond
-	clientIndex map[string]uint64 // per-client next sequence to read
 }
 
 // NewSessionManager creates a new session manager
 func NewSessionManager(db *database.DBManager) *SessionManager {
 	manager := &SessionManager{
-		userSessions:    make(map[string]*types.UserSession),
-		streamSessions:  make(map[string]*types.StreamSession),
-		streamBuffers:   make(map[string]*StreamBuffer),
-		tempLinks:       make(map[string]*types.TemporaryLink),
-		db:              db,
-		cleanupInterval:  24 * time.Hour,
-		sessionTimeout:   30 * time.Minute,
-		streamTimeout:    2 * time.Minute,
-		tempLinkTimeout:  24 * time.Hour,
-		vodCacheStaleAge: 24 * time.Hour,
-		stopChan:         make(chan struct{}),
+		userSessions:       make(map[string]*types.UserSession),
+		streamSessions:     make(map[string]*types.StreamSession),
+		streamBuffers:      make(map[string]*StreamBuffer),
+		tempLinks:          make(map[string]*types.TemporaryLink),
+		db:                 db,
+		cleanupInterval:    24 * time.Hour,
+		sessionTimeout:     30 * time.Minute,
+		streamTimeout:      2 * time.Minute,
+		tempLinkTimeout:    24 * time.Hour,
+		vodCacheStaleAge:   24 * time.Hour,
+		clientStallTimeout: defaultClientStallTimeout,
+		stopChan:           make(chan struct{}),
 		httpClient: &http.Client{
 			// No global Timeout: long-running streams must not be cut after 60s
 			Transport: &http.Transport{
@@ -117,34 +140,42 @@ func (sm *SessionManager) Stop() {
 	close(sm.stopChan)
 }
 
-// cleanupRoutine periodically removes expired sessions and links.
-// It exits when sm.stopChan is closed.
+// sessionSweepInterval controls how often idle sessions and streams are reaped.
+// It is deliberately short so a stalled viewer that halts its stream's pump
+// releases the shared upstream connection promptly (within streamTimeout of going
+// idle), rather than waiting for the daily cache sweep.
+const sessionSweepInterval = 30 * time.Second
+
+// cleanupRoutine reaps idle sessions/streams on a short cadence and expired
+// links/VOD cache on the (daily) cleanupInterval. It exits when stopChan closes.
 func (sm *SessionManager) cleanupRoutine() {
-	ticker := time.NewTicker(sm.cleanupInterval)
-	defer ticker.Stop()
+	sessionTicker := time.NewTicker(sessionSweepInterval)
+	defer sessionTicker.Stop()
+	cacheTicker := time.NewTicker(sm.cleanupInterval)
+	defer cacheTicker.Stop()
 
 	for {
 		select {
 		case <-sm.stopChan:
 			return
-		case <-ticker.C:
-		}
-		sm.cleanupExpiredSessions()
-		sm.cleanupUnusedStreams()
-
-		if sm.db != nil {
-			// Remove temporary links past their expiry date
-			if count, err := sm.db.CleanupExpiredLinks(); err != nil {
-				utils.ErrorLog("Failed to clean expired links: %v", err)
-			} else if count > 0 {
-				utils.InfoLog("Cleaned %d expired temporary links", count)
+		case <-sessionTicker.C:
+			sm.cleanupExpiredSessions()
+			sm.cleanupUnusedStreams()
+		case <-cacheTicker.C:
+			if sm.db != nil {
+				// Remove temporary links past their expiry date
+				if count, err := sm.db.CleanupExpiredLinks(); err != nil {
+					utils.ErrorLog("Failed to clean expired links: %v", err)
+				} else if count > 0 {
+					utils.InfoLog("Cleaned %d expired temporary links", count)
+				}
+				// Remove DB rows whose expires_at has passed
+				if _, err := sm.db.CleanupExpiredCache(); err != nil {
+					utils.ErrorLog("Failed to clean expired VOD cache entries: %v", err)
+				}
+				// Delete files (and their DB rows) not accessed within the stale age
+				sm.cleanupStaleVODFiles()
 			}
-			// Remove DB rows whose expires_at has passed
-			if _, err := sm.db.CleanupExpiredCache(); err != nil {
-				utils.ErrorLog("Failed to clean expired VOD cache entries: %v", err)
-			}
-			// Delete files (and their DB rows) not accessed within the stale age
-			sm.cleanupStaleVODFiles()
 		}
 	}
 }
@@ -152,15 +183,15 @@ func (sm *SessionManager) cleanupRoutine() {
 // cleanupExpiredSessions removes inactive user sessions
 func (sm *SessionManager) cleanupExpiredSessions() {
 	threshold := time.Now().Add(-sm.sessionTimeout)
-	
+
 	sm.userLock.Lock()
 	defer sm.userLock.Unlock()
-	
+
 	for username, session := range sm.userSessions {
 		if session.LastActive.Before(threshold) {
 			utils.InfoLog("Session expired for user %s (inactive since %v)",
 				username, session.LastActive)
-				
+
 			// If user was watching a stream, remove from viewers
 			if session.StreamID != "" {
 				sm.streamLock.Lock()
@@ -172,7 +203,7 @@ func (sm *SessionManager) cleanupExpiredSessions() {
 				}
 				sm.streamLock.Unlock()
 			}
-			
+
 			delete(sm.userSessions, username)
 		}
 	}
@@ -181,10 +212,10 @@ func (sm *SessionManager) cleanupExpiredSessions() {
 // cleanupUnusedStreams stops streams that have no viewers
 func (sm *SessionManager) cleanupUnusedStreams() {
 	threshold := time.Now().Add(-sm.streamTimeout)
-	
+
 	sm.streamLock.Lock()
 	defer sm.streamLock.Unlock()
-	
+
 	for streamID, session := range sm.streamSessions {
 		if session.LastRequested.Before(threshold) && session.Active {
 			utils.InfoLog("Stream %s has been inactive for %v, stopping",
@@ -198,9 +229,9 @@ func (sm *SessionManager) cleanupUnusedStreams() {
 func (sm *SessionManager) RegisterUser(username, ip, userAgent string) *types.UserSession {
 	sm.userLock.Lock()
 	defer sm.userLock.Unlock()
-	
+
 	now := time.Now()
-	
+
 	// Check if user already has a session
 	if session, exists := sm.userSessions[username]; exists {
 		session.LastActive = now
@@ -208,7 +239,7 @@ func (sm *SessionManager) RegisterUser(username, ip, userAgent string) *types.Us
 		session.UserAgent = userAgent
 		return session
 	}
-	
+
 	// Create new session
 	session := &types.UserSession{
 		Username:   username,
@@ -217,9 +248,9 @@ func (sm *SessionManager) RegisterUser(username, ip, userAgent string) *types.Us
 		IPAddress:  ip,
 		UserAgent:  userAgent,
 	}
-	
+
 	sm.userSessions[username] = session
-	
+
 	// Try to get Discord info if available
 	if sm.db != nil {
 		discordID, discordName, err := sm.db.GetDiscordByLDAPUser(username)
@@ -229,7 +260,7 @@ func (sm *SessionManager) RegisterUser(username, ip, userAgent string) *types.Us
 			utils.DebugLog("Linked Discord account %s to user %s", discordName, username)
 		}
 	}
-	
+
 	utils.InfoLog("New session registered for user %s from %s", username, ip)
 	return session
 }
@@ -266,14 +297,14 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		}
 		sm.userSessions[username] = userSession
 	}
-	
+
 	// Update user session with stream info
 	prevStreamID := userSession.StreamID
 	userSession.StreamID = streamID
 	userSession.StreamType = streamType
 	userSession.LastActive = time.Now()
 	sm.userLock.Unlock()
-	
+
 	// Handle case where user switches streams
 	if prevStreamID != "" && prevStreamID != streamID {
 		sm.streamLock.Lock()
@@ -285,49 +316,33 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		}
 		sm.streamLock.Unlock()
 	}
-	
+
 	// Check if this stream is already active
 	sm.streamLock.Lock()
 	defer sm.streamLock.Unlock()
 
 	var streamBuffer *StreamBuffer
 
-	// If this stream already exists, add the user as a viewer and start a per-client reader
+	// If this stream already exists, attach the user as an additional viewer of the
+	// shared upstream connection.
 	if existingBuffer, exists := sm.streamBuffers[streamID]; exists && existingBuffer.active {
-		utils.InfoLog("User %s joined existing stream %s", username, streamID)
+		utils.InfoLog("User %s joined existing stream %s (multiplexed)", username, streamID)
 
 		if streamSession, exists := sm.streamSessions[streamID]; exists {
 			streamSession.AddViewer(username)
 			streamSession.LastRequested = time.Now()
 		}
 
-		// Add user as a client
-		clientChan := make(chan []byte, 256)
 		existingBuffer.clientsLock.Lock()
-		if existingBuffer.clientDone == nil {
-			existingBuffer.clientDone = make(map[string]chan struct{})
-		}
-		// If the user already has a client goroutine running (reconnect), signal it to
-		// exit before installing the new entry. Without this the old goroutine leaks and
-		// its EXIT block would later delete the new client's map entries.
-		if oldDone, alreadyClient := existingBuffer.clientDone[username]; alreadyClient {
-			close(oldDone)
-			delete(existingBuffer.clientDone, username)
+		// If the user already has a client attached (reconnect), drop the old one so
+		// its HTTP handler exits cleanly before we install the replacement.
+		if old, alreadyClient := existingBuffer.clients[username]; alreadyClient {
+			old.close()
 			delete(existingBuffer.clients, username)
 			utils.InfoLog("User %s reconnected to stream %s; replaced stale client", username, streamID)
 		}
-		existingBuffer.clients[username] = clientChan
-		existingBuffer.clientDone[username] = make(chan struct{})
-		// Start client goroutine at current head
-		existingBuffer.bufMu.Lock()
-		if existingBuffer.clientIndex == nil {
-			existingBuffer.clientIndex = make(map[string]uint64)
-		}
-		existingBuffer.clientIndex[username] = existingBuffer.head
-		existingBuffer.bufMu.Unlock()
+		existingBuffer.clients[username] = newStreamClient()
 		existingBuffer.clientsLock.Unlock()
-
-		go sm.serveClient(existingBuffer, username)
 
 		return existingBuffer, nil
 	}
@@ -346,32 +361,19 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 	streamSession.AddViewer(username)
 	sm.streamSessions[streamID] = streamSession
 
-	// Create a new stream buffer
+	// Create a new stream buffer with the requesting user as the first client
 	streamBuffer = &StreamBuffer{
 		streamID:    streamID,
 		upstreamURL: upstreamURL.String(),
 		active:      true,
-		clients:     make(map[string]chan []byte),
-		clientDone:  make(map[string]chan struct{}),
+		clients:     map[string]*streamClient{username: newStreamClient()},
 		stopChan:    make(chan struct{}),
-		ringCap:     256,                         // last 256 chunks retained
-		ring:        make([][]byte, 256),         // preallocate
-		clientIndex: make(map[string]uint64),
 	}
-	streamBuffer.cond = sync.NewCond(&streamBuffer.bufMu)
-
-	// Add the requesting user as the first client
-	clientChan := make(chan []byte, 256)
-	streamBuffer.clients[username] = clientChan
-	streamBuffer.clientDone[username] = make(chan struct{})
-	streamBuffer.clientIndex[username] = 0 // will follow head as it grows
 
 	sm.streamBuffers[streamID] = streamBuffer
 
-	// Start the upstream reader goroutine
+	// Start the single upstream pump that fans out to all clients
 	go sm.streamToClients(streamBuffer, upstreamURL)
-	// Start the per-client reader
-	go sm.serveClient(streamBuffer, username)
 
 	// Record in database
 	if sm.db != nil {
@@ -388,82 +390,45 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 	return streamBuffer, nil
 }
 
-// serveClient reads from the ring buffer and sends to a specific client's channel
-func (sm *SessionManager) serveClient(buffer *StreamBuffer, username string) {
-	ch := func() chan []byte {
-		buffer.clientsLock.RLock()
-		defer buffer.clientsLock.RUnlock()
-		return buffer.clients[username]
-	}()
-	done := func() chan struct{} {
-		buffer.clientsLock.RLock()
-		defer buffer.clientsLock.RUnlock()
-		return buffer.clientDone[username]
-	}()
-
-	var next uint64
-	buffer.bufMu.Lock()
-	next = buffer.clientIndex[username]
-	buffer.bufMu.Unlock()
-
-	for {
-		// Wait for data availability or done
-		buffer.bufMu.Lock()
-		for next == buffer.head && buffer.active {
-			buffer.cond.Wait()
-		}
-		if !buffer.active {
-			buffer.bufMu.Unlock()
-			break
-		}
-		// Handle overflow: if ring wrapped and client is too far behind, fast-forward
-		if buffer.head > uint64(buffer.ringCap) && next < buffer.head-uint64(buffer.ringCap) {
-			next = buffer.head - uint64(buffer.ringCap)
-		}
-		chunk := buffer.ring[next%uint64(buffer.ringCap)]
-		next++
-		buffer.clientIndex[username] = next
-		buffer.bufMu.Unlock()
-
-		// Check if client asked to stop
-		select {
-		case <-done:
-			goto EXIT
-		default:
-		}
-
-		// Deliver chunk (block if client is slow; independent from other clients)
-		out := ch
-		if out == nil {
-			goto EXIT
-		}
-		select {
-		case out <- chunk:
-			// ok
-		case <-done:
-			goto EXIT
-		}
+// newStreamClient allocates a client with its jitter buffer and done signal.
+func newStreamClient() *streamClient {
+	return &streamClient{
+		ch:   make(chan []byte, clientBufferChunks),
+		done: make(chan struct{}),
 	}
-
-EXIT:
-	// Close the outgoing data channel to signal the HTTP writer to finish.
-	// Guard against a reconnect having replaced our map entries: only clean up if the
-	// channel currently in the map is still ours. If the user reconnected, RequestStream
-	// already removed our entries and installed new ones — leave those intact.
-	buffer.clientsLock.Lock()
-	if ch != nil {
-		if currentCh := buffer.clients[username]; currentCh == ch {
-			close(ch)
-			delete(buffer.clients, username)
-			// Do NOT close clientDone — it may have already been closed by RemoveClient
-			// or stopStream; just remove the map entry.
-			delete(buffer.clientDone, username)
-		}
-	}
-	buffer.clientsLock.Unlock()
 }
 
-// streamToClients fetches the stream from upstream and fills the ring buffer
+// deliver enqueues a chunk for one client, applying back-pressure.
+//
+// When sole is true (the only viewer) it blocks until the client accepts the
+// chunk or disconnects — reproducing a direct connection's TCP back-pressure.
+// With multiple viewers it still blocks (so the pump tracks the slowest client),
+// but a client whose buffer stays full past clientStallTimeout is dropped so it
+// cannot freeze the shared upstream for everyone else. Returns true if dropped.
+func (sm *SessionManager) deliver(buffer *StreamBuffer, cl *streamClient, chunk []byte, sole bool) (dropped bool) {
+	if sole {
+		select {
+		case cl.ch <- chunk:
+		case <-cl.done:
+		case <-buffer.stopChan:
+		}
+		return false
+	}
+	select {
+	case cl.ch <- chunk:
+		return false
+	case <-cl.done:
+		return false
+	case <-buffer.stopChan:
+		return false
+	case <-time.After(sm.clientStallTimeout):
+		cl.close()
+		return true
+	}
+}
+
+// streamToClients pumps the single upstream connection and fans each chunk out
+// to every attached client. It is the only reader of the upstream body.
 func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url.URL) {
 	utils.DebugLog("Starting stream from %s", upstreamURL.String())
 
@@ -494,7 +459,7 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 	resp, err := sm.httpClient.Do(req)
 	if err != nil {
 		utils.ErrorLog("Failed to connect to upstream: %v", err)
-		sm.stopStream(buffer.streamID)
+		sm.stopStreamLocking(buffer.streamID)
 		return
 	}
 	defer resp.Body.Close()
@@ -503,15 +468,13 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		utils.ErrorLog("Upstream returned status %d for stream %s",
 			resp.StatusCode, buffer.streamID)
-		sm.stopStream(buffer.streamID)
+		sm.stopStreamLocking(buffer.streamID)
 		return
 	}
 
-	// Stream data into ring buffer
-	buffer.active = true
-
-	const chunkSize = 128 * 1024 // was 64KB; larger chunks reduce per-write overhead
-	dataBuffer := make([]byte, chunkSize)
+	// The buffer was created active; the pump does not flip the flag itself so
+	// that every read/write of buffer.active stays under sm.streamLock.
+	dataBuffer := make([]byte, streamChunkSize)
 
 	for {
 		// Stop requested
@@ -523,38 +486,64 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 		}
 
 		n, rerr := resp.Body.Read(dataBuffer)
+		if n > 0 {
+			// Each client reads concurrently, so the chunk must be its own copy
+			// (dataBuffer is reused on the next read).
+			chunk := make([]byte, n)
+			copy(chunk, dataBuffer[:n])
+			sm.fanOut(buffer, chunk)
+
+			// Touch stream LastRequested to avoid cleanup timeout while data flows
+			sm.streamLock.Lock()
+			if ss, ok := sm.streamSessions[buffer.streamID]; ok {
+				ss.LastRequested = time.Now()
+			}
+			sm.streamLock.Unlock()
+		}
 		if rerr != nil {
 			if rerr != io.EOF && ctx.Err() == nil {
 				utils.ErrorLog("Error reading from upstream: %v", rerr)
 			}
-			sm.stopStream(buffer.streamID)
+			sm.stopStreamLocking(buffer.streamID)
 			return
 		}
-		if n <= 0 {
-			continue
-		}
-
-		// Copy to ring buffer
-		chunk := make([]byte, n)
-		copy(chunk, dataBuffer[:n])
-
-		// Append to ring and notify clients
-		buffer.bufMu.Lock()
-		buffer.ring[buffer.head%uint64(buffer.ringCap)] = chunk
-		buffer.head++
-		buffer.bufMu.Unlock()
-		buffer.cond.Broadcast()
-
-		// Touch stream LastRequested to avoid cleanup timeout while data flows
-		sm.streamLock.Lock()
-		if ss, ok := sm.streamSessions[buffer.streamID]; ok {
-			ss.LastRequested = time.Now()
-		}
-		sm.streamLock.Unlock()
 	}
 }
 
-// GetClientChannel retrieves the data channel for a specific client
+// fanOut delivers one chunk to every attached client in parallel and waits for
+// all of them to accept it (or be dropped) before returning. This is what gives
+// the pump its back-pressure: it cannot read the next upstream chunk until the
+// slowest healthy client has taken the current one.
+func (sm *SessionManager) fanOut(buffer *StreamBuffer, chunk []byte) {
+	buffer.clientsLock.RLock()
+	names := make([]string, 0, len(buffer.clients))
+	targets := make([]*streamClient, 0, len(buffer.clients))
+	for name, cl := range buffer.clients {
+		names = append(names, name)
+		targets = append(targets, cl)
+	}
+	buffer.clientsLock.RUnlock()
+
+	if len(targets) == 0 {
+		return
+	}
+	sole := len(targets) == 1
+
+	var wg sync.WaitGroup
+	for i := range targets {
+		wg.Add(1)
+		go func(name string, cl *streamClient) {
+			defer wg.Done()
+			if sm.deliver(buffer, cl, chunk, sole) {
+				utils.WarnLog("Dropping slow client %s from stream %s (buffer stalled)", name, buffer.streamID)
+				sm.RemoveClient(buffer.streamID, name)
+			}
+		}(names[i], targets[i])
+	}
+	wg.Wait()
+}
+
+// GetClientChannel retrieves the data channel for a specific client.
 func (sm *SessionManager) GetClientChannel(streamID, username string) (chan []byte, bool) {
 	sm.streamLock.RLock()
 	defer sm.streamLock.RUnlock()
@@ -567,16 +556,40 @@ func (sm *SessionManager) GetClientChannel(streamID, username string) (chan []by
 	buffer.clientsLock.RLock()
 	defer buffer.clientsLock.RUnlock()
 
-	channel, exists := buffer.clients[username]
-	return channel, exists
+	cl, exists := buffer.clients[username]
+	if !exists {
+		return nil, false
+	}
+	return cl.ch, true
 }
 
-// RemoveClient removes a client from a stream
-func (sm *SessionManager) RemoveClient(streamID, username string) {
-	sm.streamLock.Lock()
-	defer sm.streamLock.Unlock()
+// GetClientDone returns the termination signal for a specific client. The HTTP
+// handler selects on it so it exits when the pump drops the client (slow viewer)
+// or the stream stops.
+func (sm *SessionManager) GetClientDone(streamID, username string) (<-chan struct{}, bool) {
+	sm.streamLock.RLock()
+	defer sm.streamLock.RUnlock()
 
-	// Update user session
+	buffer, exists := sm.streamBuffers[streamID]
+	if !exists || !buffer.active {
+		return nil, false
+	}
+
+	buffer.clientsLock.RLock()
+	defer buffer.clientsLock.RUnlock()
+
+	cl, exists := buffer.clients[username]
+	if !exists {
+		return nil, false
+	}
+	return cl.done, true
+}
+
+// RemoveClient removes a client from a stream.
+func (sm *SessionManager) RemoveClient(streamID, username string) {
+	// Clear the user session first, then take streamLock. This respects the
+	// documented lock order (userLock → streamLock) and never holds both at
+	// once, so it cannot deadlock against cleanupExpiredSessions.
 	sm.userLock.Lock()
 	if userSession, exists := sm.userSessions[username]; exists && userSession.StreamID == streamID {
 		userSession.StreamID = ""
@@ -584,19 +597,20 @@ func (sm *SessionManager) RemoveClient(streamID, username string) {
 	}
 	sm.userLock.Unlock()
 
-	// Signal client goroutine to stop; it will close the data channel
+	sm.streamLock.Lock()
+	defer sm.streamLock.Unlock()
+
+	// Signal the client's HTTP handler to finish, then detach it.
 	buffer, exists := sm.streamBuffers[streamID]
 	if !exists {
 		return
 	}
 
 	buffer.clientsLock.Lock()
-	if d, ok := buffer.clientDone[username]; ok {
-		close(d)
-		delete(buffer.clientDone, username)
+	if cl, ok := buffer.clients[username]; ok {
+		cl.close()
+		delete(buffer.clients, username)
 	}
-	// don’t close buffer.clients[username] here; goroutine closes it
-	delete(buffer.clients, username)
 	buffer.clientsLock.Unlock()
 
 	// Remove from stream session and stop the stream if last viewer
@@ -611,7 +625,16 @@ func (sm *SessionManager) RemoveClient(streamID, username string) {
 	utils.InfoLog("User %s removed from stream %s", username, streamID)
 }
 
-// stopStream stops an active stream
+// stopStreamLocking acquires streamLock and stops the stream. Used by the
+// upstream pump goroutine, which does not otherwise hold the lock.
+func (sm *SessionManager) stopStreamLocking(streamID string) {
+	sm.streamLock.Lock()
+	defer sm.streamLock.Unlock()
+	sm.stopStream(streamID)
+}
+
+// stopStream stops an active stream and disconnects all of its clients.
+// The caller must hold sm.streamLock.
 func (sm *SessionManager) stopStream(streamID string) {
 	utils.InfoLog("Stopping stream %s", streamID)
 
@@ -620,17 +643,16 @@ func (sm *SessionManager) stopStream(streamID string) {
 		return
 	}
 
-	// Signal upstream goroutine to stop (Once prevents double-close panic)
+	// Signal the upstream pump to stop (Once prevents double-close panic)
 	buffer.stopOnce.Do(func() { close(buffer.stopChan) })
 	buffer.active = false
 
-	// Signal all clients to stop; each goroutine closes its data channel
+	// Signal every client's HTTP handler to finish
 	buffer.clientsLock.Lock()
-	for username, d := range buffer.clientDone {
-		close(d)
-		delete(buffer.clientDone, username)
+	for _, cl := range buffer.clients {
+		cl.close()
 	}
-	buffer.clients = make(map[string]chan []byte)
+	buffer.clients = make(map[string]*streamClient)
 	buffer.clientsLock.Unlock()
 
 	// Update the stream session
@@ -645,7 +667,7 @@ func (sm *SessionManager) stopStream(streamID string) {
 func (sm *SessionManager) GenerateTemporaryLink(username, streamID, title, rawURL string) (string, error) {
 	token := uuid.New().String()
 	expiresAt := time.Now().Add(sm.tempLinkTimeout)
-	
+
 	tempLink := &types.TemporaryLink{
 		Token:     token,
 		Username:  username,
@@ -654,19 +676,19 @@ func (sm *SessionManager) GenerateTemporaryLink(username, streamID, title, rawUR
 		StreamID:  streamID,
 		Title:     title,
 	}
-	
+
 	// Store in memory
 	sm.tempLinkLock.Lock()
 	sm.tempLinks[token] = tempLink
 	sm.tempLinkLock.Unlock()
-	
+
 	// Store in database if available
 	if sm.db != nil {
 		if err := sm.db.CreateTemporaryLink(token, username, rawURL, streamID, title, expiresAt); err != nil {
 			utils.ErrorLog("Failed to store temporary link in database: %v", err)
 		}
 	}
-	
+
 	utils.InfoLog("Generated temporary link for user %s, expires at %v", username, expiresAt)
 	return token, nil
 }
@@ -677,16 +699,16 @@ func (sm *SessionManager) GetTemporaryLink(token string) (*types.TemporaryLink, 
 	sm.tempLinkLock.RLock()
 	tempLink, exists := sm.tempLinks[token]
 	sm.tempLinkLock.RUnlock()
-	
+
 	if exists && time.Now().Before(tempLink.ExpiresAt) {
 		return tempLink, nil
 	}
-	
+
 	// If not in memory or expired, try the database
 	if sm.db != nil {
 		return sm.db.GetTemporaryLink(token)
 	}
-	
+
 	return nil, fmt.Errorf("temporary link not found or expired")
 }
 
@@ -694,12 +716,12 @@ func (sm *SessionManager) GetTemporaryLink(token string) (*types.TemporaryLink, 
 func (sm *SessionManager) GetAllSessions() []*types.UserSession {
 	sm.userLock.RLock()
 	defer sm.userLock.RUnlock()
-	
+
 	sessions := make([]*types.UserSession, 0, len(sm.userSessions))
 	for _, session := range sm.userSessions {
 		sessions = append(sessions, session)
 	}
-	
+
 	return sessions
 }
 
@@ -707,14 +729,14 @@ func (sm *SessionManager) GetAllSessions() []*types.UserSession {
 func (sm *SessionManager) GetAllStreams() []*types.StreamSession {
 	sm.streamLock.RLock()
 	defer sm.streamLock.RUnlock()
-	
+
 	streams := make([]*types.StreamSession, 0, len(sm.streamSessions))
 	for _, stream := range sm.streamSessions {
 		if stream.Active {
 			streams = append(streams, stream)
 		}
 	}
-	
+
 	return streams
 }
 
@@ -726,17 +748,17 @@ func (sm *SessionManager) DisconnectUser(username string) {
 		sm.userLock.Unlock()
 		return
 	}
-	
+
 	streamID := userSession.StreamID
 	userSession.StreamID = ""
 	userSession.StreamType = ""
 	sm.userLock.Unlock()
-	
+
 	// If user was watching a stream, remove them
 	if streamID != "" {
 		sm.RemoveClient(streamID, username)
 	}
-	
+
 	utils.InfoLog("User %s forcibly disconnected", username)
 }
 
@@ -789,7 +811,7 @@ func (sm *SessionManager) UnregisterVODView(username, streamID string) {
 func (sm *SessionManager) GetStreamInfo(streamID string) (*types.StreamSession, bool) {
 	sm.streamLock.RLock()
 	defer sm.streamLock.RUnlock()
-	
+
 	session, exists := sm.streamSessions[streamID]
 	return session, exists
 }
@@ -812,6 +834,14 @@ func (sm *SessionManager) SetTempLinkTimeout(timeout time.Duration) {
 // SetVODCacheStaleAge sets how long a cached file can go unaccessed before cleanup.
 func (sm *SessionManager) SetVODCacheStaleAge(d time.Duration) {
 	sm.vodCacheStaleAge = d
+}
+
+// SetClientStallTimeout sets how long the pump waits on a multiplexed client
+// whose buffer is full before dropping it (to protect the other viewers).
+func (sm *SessionManager) SetClientStallTimeout(d time.Duration) {
+	if d > 0 {
+		sm.clientStallTimeout = d
+	}
 }
 
 // cleanupStaleVODFiles deletes cached VOD files (and their DB rows) that have

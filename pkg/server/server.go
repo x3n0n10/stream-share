@@ -423,7 +423,7 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 		username = ctx.Query("username")
 	}
 	if username == "" {
-		username = fmt.Sprintf("temp-%s", uuid.NewV4().String())
+		username = ctx.ClientIP()
 	}
 
 	// Extract stream ID and type

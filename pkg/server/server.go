@@ -257,6 +257,10 @@ func (c *Config) Serve() error {
 		return err
 	}
 
+	if c.sessionManager != nil {
+		defer c.sessionManager.Stop()
+	}
+
 	// Start Discord bot if configured
 	if c.discordBot != nil {
 		utils.InfoLog("Starting Discord bot...")
@@ -398,7 +402,7 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 			_ = c.db.TouchVODCache(idRaw)
 			var ct string
 			switch ext { case ".ts": ct = "video/mp2t"; case ".mkv": ct = "video/x-matroska"; case ".mp4": ct = "video/mp4"; default: ct = "application/octet-stream" }
-			serveLocalFileRange(ctx, entry.FilePath, ct, tempLink.Title+ext, true)
+			serveLocalFileRange(ctx, entry.FilePath, ct, sanitiseFilename(tempLink.Title)+ext, true)
 			return
 		}
 	}
@@ -407,7 +411,7 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 	targetURL, err := url.Parse(tempLink.URL)
 	if err != nil { utils.ErrorLog("Invalid URL in temporary link: %v", err); ctx.AbortWithStatus(http.StatusInternalServerError); return }
 	ext := strings.ToLower(path.Ext(targetURL.Path)); if ext == "" { ext = ".mp4" }
-	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, tempLink.Title, ext))
+	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, sanitiseFilename(tempLink.Title), ext))
 	c.stream(ctx, targetURL)
 }
 
@@ -659,4 +663,15 @@ func (c *Config) replaceURL(uri string, trackIndex int, xtream bool) (string, er
 	}
 
 	return newURL.String(), nil
+}
+
+// sanitiseFilename strips characters that are unsafe inside a quoted
+// Content-Disposition filename value, preventing header injection.
+func sanitiseFilename(name string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '"' || r == '\r' || r == '\n' || r == '\\' {
+			return '_'
+		}
+		return r
+	}, name)
 }

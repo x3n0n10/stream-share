@@ -46,7 +46,7 @@ func init() {
 		utils.InfoLog("Using API key from environment")
 	} else {
 		internalAPIKey = uuid.New().String()
-		utils.InfoLog("Generated new internal API key: %s", internalAPIKey)
+		utils.InfoLog("Generated new internal API key (set INTERNAL_API_KEY env var to pin it)")
 	}
 }
 

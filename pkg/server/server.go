@@ -149,6 +149,14 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 				utils.WarnLog("Invalid TEMP_LINK_HOURS: %s", v)
 			}
 		}
+		if v := os.Getenv("VOD_CACHE_STALE_HOURS"); v != "" {
+			if hours, err := strconv.Atoi(v); err == nil && hours > 0 {
+				serverConfig.sessionManager.SetVODCacheStaleAge(time.Duration(hours) * time.Hour)
+				utils.InfoLog("VOD cache stale age set to %d hours", hours)
+			} else {
+				utils.WarnLog("Invalid VOD_CACHE_STALE_HOURS: %s", v)
+			}
+		}
 	}
 
 	// Initialize Discord bot if token is provided

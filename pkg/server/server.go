@@ -182,7 +182,37 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		utils.InfoLog("Bootstrap: DISCORD_BOT_TOKEN not set - Discord bot is DISABLED")
 	}
 
+	// Remove debug API JSON dumps left over from previous runs when debug logging
+	// is off. These files accumulate whenever CACHE_FOLDER is set and are only
+	// useful in debug mode.
+	if !utils.IsDebugLogEnabled() {
+		if cacheDir := strings.TrimSpace(os.Getenv("CACHE_FOLDER")); cacheDir != "" {
+			cleanDebugAPIFiles(cacheDir)
+		}
+	}
+
 	return serverConfig, nil
+}
+
+// cleanDebugAPIFiles removes timestamped JSON debug dumps written by the
+// player_api handler from the cache directory. VOD media files are unaffected.
+func cleanDebugAPIFiles(cacheDir string) {
+	patterns := []string{
+		"login_????????_??????.json",
+		"get_*_????????_??????.json",
+	}
+	removed := 0
+	for _, pattern := range patterns {
+		matches, _ := filepath.Glob(filepath.Join(cacheDir, pattern))
+		for _, f := range matches {
+			if err := os.Remove(f); err == nil {
+				removed++
+			}
+		}
+	}
+	if removed > 0 {
+		utils.InfoLog("Cleaned %d debug API JSON file(s) from cache folder", removed)
+	}
 }
 
 // Serve the stream-share api

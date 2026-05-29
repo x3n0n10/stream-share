@@ -1,6 +1,6 @@
 services:
   stream-share:
-    image: lucasduport/stream-share:latest
+    image: x3n0n10/stream-share:latest
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -61,8 +61,13 @@ services:
       STREAM_TIMEOUT_MINUTES: "2"      # Stream timeout (after all users disconnect)
       TEMP_LINK_HOURS: "24"            # Temporary download link expiration in hours
 
+      # VOD Caching
+      USE_VOD_CACHING: "true"          # Enable on-demand VOD caching
+      CACHE_FOLDER: "/cache"           # Folder to store cached VOD files
+
     volumes:
       - ss_config:/root     # Persistent configuration storage (config, state)
+      - ss_cache:/cache     # VOD cache storage (movies/series)
 
     depends_on:
       - db
@@ -98,4 +103,5 @@ services:
 volumes:
   ss_config:
   ss_data:
+  ss_cache:
   postgres_data:

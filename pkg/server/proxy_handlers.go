@@ -133,7 +133,7 @@ func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
         _ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
         return
     }
-    defer resp.Body.Close()
+    defer func() { _ = resp.Body.Close() }()
 
     utils.DebugLog("-> Upstream response status: %d", resp.StatusCode)
     if resp.StatusCode == 461 {

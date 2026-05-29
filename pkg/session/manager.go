@@ -189,8 +189,8 @@ func (sm *SessionManager) cleanupExpiredSessions() {
 
 	for username, session := range sm.userSessions {
 		if session.LastActive.Before(threshold) {
-			utils.InfoLog("Session expired for user %s (inactive since %v)",
-				username, session.LastActive)
+			utils.InfoLog("Session expired for user %s (inactive for %s)",
+				username, utils.HumanDuration(time.Since(session.LastActive)))
 
 			// If user was watching a stream, remove from viewers
 			if session.StreamID != "" {
@@ -218,8 +218,8 @@ func (sm *SessionManager) cleanupUnusedStreams() {
 
 	for streamID, session := range sm.streamSessions {
 		if session.LastRequested.Before(threshold) && session.Active {
-			utils.InfoLog("Stream %s has been inactive for %v, stopping",
-				streamID, sm.streamTimeout)
+			utils.InfoLog("Stream %s has been inactive for %s, stopping",
+				streamID, utils.HumanDuration(time.Since(session.LastRequested)))
 			sm.stopStream(streamID)
 		}
 	}
@@ -462,7 +462,7 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 		sm.stopStreamLocking(buffer.streamID)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Accept 200 (expected) and 206 (some providers return it unconditionally).
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
@@ -860,7 +860,7 @@ func (sm *SessionManager) cleanupStaleVODFiles() {
 		if err := sm.db.DeleteVODCacheEntry(e.StreamID); err != nil {
 			utils.ErrorLog("Failed to remove stale VOD cache row for %s: %v", e.StreamID, err)
 		} else {
-			utils.InfoLog("Removed stale VOD cache entry %s (last accessed %s)", e.StreamID, e.LastAccess.Format(time.RFC3339))
+			utils.InfoLog("Removed stale VOD cache entry %s (last accessed %s ago)", e.StreamID, utils.HumanDuration(time.Since(e.LastAccess)))
 		}
 	}
 }

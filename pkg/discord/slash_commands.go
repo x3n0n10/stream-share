@@ -231,6 +231,6 @@ func toMessageCreateFromInteraction(i *discordgo.InteractionCreate, content stri
 
 func channelIDFromInteraction(i *discordgo.InteractionCreate) string {
     if i.ChannelID != "" { return i.ChannelID }
-    if i.Interaction != nil && i.Interaction.ChannelID != "" { return i.Interaction.ChannelID }
+    if i.Interaction != nil && i.ChannelID != "" { return i.ChannelID }
     return ""
 }

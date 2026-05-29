@@ -19,6 +19,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -218,10 +219,13 @@ func (c *Config) xtreamStreamMovieWithCache(ctx *gin.Context) {
 		if err := c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: idRaw, Type: "movie", FilePath: dest, Status: "downloading", ExpiresAt: expires, CreatedAt: time.Now()}); err != nil {
 			utils.ErrorLog("Failed to record movie cache entry for %s: %v", idRaw, err)
 		}
-		if _, loaded := c.inProgressDownloads.LoadOrStore(idRaw, struct{}{}); !loaded {
+		downloadCtx, downloadCancel := context.WithCancel(context.Background())
+		if _, loaded := c.inProgressDownloads.LoadOrStore(idRaw, downloadCancel); loaded {
+			downloadCancel() // another goroutine owns this download; discard our cancel
+		} else {
 			go func() {
 				defer c.inProgressDownloads.Delete(idRaw)
-				c.fetchToFile(upstream, dest, idRaw, expires)
+				c.fetchToFile(downloadCtx, upstream, dest, idRaw, expires)
 			}()
 		}
 		// Proxy to upstream directly: lets the IPTV server handle Content-Length, Content-Range,
@@ -229,10 +233,12 @@ func (c *Config) xtreamStreamMovieWithCache(ctx *gin.Context) {
 		// Background caching continues; once complete, future requests serve from the local file.
 		upstreamURL, upstreamErr := url.Parse(upstream)
 		if upstreamErr != nil {
+			downloadCancel()
 			_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(upstreamErr))
 			return
 		}
 		c.stream(ctx, upstreamURL)
+		downloadCancel() // viewer disconnected; free the provider connection
 		return
 	}
 	rpURL, err := url.Parse(fmt.Sprintf("%s/movie/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
@@ -327,20 +333,25 @@ func (c *Config) xtreamStreamSeriesWithCache(ctx *gin.Context) {
 		if err := c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: idRaw, Type: "series", FilePath: dest, Status: "downloading", ExpiresAt: expires, CreatedAt: time.Now()}); err != nil {
 			utils.ErrorLog("Failed to record series cache entry for %s: %v", idRaw, err)
 		}
-		if _, loaded := c.inProgressDownloads.LoadOrStore(idRaw, struct{}{}); !loaded {
+		downloadCtx, downloadCancel := context.WithCancel(context.Background())
+		if _, loaded := c.inProgressDownloads.LoadOrStore(idRaw, downloadCancel); loaded {
+			downloadCancel()
+		} else {
 			go func() {
 				defer c.inProgressDownloads.Delete(idRaw)
-				c.fetchToFile(upstream, dest, idRaw, expires)
+				c.fetchToFile(downloadCtx, upstream, dest, idRaw, expires)
 			}()
 		}
 		// Proxy to upstream directly for proper headers and native Range-seek support.
 		// Background caching continues; once complete, future requests serve from the local file.
 		upstreamURL, upstreamErr := url.Parse(upstream)
 		if upstreamErr != nil {
+			downloadCancel()
 			_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(upstreamErr))
 			return
 		}
 		c.stream(ctx, upstreamURL)
+		downloadCancel() // viewer disconnected; free the provider connection
 		return
 	}
 	rpURL, err := url.Parse(fmt.Sprintf("%s/series/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
@@ -475,20 +486,25 @@ func (c *Config) xtreamProxyCredentialsMovieStreamHandlerWithCache(ctx *gin.Cont
 		if err := c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: idRaw, Type: "movie", FilePath: dest, Status: "downloading", ExpiresAt: expires, CreatedAt: time.Now()}); err != nil {
 			utils.ErrorLog("Failed to record movie cache entry for %s: %v", idRaw, err)
 		}
-		if _, loaded := c.inProgressDownloads.LoadOrStore(idRaw, struct{}{}); !loaded {
+		downloadCtx, downloadCancel := context.WithCancel(context.Background())
+		if _, loaded := c.inProgressDownloads.LoadOrStore(idRaw, downloadCancel); loaded {
+			downloadCancel()
+		} else {
 			go func() {
 				defer c.inProgressDownloads.Delete(idRaw)
-				c.fetchToFile(upstream, dest, idRaw, expires)
+				c.fetchToFile(downloadCtx, upstream, dest, idRaw, expires)
 			}()
 		}
 		// Proxy to upstream directly for proper headers and native Range-seek support.
 		// Background caching continues; once complete, future requests serve from the local file.
 		upstreamURL, upstreamErr := url.Parse(upstream)
 		if upstreamErr != nil {
+			downloadCancel()
 			_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(upstreamErr))
 			return
 		}
 		c.stream(ctx, upstreamURL)
+		downloadCancel() // viewer disconnected; free the provider connection
 		return
 	}
 	rpURL, err := url.Parse(fmt.Sprintf("%s/movie/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
@@ -584,20 +600,25 @@ func (c *Config) xtreamProxyCredentialsSeriesStreamHandlerWithCache(ctx *gin.Con
 		if err := c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: idRaw, Type: "series", FilePath: dest, Status: "downloading", ExpiresAt: expires, CreatedAt: time.Now()}); err != nil {
 			utils.ErrorLog("Failed to record series cache entry for %s: %v", idRaw, err)
 		}
-		if _, loaded := c.inProgressDownloads.LoadOrStore(idRaw, struct{}{}); !loaded {
+		downloadCtx, downloadCancel := context.WithCancel(context.Background())
+		if _, loaded := c.inProgressDownloads.LoadOrStore(idRaw, downloadCancel); loaded {
+			downloadCancel()
+		} else {
 			go func() {
 				defer c.inProgressDownloads.Delete(idRaw)
-				c.fetchToFile(upstream, dest, idRaw, expires)
+				c.fetchToFile(downloadCtx, upstream, dest, idRaw, expires)
 			}()
 		}
 		// Proxy to upstream directly for proper headers and native Range-seek support.
 		// Background caching continues; once complete, future requests serve from the local file.
 		upstreamURL, upstreamErr := url.Parse(upstream)
 		if upstreamErr != nil {
+			downloadCancel()
 			_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(upstreamErr))
 			return
 		}
 		c.stream(ctx, upstreamURL)
+		downloadCancel() // viewer disconnected; free the provider connection
 		return
 	}
 	rpURL, err := url.Parse(fmt.Sprintf("%s/series/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))

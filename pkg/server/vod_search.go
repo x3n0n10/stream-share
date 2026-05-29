@@ -159,7 +159,7 @@ func (c *Config) searchXtreamVOD(query string) ([]types.VODResult, error) {
 					req.Header.Set("Accept", "*/*")
 					if resp, err := client.Do(req); err == nil {
 						_, _ = io.Copy(io.Discard, resp.Body)
-						resp.Body.Close()
+						_ = resp.Body.Close()
 						if cr := resp.Header.Get("Content-Range"); cr != "" {
 							if total := strings.TrimSpace(cr[strings.LastIndex(cr, "/")+1:]); total != "*" {
 								if sz, perr := parseInt64(total); perr == nil && sz > 0 {
@@ -342,11 +342,11 @@ func (c *Config) refreshVODM3U(cacheFile string) error {
 	client := &http.Client{Timeout: 6 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil { return err }
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 { return fmt.Errorf("backend returned %d for M3U request", resp.StatusCode) }
 	f, err := os.Create(cacheFile)
 	if err != nil { return err }
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if _, err := io.Copy(f, resp.Body); err != nil { return err }
 	utils.InfoLog("Stored VOD M3U to %s", cacheFile)
 	return nil
@@ -356,13 +356,13 @@ func (c *Config) refreshVODM3U(cacheFile string) error {
 func parseVODM3UExtensions(m3uPath string) (map[string]string, error) {
 	f, err := os.Open(m3uPath)
 	if err != nil { return nil, err }
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	sc := bufio.NewScanner(f)
 	idx := make(map[string]string, 4096)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") { continue }
-		if !(strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://")) { continue }
+		if !strings.HasPrefix(line, "http://") && !strings.HasPrefix(line, "https://") { continue }
 		u, err := url.Parse(line)
 		if err != nil { continue }
 		// Movie/series entries embed streamID possibly with extension as last path segment
@@ -509,7 +509,7 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 				}
 				title := fmt.Sprintf("%v", em["title"])
 				// Apply token AND match on either episode title or series name
-				if len(qTokens) > 0 && !(allTokensIn(qTokens, title) || allTokensIn(qTokens, seriesName)) { continue }
+				if len(qTokens) > 0 && !allTokensIn(qTokens, title) && !allTokensIn(qTokens, seriesName) { continue }
 				streamID := fmt.Sprintf("%v", firstNonEmpty(em["id"], em["stream_id"]))
 				if streamID == "" || streamID == "<nil>" {
 					continue

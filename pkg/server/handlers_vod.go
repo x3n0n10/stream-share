@@ -192,7 +192,7 @@ func (c *Config) enrichVODPage(ctx *gin.Context) {
 				reqHTTP.Header.Set("Accept", "*/*")
 				if resp, err := client.Do(reqHTTP); err == nil {
 					_, _ = io.Copy(io.Discard, resp.Body)
-					resp.Body.Close()
+					_ = resp.Body.Close()
 					if cr := resp.Header.Get("Content-Range"); cr != "" {
 						if total := strings.TrimSpace(cr[strings.LastIndex(cr, "/")+1:]); total != "*" {
 							if sz, perr := parseInt64(total); perr == nil && sz > 0 {
@@ -308,7 +308,7 @@ func (c *Config) createVODDownload(ctx *gin.Context) {
 
 	// Create a proxied download URL with REVERSE_PROXY behavior
 	protocol := "http"
-	if c.ProxyConfig.HTTPS { protocol = "https" }
+	if c.HTTPS { protocol = "https" }
 	hostPart := fmt.Sprintf("%s:%d", c.HostConfig.Hostname, c.HostConfig.Port)
 	rev := strings.ToLower(strings.TrimSpace(os.Getenv("REVERSE_PROXY")))
 	if rev == "1" || rev == "true" || rev == "yes" {
@@ -372,7 +372,7 @@ func (c *Config) pickVODExtension(ctx *gin.Context, basePath, streamID string) s
 			utils.DebugLog("VOD probe skipped/noisy for %s: %v", utils.MaskURL(probeURL), err)
 			continue
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		// Accept 2xx and 206
 		if (resp.StatusCode >= 200 && resp.StatusCode < 300) || resp.StatusCode == http.StatusPartialContent {
 			utils.DebugLog("VOD probe (HEAD) ok %d for %s", resp.StatusCode, utils.MaskURL(probeURL))
@@ -390,7 +390,7 @@ func (c *Config) pickVODExtension(ctx *gin.Context, basePath, streamID string) s
 			getReq.Header.Set("Range", "bytes=0-0")
 			if getResp, getErr := client.Do(getReq); getErr == nil {
 				_, _ = io.Copy(io.Discard, getResp.Body)
-				getResp.Body.Close()
+				_ = getResp.Body.Close()
 				if (getResp.StatusCode >= 200 && getResp.StatusCode < 300) || getResp.StatusCode == http.StatusPartialContent {
 					utils.DebugLog("VOD probe (GET range) ok %d for %s", getResp.StatusCode, utils.MaskURL(probeURL))
 					return ext
@@ -656,7 +656,7 @@ func (c *Config) fetchToFile(ctx context.Context, upstream, dest, streamID strin
 
 	f, err := os.Create(tmp)
 	if err != nil { utils.ErrorLog("Cache: create file error: %v", err); c.cacheFail(streamID); return }
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	const maxCacheRetries = 5
 	var downloaded, total int64
@@ -697,8 +697,8 @@ func (c *Config) fetchToFile(ctx context.Context, upstream, dest, streamID strin
 			if downloaded > 0 {
 				utils.WarnLog("Cache: provider ignored Range header, restarting download for %s", streamID)
 				downloaded = 0
-				if tErr := f.Truncate(0); tErr != nil { resp.Body.Close(); utils.ErrorLog("Cache: truncate error: %v", tErr); c.cacheFail(streamID); return }
-				if _, sErr := f.Seek(0, io.SeekStart); sErr != nil { resp.Body.Close(); utils.ErrorLog("Cache: seek error: %v", sErr); c.cacheFail(streamID); return }
+				if tErr := f.Truncate(0); tErr != nil { _ = resp.Body.Close(); utils.ErrorLog("Cache: truncate error: %v", tErr); c.cacheFail(streamID); return }
+				if _, sErr := f.Seek(0, io.SeekStart); sErr != nil { _ = resp.Body.Close(); utils.ErrorLog("Cache: seek error: %v", sErr); c.cacheFail(streamID); return }
 			}
 			if total == 0 {
 				if cl := resp.Header.Get("Content-Length"); cl != "" {
@@ -717,7 +717,7 @@ func (c *Config) fetchToFile(ctx context.Context, upstream, dest, streamID strin
 				}
 			}
 		default:
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			utils.WarnLog("Cache: upstream status %d (attempt %d)", resp.StatusCode, attempt)
 			continue
 		}
@@ -728,7 +728,7 @@ func (c *Config) fetchToFile(ctx context.Context, upstream, dest, streamID strin
 			nr, er := resp.Body.Read(buf)
 			if nr > 0 {
 				if _, ew := f.Write(buf[:nr]); ew != nil {
-					resp.Body.Close()
+					_ = resp.Body.Close()
 					utils.ErrorLog("Cache: write error: %v", ew); c.cacheFail(streamID); return
 				}
 				downloaded += int64(nr)
@@ -739,7 +739,7 @@ func (c *Config) fetchToFile(ctx context.Context, upstream, dest, streamID strin
 			}
 			if er != nil { readErr = er; break }
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		if readErr == io.EOF || (total > 0 && downloaded >= total) {
 			completed = true
@@ -791,12 +791,12 @@ func (c *Config) cacheFail(streamID string) {
 func findExtInM3U(filePath, basePath, streamID string) string {
 	f, err := os.Open(filePath)
 	if err != nil { return "" }
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") { continue }
-		if !(strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://")) { continue }
+		if !strings.HasPrefix(line, "http://") && !strings.HasPrefix(line, "https://") { continue }
 		// Quick path filter by basePath
 		if !strings.Contains(line, "/"+basePath+"/") { continue }
 		u, err := url.Parse(line)
@@ -813,7 +813,7 @@ func findExtInM3U(filePath, basePath, streamID string) string {
 func findTitleInM3U(filePath, basePath, streamID string) string {
 	f, err := os.Open(filePath)
 	if err != nil { return "" }
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	sc := bufio.NewScanner(f)
 	lastExtinf := ""
 	for sc.Scan() {
@@ -828,7 +828,7 @@ func findTitleInM3U(filePath, basePath, streamID string) string {
 			}
 			continue
 		}
-		if !(strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://")) { continue }
+		if !strings.HasPrefix(line, "http://") && !strings.HasPrefix(line, "https://") { continue }
 		if !strings.Contains(line, "/"+basePath+"/") { continue }
 		u, err := url.Parse(line)
 		if err != nil { continue }

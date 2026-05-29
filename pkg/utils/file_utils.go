@@ -85,7 +85,7 @@ func WriteResponseToFileWithOverwrite(ctx *gin.Context, resp interface{}, overwr
 			log.Printf("Error creating/opening file: %v", err)
 			return
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 
 		if _, err := file.WriteString(respString); err != nil {
 			log.Printf("Error writing to file: %v", err)

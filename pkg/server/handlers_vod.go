@@ -538,8 +538,8 @@ func (c *Config) startCache(ctx *gin.Context) {
 		_ = c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: req.StreamID, Type: t, Title: safeTitle, SeriesTitle: req.SeriesTitle, Season: req.Season, Episode: req.Episode, FilePath: filename, RequestedBy: req.Username, Status: "downloading", CreatedAt: time.Now(), ExpiresAt: expires})
 	}
 
-	// Spawn background download
-	go c.fetchToFile(upstream, filename, req.StreamID, expires)
+	// Spawn background download — explicit request, runs until completion regardless of viewer.
+	go c.fetchToFile(context.Background(), upstream, filename, req.StreamID, expires)
 
 	ctx.JSON(http.StatusOK, types.APIResponse{Success: true, Data: map[string]interface{}{
 		"cached": false,
@@ -648,8 +648,9 @@ var vodCacheClient = &http.Client{
 
 // fetchToFile downloads from upstream URL to a local file; marks DB entry ready/failed.
 // On connection drops (unexpected EOF) it retries automatically using a Range header to
-// resume from the current offset, up to maxCacheRetries times.
-func (c *Config) fetchToFile(upstream, dest, streamID string, expires time.Time) {
+// resume from the current offset, up to maxCacheRetries times. Cancelling ctx aborts the
+// download immediately, removes the partial file, and clears the DB entry.
+func (c *Config) fetchToFile(ctx context.Context, upstream, dest, streamID string, expires time.Time) {
 	utils.InfoLog("Caching start: %s -> %s", utils.MaskURL(upstream), dest)
 	tmp := dest + ".part"
 
@@ -663,6 +664,9 @@ func (c *Config) fetchToFile(upstream, dest, streamID string, expires time.Time)
 	completed := false
 
 	for attempt := 0; attempt <= maxCacheRetries; attempt++ {
+		if ctx.Err() != nil {
+			break
+		}
 		if attempt > 0 {
 			backoff := time.Duration(attempt) * 3 * time.Second
 			utils.WarnLog("Cache: connection interrupted at %s/%s, retrying in %s (attempt %d/%d)",
@@ -674,7 +678,7 @@ func (c *Config) fetchToFile(upstream, dest, streamID string, expires time.Time)
 			}
 		}
 
-		req, reqErr := http.NewRequestWithContext(context.Background(), "GET", upstream, nil)
+		req, reqErr := http.NewRequestWithContext(ctx, "GET", upstream, nil)
 		if reqErr != nil { utils.ErrorLog("Cache: failed to build request: %v", reqErr); c.cacheFail(streamID); return }
 		req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
 		if downloaded > 0 {
@@ -746,6 +750,14 @@ func (c *Config) fetchToFile(upstream, dest, streamID string, expires time.Time)
 	}
 
 	if !completed {
+		if ctx.Err() != nil {
+			utils.InfoLog("Cache: download cancelled for %s; removing partial file", streamID)
+			_ = os.Remove(tmp)
+			if c.db != nil {
+				_ = c.db.DeleteVODCacheEntry(streamID)
+			}
+			return
+		}
 		utils.ErrorLog("Cache: download failed after %d retries: %s", maxCacheRetries, utils.MaskURL(upstream))
 		c.cacheFail(streamID)
 		return

@@ -298,6 +298,15 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		if existingBuffer.clientDone == nil {
 			existingBuffer.clientDone = make(map[string]chan struct{})
 		}
+		// If the user already has a client goroutine running (reconnect), signal it to
+		// exit before installing the new entry. Without this the old goroutine leaks and
+		// its EXIT block would later delete the new client's map entries.
+		if oldDone, alreadyClient := existingBuffer.clientDone[username]; alreadyClient {
+			close(oldDone)
+			delete(existingBuffer.clientDone, username)
+			delete(existingBuffer.clients, username)
+			utils.InfoLog("User %s reconnected to stream %s; replaced stale client", username, streamID)
+		}
 		existingBuffer.clients[username] = clientChan
 		existingBuffer.clientDone[username] = make(chan struct{})
 		// Start client goroutine at current head
@@ -429,20 +438,19 @@ func (sm *SessionManager) serveClient(buffer *StreamBuffer, username string) {
 
 EXIT:
 	// Close the outgoing data channel to signal the HTTP writer to finish.
-	// Use the locally captured `ch` reference rather than a map lookup: RemoveClient
-	// deletes the entry from clients without closing, so a map lookup would miss it
-	// and the HTTP writer goroutine would block forever.
+	// Guard against a reconnect having replaced our map entries: only clean up if the
+	// channel currently in the map is still ours. If the user reconnected, RequestStream
+	// already removed our entries and installed new ones — leave those intact.
 	buffer.clientsLock.Lock()
 	if ch != nil {
-		if _, stillInMap := buffer.clients[username]; stillInMap {
+		if currentCh := buffer.clients[username]; currentCh == ch {
 			close(ch)
+			delete(buffer.clients, username)
+			// Do NOT close clientDone — it may have already been closed by RemoveClient
+			// or stopStream; just remove the map entry.
+			delete(buffer.clientDone, username)
 		}
-		// Always remove from map regardless; if already removed that is a no-op.
-		delete(buffer.clients, username)
 	}
-	// Clean up done channel entry. Do NOT close it here — it may have already been
-	// closed by RemoveClient or stopStream; just remove the map entry.
-	delete(buffer.clientDone, username)
 	buffer.clientsLock.Unlock()
 }
 

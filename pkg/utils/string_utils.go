@@ -21,6 +21,7 @@ package utils
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // MaskString masks sensitive parts of strings for logging.
@@ -44,6 +45,20 @@ func MaskURL(urlStr string) string {
 		parts[4] = MaskString(parts[4]) // Username
 	}
 	return strings.Join(parts, "/")
+}
+
+// HumanDuration formats a duration into a short, human-friendly string (e.g., "2 minutes", "3 hours").
+func HumanDuration(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%d seconds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%d minutes", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%d hours", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%d days", int(d.Hours()/24))
+	}
 }
 
 // HumanBytes formats a byte count into a short, human-friendly string (e.g., 1.2 GB)

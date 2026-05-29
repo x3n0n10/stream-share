@@ -302,7 +302,7 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		}
 
 		// Add user as a client
-		clientChan := make(chan []byte, 8) // small buffer: keeps serveClient ~1MB ahead of the HTTP writer
+		clientChan := make(chan []byte, 256)
 		existingBuffer.clientsLock.Lock()
 		if existingBuffer.clientDone == nil {
 			existingBuffer.clientDone = make(map[string]chan struct{})
@@ -361,7 +361,7 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 	streamBuffer.cond = sync.NewCond(&streamBuffer.bufMu)
 
 	// Add the requesting user as the first client
-	clientChan := make(chan []byte, 8)
+	clientChan := make(chan []byte, 256)
 	streamBuffer.clients[username] = clientChan
 	streamBuffer.clientDone[username] = make(chan struct{})
 	streamBuffer.clientIndex[username] = 0 // will follow head as it grows

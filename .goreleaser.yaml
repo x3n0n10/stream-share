@@ -21,7 +21,7 @@ archives:
   -
    format_overrides:
      - goos: windows
-       format: zip
+       formats: [ 'zip' ]
 
 release:
   github:
@@ -40,59 +40,21 @@ nfpms:
      - deb
      - rpm
 
-dockers:
-  - image_templates:
-    - "ghcr.io/x3n0n10/stream-share:{{ .Tag }}-arm64"
-    - "ghcr.io/x3n0n10/stream-share:latest-arm64"
-    - "x3n0n10/stream-share:{{ .Tag }}-arm64"
-    - "x3n0n10/stream-share:latest-arm64"
-    use: buildx
-    goos: linux
-    goarch: arm64
-    ids:
-    - stream-share
-    build_flag_templates:
-    - "--platform=linux/arm64/v8"
-    - "--label=org.opencontainers.image.created={{.Date}}"
-    - "--label=org.opencontainers.image.name={{.ProjectName}}"
-    - "--label=org.opencontainers.image.revision={{.FullCommit}}"
-    - "--label=org.opencontainers.image.version={{.Version}}"
-    skip_push: false
+dockers_v2:
+  - ids:
+      - stream-share
     dockerfile: .Dockerfile.goreleaser
-
-  - image_templates:
-    - "ghcr.io/x3n0n10/stream-share:{{ .Tag }}-amd64"
-    - "ghcr.io/x3n0n10/stream-share:latest-amd64"
-    - "x3n0n10/stream-share:{{ .Tag }}-amd64"
-    - "x3n0n10/stream-share:latest-amd64"
-    use: buildx
-    goos: linux
-    goarch: amd64
-    ids:
-    - stream-share
-    build_flag_templates:
-    - "--platform=linux/amd64"
-    - "--label=org.opencontainers.image.created={{.Date}}"
-    - "--label=org.opencontainers.image.name={{.ProjectName}}"
-    - "--label=org.opencontainers.image.revision={{.FullCommit}}"
-    - "--label=org.opencontainers.image.version={{.Version}}"
-    skip_push: false
-    dockerfile: .Dockerfile.goreleaser
-
-docker_manifests:
-  - name_template: "x3n0n10/stream-share:{{ .Tag }}"
-    image_templates:
-      - "x3n0n10/stream-share:{{ .Tag }}-amd64"
-      - "x3n0n10/stream-share:{{ .Tag }}-arm64"
-  - name_template: "x3n0n10/stream-share:latest"
-    image_templates:
-      - "x3n0n10/stream-share:latest-amd64"
-      - "x3n0n10/stream-share:latest-arm64"
-  - name_template: "ghcr.io/x3n0n10/stream-share:{{ .Tag }}"
-    image_templates:
-      - "ghcr.io/x3n0n10/stream-share:{{ .Tag }}-amd64"
-      - "ghcr.io/x3n0n10/stream-share:{{ .Tag }}-arm64"
-  - name_template: "ghcr.io/x3n0n10/stream-share:latest"
-    image_templates:
-      - "ghcr.io/x3n0n10/stream-share:latest-amd64"
-      - "ghcr.io/x3n0n10/stream-share:latest-arm64"
+    images:
+      - ghcr.io/x3n0n10/stream-share
+      - x3n0n10/stream-share
+    tags:
+      - "{{ .Tag }}"
+      - latest
+    platforms:
+      - linux/amd64
+      - linux/arm64/v8
+    labels:
+      org.opencontainers.image.created: "{{.Date}}"
+      org.opencontainers.image.name: "{{.ProjectName}}"
+      org.opencontainers.image.revision: "{{.FullCommit}}"
+      org.opencontainers.image.version: "{{.Version}}"

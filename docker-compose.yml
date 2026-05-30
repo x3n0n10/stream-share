@@ -15,6 +15,7 @@ services:
       ADVERTISED_PORT: 443             # Port to advertise in URLs (for reverse proxy)
       HOSTNAME: ""                     # Hostname to use in URLs
       REVERSE_PROXY: "true"            # Whether behind a reverse proxy (for correct URL generation)
+      PUBLIC_BASE_URL: ""              # Base URL for public-facing links, e.g. https://my.domain.com/stream-share (overrides REVERSE_PROXY heuristics)
       GIN_MODE: "release"              # Gin mode (debug or release) - read by Gin automatically if set
       HTTPS: "1"                       # Use HTTPS in generated URLs
       CUSTOM_ENDPOINT: ""              # Custom endpoint path

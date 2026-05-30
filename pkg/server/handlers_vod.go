@@ -306,27 +306,31 @@ func (c *Config) createVODDownload(ctx *gin.Context) {
 		return
 	}
 
-	// Create a proxied download URL with REVERSE_PROXY behavior
-	protocol := "http"
-	if c.HTTPS { protocol = "https" }
-	hostPart := fmt.Sprintf("%s:%d", c.HostConfig.Hostname, c.HostConfig.Port)
-	rev := strings.ToLower(strings.TrimSpace(os.Getenv("REVERSE_PROXY")))
-	if rev == "1" || rev == "true" || rev == "yes" {
-		// Reverse proxy front: prefer hostname without explicit port.
-		// If DISCORD_API_URL is set, mirror its scheme and host (which may include port if user specified it).
-		if api := strings.TrimSpace(os.Getenv("DISCORD_API_URL")); api != "" {
-			if u, err := url.Parse(api); err == nil {
-				if u.Scheme != "" { protocol = u.Scheme }
-				if u.Host != "" { hostPart = u.Host } else { hostPart = c.HostConfig.Hostname }
+	// Build the public-facing download URL.
+	// Priority: PUBLIC_BASE_URL > REVERSE_PROXY heuristics > hostname:port.
+	var downloadURL string
+	if base := strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")), "/"); base != "" {
+		downloadURL = base + "/download/" + token
+	} else {
+		protocol := "http"
+		if c.HTTPS { protocol = "https" }
+		hostPart := fmt.Sprintf("%s:%d", c.HostConfig.Hostname, c.HostConfig.Port)
+		rev := strings.ToLower(strings.TrimSpace(os.Getenv("REVERSE_PROXY")))
+		if rev == "1" || rev == "true" || rev == "yes" {
+			// Behind a reverse proxy: drop the port and optionally mirror DISCORD_API_URL's scheme/host.
+			if api := strings.TrimSpace(os.Getenv("DISCORD_API_URL")); api != "" {
+				if u, err := url.Parse(api); err == nil {
+					if u.Scheme != "" { protocol = u.Scheme }
+					if u.Host != "" { hostPart = u.Host } else { hostPart = c.HostConfig.Hostname }
+				} else {
+					hostPart = c.HostConfig.Hostname
+				}
 			} else {
 				hostPart = c.HostConfig.Hostname
 			}
-		} else {
-			// No explicit API URL; keep default hostname, no port
-			hostPart = c.HostConfig.Hostname
 		}
+		downloadURL = fmt.Sprintf("%s://%s/download/%s", protocol, hostPart, token)
 	}
-	downloadURL := fmt.Sprintf("%s://%s/download/%s", protocol, hostPart, token)
 
 	utils.InfoLog("Created VOD download link for user %s, title: %s", req.Username, req.Title)
 

@@ -26,7 +26,19 @@ import (
 )
 
 // makeAPIRequest centralizes internal API calls with auth headers and JSON handling.
+// It uses the default short-timeout client. Use makeSlowAPIRequest for endpoints that
+// may take longer (e.g. /vod/search on large libraries).
 func (b *Bot) makeAPIRequest(method, endpoint string, body interface{}) (bool, interface{}, error) {
+    return b.doAPIRequest(b.client, method, endpoint, body)
+}
+
+// makeSlowAPIRequest is like makeAPIRequest but uses a longer timeout, suitable for
+// endpoints that scan large catalogues (e.g. /vod/search, /cache/list).
+func (b *Bot) makeSlowAPIRequest(method, endpoint string, body interface{}) (bool, interface{}, error) {
+    return b.doAPIRequest(b.slowClient, method, endpoint, body)
+}
+
+func (b *Bot) doAPIRequest(client *http.Client, method, endpoint string, body interface{}) (bool, interface{}, error) {
     url := b.apiURL + "/api/internal" + endpoint
 
     var reqBody []byte
@@ -45,7 +57,7 @@ func (b *Bot) makeAPIRequest(method, endpoint string, body interface{}) (bool, i
     req.Header.Set("Content-Type", "application/json")
     req.Header.Set("X-API-Key", b.apiKey)
 
-    resp, err := b.client.Do(req)
+    resp, err := client.Do(req)
     if err != nil {
         return false, nil, err
     }

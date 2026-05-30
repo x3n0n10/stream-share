@@ -34,7 +34,8 @@ type Bot struct {
     adminRoleID     string
     apiURL          string
     apiKey          string
-    client          *http.Client
+    client          *http.Client // short timeout (10s) for quick API calls
+    slowClient      *http.Client // long timeout (90s) for catalogue-scanning endpoints
 
     cleanupInterval time.Duration
     stopChan        chan struct{} // closed by Stop() to terminate background goroutines

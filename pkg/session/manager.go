@@ -25,6 +25,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -847,6 +849,12 @@ func (sm *SessionManager) SetClientStallTimeout(d time.Duration) {
 // cleanupStaleVODFiles deletes cached VOD files (and their DB rows) that have
 // not been accessed within vodCacheStaleAge. In-progress downloads are skipped.
 func (sm *SessionManager) cleanupStaleVODFiles() {
+	cacheDir := strings.TrimSpace(os.Getenv("CACHE_FOLDER"))
+	if cacheDir == "" {
+		cacheDir = os.TempDir()
+	}
+	cacheDir = filepath.Clean(cacheDir)
+
 	threshold := time.Now().Add(-sm.vodCacheStaleAge)
 	entries, err := sm.db.GetStaleVODCache(threshold)
 	if err != nil {
@@ -854,6 +862,11 @@ func (sm *SessionManager) cleanupStaleVODFiles() {
 		return
 	}
 	for _, e := range entries {
+		// Safety: only delete files that are inside the expected cache directory.
+		if !strings.HasPrefix(filepath.Clean(e.FilePath), cacheDir+string(os.PathSeparator)) {
+			utils.WarnLog("Refusing to delete out-of-cache-dir path: %s", e.FilePath)
+			continue
+		}
 		if err := os.Remove(e.FilePath); err != nil && !os.IsNotExist(err) {
 			utils.WarnLog("Could not delete stale VOD file %s: %v", e.FilePath, err)
 		}

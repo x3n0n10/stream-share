@@ -236,6 +236,7 @@ func (b *Bot) startVODDownloadFromSelection(s *discordgo.Session, channelID, use
 		"stream_id": selectedVOD.StreamID,
 		"title":     selectedVOD.Title,
 		"type":      selectedVOD.StreamType,
+		"extension": selectedVOD.Extension,
 	}
 	success, respData, err = b.makeAPIRequest("POST", "/vod/download", downloadData)
 	if err != nil || !success {

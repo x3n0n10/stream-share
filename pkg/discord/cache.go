@@ -134,14 +134,15 @@ func (b *Bot) startVODCacheFromSelection(s *discordgo.Session, channelID, userID
     if ldapUser == "" { b.warn(channelID, "🔗 Linking Required", "Link your account with `!link <ldap_username>`. "); return }
 
     payload := map[string]interface{}{
-        "username": ldapUser,
-        "stream_id": selected.StreamID,
-        "type": selected.StreamType,
-        "title": selected.Title,
+        "username":     ldapUser,
+        "stream_id":    selected.StreamID,
+        "type":         selected.StreamType,
+        "title":        selected.Title,
         "series_title": selected.SeriesTitle,
-        "season": selected.Season,
-        "episode": selected.Episode,
-        "days": days,
+        "season":       selected.Season,
+        "episode":      selected.Episode,
+        "days":         days,
+        "extension":    selected.Extension,
     }
     ok, resp, err = b.makeAPIRequest("POST", "/cache/start", payload)
     if err != nil || !ok { b.fail(channelID, "❌ Cache Failed", fmt.Sprintf("Couldn't start caching: %v", err)); return }

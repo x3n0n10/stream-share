@@ -102,7 +102,8 @@ type VODResult struct {
 	Duration string
 	Year     string
 	Rating   string
-	StreamID string // The stream ID needed to retrieve this content
+	StreamID  string // The stream ID needed to retrieve this content
+	Extension string // Container extension from provider (e.g. ".mp4", ".mkv", ".ts")
 	// Optional size information (in bytes and human-friendly)
 	SizeBytes int64
 	Size      string

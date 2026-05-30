@@ -224,10 +224,11 @@ func (c *Config) createVODDownload(ctx *gin.Context) {
 	utils.DebugLog("API: VOD download request received")
 
 	var req struct {
-		Username string `json:"username"`
-		StreamID string `json:"stream_id"`
-		Title    string `json:"title"`
-		Type     string `json:"type"` // movie or series
+		Username  string `json:"username"`
+		StreamID  string `json:"stream_id"`
+		Title     string `json:"title"`
+		Type      string `json:"type"`      // movie or series
+		Extension string `json:"extension"` // container extension from provider, e.g. ".mp4"
 	}
 
 	if err := ctx.ShouldBindJSON(&req); err != nil {
@@ -282,13 +283,18 @@ func (c *Config) createVODDownload(ctx *gin.Context) {
 	}
 	finalID := req.StreamID
 	if path.Ext(finalID) == "" {
-		if ext := c.findVODExtensionInCache(basePath, finalID); ext != "" {
+		switch {
+		case req.Extension != "":
+			utils.DebugLog("VOD extension from request: %s%s", finalID, req.Extension)
+			finalID += req.Extension
+		case c.findVODExtensionInCache(basePath, finalID) != "":
+			ext := c.findVODExtensionInCache(basePath, finalID)
 			utils.DebugLog("VOD extension resolved from cache: %s%s", finalID, ext)
 			finalID += ext
-		} else {
+		default:
 			def := ".mp4"
 			if basePath == "series" { def = ".mkv" }
-			utils.DebugLog("VOD extension not found in cache for id=%s; defaulting to %s", finalID, def)
+			utils.DebugLog("VOD extension unknown for id=%s; defaulting to %s", finalID, def)
 			finalID += def
 		}
 	}
@@ -455,6 +461,7 @@ func (c *Config) startCache(ctx *gin.Context) {
 		Season      int    `json:"season"`
 		Episode     int    `json:"episode"`
 		Days        int    `json:"days"`
+		Extension   string `json:"extension"` // container extension from provider, e.g. ".mp4"
 	}
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		ctx.JSON(http.StatusBadRequest, types.APIResponse{Success: false, Error: "Invalid request: " + err.Error()})
@@ -496,8 +503,12 @@ func (c *Config) startCache(ctx *gin.Context) {
 	if t == "series" { basePath = "series" }
 	finalID := req.StreamID
 	if path.Ext(finalID) == "" {
-		// 1) Try to resolve from cached M3U first (movie/series)
-		if ext := c.findVODExtensionInCache(basePath, finalID); ext != "" {
+		// 1) Use extension provided by the caller (from provider API at search time)
+		if req.Extension != "" {
+			utils.DebugLog("Cache: using provided extension %s for %s", req.Extension, finalID)
+			finalID += req.Extension
+		} else if ext := c.findVODExtensionInCache(basePath, finalID); ext != "" {
+			// 2) Try to resolve from cached M3U
 			utils.DebugLog("Cache: using M3U extension %s for %s", ext, finalID)
 			finalID += ext
 		} else {

@@ -148,6 +148,7 @@ func (c *Config) searchXtreamMovies(query string) ([]types.VODResult, error) {
 	if duration == "<nil>" { duration = "" }
 		category := fmt.Sprintf("%v", m["category_name"]) // best-effort; some providers only give category_id
 
+		ext := normalizeExt(fmt.Sprintf("%v", m["container_extension"]))
 		out = append(out, types.VODResult{
 			ID:         streamID,
 			Title:      name,
@@ -157,6 +158,7 @@ func (c *Config) searchXtreamMovies(query string) ([]types.VODResult, error) {
 			Rating:     rating,
 			StreamID:   streamID,
 			StreamType: "movie",
+			Extension:  ext,
 		})
 	}
 	utils.DebugLog("Movies search: returning %d results", len(out))
@@ -446,7 +448,8 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 					rating = fmt.Sprintf("%v", firstNonEmpty(infoSub["rating"], infoSub["vote_average"]))
 				}
 
-		out = append(out, types.VODResult{
+		epExt := normalizeExt(fmt.Sprintf("%v", em["container_extension"]))
+				out = append(out, types.VODResult{
 					ID:           streamID,
 					Title:        fmt.Sprintf("%s S%02dE%02d — %s", seriesName, seasonNum, epNum, title),
 					Category:     genre,
@@ -459,6 +462,7 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 					Season:       seasonNum,
 					Episode:      epNum,
 					EpisodeTitle: title,
+					Extension:    epExt,
 				})
 		totalEps++
 			}
@@ -468,6 +472,14 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 	utils.DebugLog("Series search: returning %d results", len(out))
 	return out, nil
 }
+// normalizeExt ensures a container extension starts with "." and is non-empty.
+// Returns "" for absent or placeholder values like "<nil>".
+func normalizeExt(raw string) string {
+	if raw == "" || raw == "<nil>" { return "" }
+	if !strings.HasPrefix(raw, ".") { return "." + raw }
+	return raw
+}
+
 // firstNonEmpty returns the first non-empty/non-nil value among candidates
 func firstNonEmpty(values ...interface{}) interface{} {
 	for _, v := range values {

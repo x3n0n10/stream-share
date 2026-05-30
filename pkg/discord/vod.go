@@ -56,7 +56,7 @@ func (b *Bot) handleVOD(s *discordgo.Session, m *discordgo.MessageCreate, args [
     if ldapUser == "" { _ = editEmbed(s, loading, colorWarn, "🔗 Linking Required", "Link your account with `!link <ldap_username>`. "); return }
 
     // Search
-    ok, resp, err = b.makeAPIRequest("POST", "/vod/search", map[string]string{"username": ldapUser, "query": query})
+    ok, resp, err = b.makeSlowAPIRequest("POST", "/vod/search", map[string]string{"username": ldapUser, "query": query})
     if err != nil || !ok { _ = editEmbed(s, loading, colorError, "❌ Search Failed", "Couldn't complete search."); return }
     mp, _ := resp.(map[string]interface{})
     arr, _ := mp["results"].([]interface{})
@@ -133,7 +133,7 @@ func (b *Bot) handleVOD(s *discordgo.Session, m *discordgo.MessageCreate, args [
 
 // handleCachedList shows current cached items with time until expiry
 func (b *Bot) handleCachedList(s *discordgo.Session, m *discordgo.MessageCreate) {
-	ok, resp, err := b.makeAPIRequest("GET", "/cache/list", nil)
+	ok, resp, err := b.makeSlowAPIRequest("GET", "/cache/list", nil)
 	if err != nil || !ok {
 		b.fail(m.ChannelID, "❌ Cache List Failed", "Couldn't fetch cached items.")
 		return

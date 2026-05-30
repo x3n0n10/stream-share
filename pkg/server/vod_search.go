@@ -48,6 +48,12 @@ var (
 	vodSizeCache = make(map[string]int64) // key: streamID, value: size in bytes
 )
 
+var (
+	reSECombined = regexp.MustCompile(`\bs(\d{1,2})e(\d{1,2})\b`)
+	reSeason     = regexp.MustCompile(`\bs(\d{1,2})\b`)
+	reEpisode    = regexp.MustCompile(`\be(\d{1,2})\b`)
+)
+
 func getCachedSize(streamID string) (int64, bool) {
 	vodSizeMu.RLock()
 	defer vodSizeMu.RUnlock()
@@ -96,99 +102,14 @@ func (c *Config) searchXtreamVOD(query string) ([]types.VODResult, error) {
 		}
 	}
 
-	// Do NOT probe sizes here to keep the search ultra-fast and avoid client timeouts.
-	// We'll enrich sizes lazily per page via /vod/enrich.
-	maxProbe := 0
-	// Build an index of movie streamID -> extension from the cached VOD M3U once
-	extIndex := map[string]string{}
-	if m3uPath, err := c.ensureVODM3UCache(); err == nil {
-		if idx, err2 := parseVODM3UExtensions(m3uPath); err2 == nil {
-			extIndex = idx
-		}
-	}
-
-	// Search path no longer performs network calls for sizes; client setup kept for reference if re-enabled later.
-	client := &http.Client{Timeout: 2500 * time.Millisecond}
-
-	// Prefill sizes from cache where available
-
-	// Prefill from cache when available
+	// Prefill sizes from cache where available.
+	// Network probing is intentionally disabled here to keep searches fast;
+	// sizes are enriched lazily per page via /vod/enrich.
 	for i := range results {
 		if sz, ok := getCachedSize(results[i].StreamID); ok && sz > 0 {
 			results[i].SizeBytes = sz
 			results[i].Size = utils.HumanBytes(sz)
 		}
-	}
-	// No probing here; leave sizes empty unless present in cache
-	if maxProbe > 0 {
-		type job struct{ idx int }
-		jobs := make(chan job, maxProbe)
-		var wg sync.WaitGroup
-		mu := sync.Mutex{}
-		// Tuneable worker pool size (default 12, but at most maxProbe)
-		workers := 12
-		if workers > maxProbe { workers = maxProbe }
-		workerFn := func() {
-			defer wg.Done()
-			for {
-				j, ok := <-jobs
-				if !ok { return }
-					i := j.idx
-					streamID := results[i].StreamID
-					if streamID == "" { continue }
-					if results[i].SizeBytes > 0 { continue }
-					// Build Xtream URL with best-effort extension
-					typ := results[i].StreamType
-					if typ == "" { typ = "movie" }
-					basePath := "movie"
-					if typ == "series" { basePath = "series" }
-					finalID := streamID
-					if ext := extIndex[streamID]; ext != "" {
-						finalID = finalID + ext
-					} else if path.Ext(finalID) == "" {
-						if basePath == "series" { finalID += ".mkv" } else { finalID += ".mp4" }
-					}
-					vodURL := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
-					// GET with Range
-					req, err := http.NewRequest("GET", vodURL, nil)
-					if err != nil { continue }
-					req.Header.Set("Range", "bytes=0-0")
-					req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
-					req.Header.Set("Accept-Encoding", "identity")
-					req.Header.Set("Accept-Language", utils.GetLanguageHeader())
-					req.Header.Set("Accept", "*/*")
-					if resp, err := client.Do(req); err == nil {
-						_, _ = io.Copy(io.Discard, resp.Body)
-						_ = resp.Body.Close()
-						if cr := resp.Header.Get("Content-Range"); cr != "" {
-							if total := strings.TrimSpace(cr[strings.LastIndex(cr, "/")+1:]); total != "*" {
-								if sz, perr := parseInt64(total); perr == nil && sz > 0 {
-									mu.Lock()
-									results[i].SizeBytes = sz
-									results[i].Size = utils.HumanBytes(sz)
-									mu.Unlock()
-									setCachedSize(streamID, sz)
-									continue
-								}
-							}
-						}
-						if cl := resp.Header.Get("Content-Length"); cl != "" {
-							if sz, perr := parseInt64(cl); perr == nil && sz > 0 {
-								mu.Lock()
-								results[i].SizeBytes = sz
-								results[i].Size = utils.HumanBytes(sz)
-								mu.Unlock()
-								setCachedSize(streamID, sz)
-								continue
-							}
-						}
-					}
-			}
-		}
-		for w := 0; w < workers; w++ { wg.Add(1); go workerFn() }
-		for i := 0; i < maxProbe; i++ { jobs <- job{idx: i} }
-		close(jobs)
-		wg.Wait()
 	}
 
 	// Sort results by title for stable ordering
@@ -400,20 +321,20 @@ func parseQueryTokens(q string) (tokens []string, season, episode int) {
 	s := strings.TrimSpace(strings.ToLower(q))
 	if s == "" { return nil, 0, 0 }
 	// Find sXXeYY combined
-	if m := regexp.MustCompile(`\bs(\d{1,2})e(\d{1,2})\b`).FindStringSubmatch(s); m != nil {
+	if m := reSECombined.FindStringSubmatch(s); m != nil {
 		if v, err := strconv.Atoi(m[1]); err == nil { season = v }
 		if v, err := strconv.Atoi(m[2]); err == nil { episode = v }
 		s = strings.ReplaceAll(s, m[0], " ")
 	}
 	// Separate sXX and eYY
 	if season == 0 {
-		if m := regexp.MustCompile(`\bs(\d{1,2})\b`).FindStringSubmatch(s); m != nil {
+		if m := reSeason.FindStringSubmatch(s); m != nil {
 			if v, err := strconv.Atoi(m[1]); err == nil { season = v }
 			s = strings.ReplaceAll(s, m[0], " ")
 		}
 	}
 	if episode == 0 {
-		if m := regexp.MustCompile(`\be(\d{1,2})\b`).FindStringSubmatch(s); m != nil {
+		if m := reEpisode.FindStringSubmatch(s); m != nil {
 			if v, err := strconv.Atoi(m[1]); err == nil { episode = v }
 			s = strings.ReplaceAll(s, m[0], " ")
 		}

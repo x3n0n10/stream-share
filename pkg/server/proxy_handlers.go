@@ -32,6 +32,25 @@ import (
     "github.com/lucasduport/stream-share/pkg/utils"
 )
 
+// streamTransport is shared across all stream() calls so that TCP connections
+// are reused across requests and the dialer pool is not recreated every time.
+var streamTransport = &http.Transport{
+	Proxy: http.ProxyFromEnvironment,
+	DialContext: (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	ForceAttemptHTTP2:     false,
+	MaxIdleConns:          100,
+	MaxIdleConnsPerHost:   20,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ExpectContinueTimeout: 1 * time.Second,
+}
+
+// streamHTTPClient has no global Timeout; streams run as long as the client stays connected.
+var streamHTTPClient = &http.Client{Transport: streamTransport}
+
 // getM3U sends the proxified M3U file generated during bootstrap.
 func (c *Config) getM3U(ctx *gin.Context) {
     ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, c.M3UFileName))
@@ -53,7 +72,7 @@ func (c *Config) reverseProxy(ctx *gin.Context) {
     q.Set("password", c.XtreamPassword.String())
     rpURL.RawQuery = q.Encode()
 
-    utils.DebugLog("-> Upstream username: %s, password: %s", c.XtreamUser.String(), c.XtreamPassword.String())
+    utils.DebugLog("-> Upstream username: %s", c.XtreamUser.String())
     utils.DebugLog("-> Final upstream URL: %s", rpURL.String())
 
     c.stream(ctx, rpURL)
@@ -73,7 +92,7 @@ func (c *Config) m3u8ReverseProxy(ctx *gin.Context) {
     q.Set("password", c.XtreamPassword.String())
     rpURL.RawQuery = q.Encode()
 
-    utils.DebugLog("-> Upstream username: %s, password: %s", c.XtreamUser.String(), c.XtreamPassword.String())
+    utils.DebugLog("-> Upstream username: %s", c.XtreamUser.String())
     utils.DebugLog("-> Final upstream URL: %s", rpURL.String())
 
     c.stream(ctx, rpURL)
@@ -84,23 +103,6 @@ func (c *Config) m3u8ReverseProxy(ctx *gin.Context) {
 func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
     utils.DebugLog("-> Streaming request URL: %s", ctx.Request.URL)
     utils.DebugLog("-> Proxying to upstream URL: %s", oriURL.String())
-
-    // Configure HTTP transport suitable for long-lived streaming
-    transport := &http.Transport{
-        Proxy: http.ProxyFromEnvironment,
-        DialContext: (&net.Dialer{
-            Timeout:   30 * time.Second,
-            KeepAlive: 30 * time.Second,
-        }).DialContext,
-        ForceAttemptHTTP2:     false,
-        MaxIdleConns:          100,
-        IdleConnTimeout:       90 * time.Second,
-        TLSHandshakeTimeout:   10 * time.Second,
-        ExpectContinueTimeout: 1 * time.Second,
-    }
-
-    // No global Timeout; let the stream run as long as the client stays connected
-    client := &http.Client{Transport: transport}
 
     // Prepare the upstream request (bound to client context so it cancels if client disconnects)
     req, err := http.NewRequestWithContext(ctx.Request.Context(), "GET", oriURL.String(), nil)
@@ -127,7 +129,7 @@ func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
     }
 
     // Execute the upstream request
-    resp, err := client.Do(req)
+    resp, err := streamHTTPClient.Do(req)
     if err != nil {
         utils.DebugLog("-> Upstream request error: %v", err)
         _ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))

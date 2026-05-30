@@ -328,7 +328,7 @@ func (c *Config) createVODDownload(ctx *gin.Context) {
 	}
 	downloadURL := fmt.Sprintf("%s://%s/download/%s", protocol, hostPart, token)
 
-	utils.InfoLog("Created VOD download link for user %s, title: %s, token: %s", req.Username, req.Title, token)
+	utils.InfoLog("Created VOD download link for user %s, title: %s", req.Username, req.Title)
 
 	ctx.JSON(http.StatusOK, types.APIResponse{
 		Success: true,
@@ -461,6 +461,10 @@ func (c *Config) startCache(ctx *gin.Context) {
 		return
 	}
 	if req.StreamID == "" { ctx.JSON(http.StatusBadRequest, types.APIResponse{Success:false, Error:"stream_id is required"}); return }
+	if strings.Contains(req.StreamID, "/") || strings.Contains(req.StreamID, "..") {
+		ctx.JSON(http.StatusBadRequest, types.APIResponse{Success: false, Error: "invalid stream_id"})
+		return
+	}
 	t := strings.ToLower(strings.TrimSpace(req.Type))
 	if t != "movie" && t != "series" { t = "movie" }
 

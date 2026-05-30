@@ -180,7 +180,7 @@ func (c *Config) enrichVODPage(ctx *gin.Context) {
 				typ := req.Results[i].StreamType; if typ == "" { typ = "movie" }
 				basePath := "movie"; if typ == "series" { basePath = "series" }
 				finalID := streamID
-				if ext := extIndex[streamID]; ext != "" { finalID += ext } else if path.Ext(finalID) == "" { if basePath == "series" { finalID += ".mkv" } else { finalID += ".mp4" } }
+				if ext := extIndex[streamID]; ext != "" { finalID += ext } else if path.Ext(finalID) == "" { finalID += ".mkv" }
 				vodURL := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
 				// Range GET
 				reqHTTP, reqErr := http.NewRequest("GET", vodURL, nil)
@@ -292,8 +292,7 @@ func (c *Config) createVODDownload(ctx *gin.Context) {
 			utils.DebugLog("VOD extension resolved from cache: %s%s", finalID, ext)
 			finalID += ext
 		default:
-			def := ".mp4"
-			if basePath == "series" { def = ".mkv" }
+			def := ".mkv"
 			utils.DebugLog("VOD extension unknown for id=%s; defaulting to %s", finalID, def)
 			finalID += def
 		}
@@ -413,7 +412,7 @@ func (c *Config) pickVODExtension(ctx *gin.Context, basePath, streamID string) s
 			utils.DebugLog("VOD probe (HEAD) status %d for %s", resp.StatusCode, utils.MaskURL(probeURL))
 		}
 	}
-	return ".mp4"
+	return ".mkv"
 }
 
 // getVODRequestStatus gets the status of a VOD download request
@@ -522,7 +521,7 @@ func (c *Config) startCache(ctx *gin.Context) {
 			}
 			// 3) Still unknown? Use sane defaults without probing
 			if path.Ext(finalID) == "" {
-				def := ".mp4"; if basePath == "series" { def = ".mkv" }
+				def := ".mkv"
 				utils.DebugLog("Cache: defaulting extension %s for %s", def, finalID)
 				finalID += def
 			}
@@ -532,7 +531,7 @@ func (c *Config) startCache(ctx *gin.Context) {
 
 	// Build local filename as <id>.<ext> for consistency
 	ext := path.Ext(finalID)
-	if ext == "" { ext = ".mp4" }
+	if ext == "" { ext = ".mkv" }
 	// ensure we use the bare stream id without any accidental extension
 	idOnly := strings.TrimSuffix(req.StreamID, path.Ext(req.StreamID))
 	filename := filepath.Join(baseDir, idOnly+ext)

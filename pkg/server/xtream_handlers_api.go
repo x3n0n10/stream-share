@@ -24,7 +24,6 @@ import (
     "fmt"
     "io"
     "net/http"
-    "os"
     "net/url"
     "strconv"
     "strings"
@@ -121,13 +120,6 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
         nowUnix := strconv.FormatInt(now.Unix(), 10)
         expDate := strconv.FormatInt(now.Add(365*24*time.Hour).Unix(), 10)
 
-        // serverURL is the base URL advertised to Xtream clients for building stream URLs.
-        // PUBLIC_BASE_URL takes priority so setups with a reverse-proxy path prefix work correctly.
-        serverURL := fmt.Sprintf("%s://%s", protocol, c.HostConfig.Hostname)
-        if base := strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")), "/"); base != "" {
-            serverURL = base
-        }
-
         loginResp := map[string]interface{}{
             "user_info": map[string]interface{}{
                 "username":               c.User.String(),
@@ -143,7 +135,7 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
                 "allowed_output_formats": []string{"m3u8", "ts"},
             },
             "server_info": map[string]interface{}{
-                "url":             serverURL,
+                "url":             fmt.Sprintf("%s://%s", protocol, c.HostConfig.Hostname),
                 "port":            strconv.Itoa(c.AdvertisedPort),
                 "https_port":      strconv.Itoa(c.AdvertisedPort),
                 "server_protocol": protocol,

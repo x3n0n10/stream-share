@@ -116,6 +116,7 @@ func NewBot(token, adminRoleID, apiURL, apiKey string) (*Bot, error) {
 		apiKey:           apiKey,
 		cleanupInterval:  30 * time.Minute,
 		client:           &http.Client{Timeout: 10 * time.Second},
+		slowClient:       &http.Client{Timeout: 90 * time.Second},
 		pendingVODSelect: make(map[string]*vodSelectContext),
 		stopChan:         make(chan struct{}),
 	}

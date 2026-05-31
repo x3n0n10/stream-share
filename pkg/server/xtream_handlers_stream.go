@@ -155,10 +155,18 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 	}
 
 	startUnix, err := strconv.ParseInt(start, 10, 64)
+	var requestedTime time.Time
 	if err != nil {
-		utils.ErrorLog("Timeshift: invalid start timestamp %q: %v", start, err)
-		ctx.AbortWithStatus(http.StatusBadRequest)
-		return
+		// TiviMate uses YYYY-MM-DD:HH-MM instead of a Unix timestamp.
+		t, parseErr := time.Parse("2006-01-02:15-04", start)
+		if parseErr != nil {
+			utils.ErrorLog("Timeshift: invalid start timestamp %q (tried Unix and YYYY-MM-DD:HH-MM): %v", start, err)
+			ctx.AbortWithStatus(http.StatusBadRequest)
+			return
+		}
+		requestedTime = t
+	} else {
+		requestedTime = time.Unix(startUnix, 0)
 	}
 
 	buf := c.catchupManager.GetBuffer(id)
@@ -169,7 +177,7 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 		return
 	}
 
-	offset := buf.OffsetForTime(time.Unix(startUnix, 0))
+	offset := buf.OffsetForTime(requestedTime)
 	utils.DebugLog("Timeshift: serving stream %s from local buffer at byte offset %d", id, offset)
 	c.serveFromCatchupBuffer(ctx, buf, offset)
 }

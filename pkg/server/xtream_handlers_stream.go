@@ -29,11 +29,13 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lucasduport/stream-share/pkg/catchup"
 	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
 	xtreamapi "github.com/lucasduport/stream-share/pkg/xtream"
@@ -138,12 +140,100 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 	duration := ctx.Param("duration")
 	start := ctx.Param("start")
 	id := ctx.Param("id")
-	rpURL, err := url.Parse(fmt.Sprintf("%s/timeshift/%s/%s/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, duration, start, id))
-	if err != nil {
-		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+	utils.DebugLog("Timeshift request: duration=%s, start=%s, id=%s", duration, start, id)
+
+	// Use the upstream provider when catchup is disabled or the channel has native support.
+	if c.catchupManager == nil || !c.catchupManager.IsEnabled() || c.catchupManager.HasUpstreamCatchup(id) {
+		rpURL, err := url.Parse(fmt.Sprintf("%s/timeshift/%s/%s/%s/%s/%s",
+			c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, duration, start, id))
+		if err != nil {
+			_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+			return
+		}
+		c.stream(ctx, rpURL)
 		return
 	}
-	c.stream(ctx, rpURL)
+
+	startUnix, err := strconv.ParseInt(start, 10, 64)
+	if err != nil {
+		utils.ErrorLog("Timeshift: invalid start timestamp %q: %v", start, err)
+		ctx.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+
+	buf := c.catchupManager.GetBuffer(id)
+	if buf == nil {
+		// Channel not currently buffered (never watched in this session).
+		utils.InfoLog("Timeshift: no local buffer for stream %s (channel not watched)", id)
+		ctx.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+
+	offset := buf.OffsetForTime(time.Unix(startUnix, 0))
+	utils.DebugLog("Timeshift: serving stream %s from local buffer at byte offset %d", id, offset)
+	c.serveFromCatchupBuffer(ctx, buf, offset)
+}
+
+// serveFromCatchupBuffer streams a live buffer file to the client starting at startOffset.
+// When the reader catches up to the current write position and the stream is still live,
+// it polls until more data arrives. When the stream has stopped, it returns after the
+// last byte to signal end-of-stream to the player.
+func (c *Config) serveFromCatchupBuffer(ctx *gin.Context, buf *catchup.DiskBuffer, startOffset int64) {
+	f, err := os.Open(buf.FilePath())
+	if err != nil {
+		utils.ErrorLog("Catchup serve: failed to open buffer file: %v", err)
+		ctx.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = f.Close() }()
+
+	if _, err := f.Seek(startOffset, io.SeekStart); err != nil {
+		utils.ErrorLog("Catchup serve: failed to seek to offset %d: %v", startOffset, err)
+		ctx.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	ctx.Header("Content-Type", "video/mp2t")
+	ctx.Header("Cache-Control", "no-cache")
+	ctx.Status(http.StatusOK)
+
+	readBuf := make([]byte, 64*1024)
+	clientGone := ctx.Request.Context().Done()
+
+	for {
+		select {
+		case <-clientGone:
+			return
+		default:
+		}
+
+		n, rerr := f.Read(readBuf)
+		if n > 0 {
+			if _, werr := ctx.Writer.Write(readBuf[:n]); werr != nil {
+				return // client disconnected
+			}
+			if fl, ok := ctx.Writer.(http.Flusher); ok {
+				fl.Flush()
+			}
+		}
+		if rerr == io.EOF {
+			if buf.IsStopped() {
+				// No more data will ever be written; we're done.
+				return
+			}
+			// The live stream is still running; wait briefly for more data.
+			select {
+			case <-clientGone:
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
+			continue
+		}
+		if rerr != nil {
+			utils.DebugLog("Catchup serve: read error: %v", rerr)
+			return
+		}
+	}
 }
 
 func (c *Config) xtreamStreamMovieWithCache(ctx *gin.Context) {

@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lucasduport/stream-share/pkg/catchup"
 	"github.com/lucasduport/stream-share/pkg/database"
 	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
@@ -57,6 +58,7 @@ type SessionManager struct {
 	clientStallTimeout time.Duration // drop a multiplexed client whose buffer stays full this long
 	httpClient         *http.Client
 	stopChan           chan struct{} // closed by Stop() to terminate background goroutines
+	catchupManager     *catchup.Manager
 }
 
 // Stream multiplexing tuning.
@@ -102,6 +104,10 @@ type StreamBuffer struct {
 	// Stop signal for the upstream pump.
 	stopChan chan struct{}
 	stopOnce sync.Once
+
+	// diskBuffer writes each chunk to disk for local catchup/timeshift playback.
+	// nil when catchup is disabled or stream type is not live.
+	diskBuffer *catchup.DiskBuffer
 }
 
 // NewSessionManager creates a new session manager
@@ -372,6 +378,11 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		stopChan:    make(chan struct{}),
 	}
 
+	// Start a disk buffer for live streams so catchup/timeshift can rewind.
+	if sm.catchupManager != nil && streamType == "live" {
+		streamBuffer.diskBuffer = sm.catchupManager.StartBuffer(streamID)
+	}
+
 	sm.streamBuffers[streamID] = streamBuffer
 
 	// Start the single upstream pump that fans out to all clients
@@ -494,6 +505,14 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 			chunk := make([]byte, n)
 			copy(chunk, dataBuffer[:n])
 			sm.fanOut(buffer, chunk)
+
+			// Write to the disk buffer for catchup/timeshift playback.
+			if buffer.diskBuffer != nil {
+				if _, werr := buffer.diskBuffer.Write(chunk); werr != nil {
+					utils.WarnLog("Catchup buffer write error for stream %s: %v", buffer.streamID, werr)
+					// Non-fatal: disk errors must not kill the live stream for viewers.
+				}
+			}
 
 			// Touch stream LastRequested to avoid cleanup timeout while data flows
 			sm.streamLock.Lock()
@@ -656,6 +675,13 @@ func (sm *SessionManager) stopStream(streamID string) {
 	}
 	buffer.clients = make(map[string]*streamClient)
 	buffer.clientsLock.Unlock()
+
+	// Delete the disk buffer immediately. On Linux, open file handles held by
+	// in-flight timeshift readers keep the inode alive until they close.
+	if buffer.diskBuffer != nil {
+		sm.catchupManager.DeleteBuffer(streamID)
+		buffer.diskBuffer = nil
+	}
 
 	// Update the stream session
 	if streamSession, exists := sm.streamSessions[streamID]; exists {
@@ -844,6 +870,12 @@ func (sm *SessionManager) SetClientStallTimeout(d time.Duration) {
 	if d > 0 {
 		sm.clientStallTimeout = d
 	}
+}
+
+// SetCatchupManager wires a catchup.Manager into the session manager so that
+// live streams are buffered to disk for local timeshift playback.
+func (sm *SessionManager) SetCatchupManager(m *catchup.Manager) {
+	sm.catchupManager = m
 }
 
 // cleanupStaleVODFiles deletes cached VOD files (and their DB rows) that have

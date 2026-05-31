@@ -182,6 +182,10 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
     utils.InfoLog("Action\t%s requested by %s", action, ctx.ClientIP())
     processedResp := xtreamapi.ProcessResponse(resp)
 
+    if action == "get_live_streams" && c.catchupManager != nil && c.catchupManager.IsEnabled() {
+        processedResp = c.injectCatchupFlags(processedResp)
+    }
+
     if config.CacheFolder != "" && utils.IsDebugLogEnabled() {
         readableJSON, _ := json.Marshal(processedResp)
         filename := fmt.Sprintf("%s_%s.json", action, time.Now().Format("20060102_150405"))
@@ -205,4 +209,39 @@ func (c *Config) xtreamPlayerAPIPOST(ctx *gin.Context) {
         return
     }
     c.xtreamPlayerAPI(ctx, q)
+}
+
+// injectCatchupFlags overrides tv_archive and tv_archive_duration for every channel in
+// a get_live_streams response so that TiviMate shows the rewind UI for all channels.
+// It also records which channels have native upstream catchup support so the timeshift
+// handler can route those requests to the upstream provider instead of the local buffer.
+func (c *Config) injectCatchupFlags(resp interface{}) interface{} {
+    streams, ok := resp.([]interface{})
+    if !ok {
+        return resp
+    }
+    hours := c.catchupManager.AdvertisedHours()
+    upstreamCatchup := make(map[string]bool, len(streams))
+    for _, item := range streams {
+        m, ok := item.(map[string]interface{})
+        if !ok {
+            continue
+        }
+        streamID := fmt.Sprintf("%v", m["stream_id"])
+        if v, exists := m["tv_archive"]; exists {
+            switch vv := v.(type) {
+            case json.Number:
+                n, _ := vv.Int64()
+                upstreamCatchup[streamID] = n == 1
+            case float64:
+                upstreamCatchup[streamID] = vv == 1
+            case int:
+                upstreamCatchup[streamID] = vv == 1
+            }
+        }
+        m["tv_archive"] = 1
+        m["tv_archive_duration"] = hours
+    }
+    c.catchupManager.SetUpstreamCatchup(upstreamCatchup)
+    return streams
 }

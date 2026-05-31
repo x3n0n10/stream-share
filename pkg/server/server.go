@@ -35,6 +35,7 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/jamesnetherton/m3u"
+	"github.com/lucasduport/stream-share/pkg/catchup"
 	"github.com/lucasduport/stream-share/pkg/config"
 	"github.com/lucasduport/stream-share/pkg/database"
 	"github.com/lucasduport/stream-share/pkg/discord"
@@ -65,6 +66,7 @@ type Config struct {
 	sessionManager *session.SessionManager
 	db             *database.DBManager
 	discordBot     *discord.Bot
+	catchupManager *catchup.Manager
 
 	// inProgressDownloads guards against concurrent duplicate fetchToFile goroutines
 	inProgressDownloads sync.Map
@@ -115,6 +117,26 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	serverConfig.db = db
 	serverConfig.sessionManager = session.NewSessionManager(db)
 	utils.InfoLog("Session manager initialized with database connection")
+
+	// Initialize local catchup buffering from environment variables.
+	catchupEnabled := utils.GetEnvOrDefault("CATCHUP_ENABLED", "false") == "true"
+	catchupDir := utils.GetEnvOrDefault("CATCHUP_BUFFER_DIR", filepath.Join(os.TempDir(), "stream-share-catchup"))
+	catchupDur := 4
+	if v := os.Getenv("CATCHUP_DURATION"); v != "" {
+		if d, err := strconv.Atoi(v); err == nil && d > 0 {
+			catchupDur = d
+		} else if err != nil {
+			utils.WarnLog("Invalid CATCHUP_DURATION %q, using default %d hours", v, catchupDur)
+		}
+	}
+	serverConfig.catchupManager = catchup.New(catchupEnabled, catchupDir, catchupDur)
+	if catchupEnabled {
+		serverConfig.catchupManager.CleanupOldFiles()
+		utils.InfoLog("Catchup buffering enabled: dir=%s, duration=%dh", catchupDir, catchupDur)
+	}
+	if serverConfig.sessionManager != nil {
+		serverConfig.sessionManager.SetCatchupManager(serverConfig.catchupManager)
+	}
 
 	// After session manager init
 	if serverConfig.sessionManager == nil {
@@ -260,6 +282,7 @@ func (c *Config) Serve() error {
 	if c.sessionManager != nil {
 		defer c.sessionManager.Stop()
 	}
+	defer c.catchupManager.Cleanup()
 
 	// Start Discord bot if configured
 	if c.discordBot != nil {
@@ -310,20 +333,8 @@ func (c *Config) addProxyCredentialRoutes(router *gin.Engine) {
 	// Series
 	router.GET("/series/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsSeriesStreamHandler)
 
-	// Timeshift
-	router.GET("/timeshift/:username/:password/:duration/:start/:id", c.authWithPathCredentials(), func(ctx *gin.Context) {
-		duration := ctx.Param("duration")
-		start := ctx.Param("start")
-		id := ctx.Param("id")
-		utils.DebugLog("Timeshift request with proxy credentials: duration=%s, start=%s, id=%s", duration, start, id)
-		rpURL, err := url.Parse(fmt.Sprintf("%s/timeshift/%s/%s/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, duration, start, id))
-		if err != nil {
-			utils.ErrorLog("Failed to parse upstream URL: %v", err)
-			ctx.AbortWithStatus(http.StatusInternalServerError)
-			return
-		}
-		c.multiplexedStream(ctx, rpURL)
-	})
+	// Timeshift — delegate to xtreamStreamTimeshift for catchup routing logic.
+	router.GET("/timeshift/:username/:password/:duration/:start/:id", c.authWithPathCredentials(), c.xtreamStreamTimeshift)
 
 	utils.InfoLog("[stream-share] Routes initialized with direct stream URL support")
 }

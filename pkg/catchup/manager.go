@@ -28,6 +28,12 @@ import (
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
 
+// bufferGracePeriod is how long a stopped buffer's file is kept on disk before
+// deletion. This allows timeshift requests that arrive just after the live stream
+// ends (e.g. TiviMate closing the live connection before opening a rewind) to
+// still find and read the buffer.
+const bufferGracePeriod = 60 * time.Second
+
 // estimatedBitsBytesPerHour is used to derive maxBytes from duration in hours.
 // 10 Mbps is a reasonable upper bound for HD IPTV; users can lower CATCHUP_DURATION
 // to reduce disk usage.
@@ -42,6 +48,8 @@ type Manager struct {
 	mu              sync.RWMutex
 	buffers         map[string]*DiskBuffer
 	upstreamCatchup map[string]bool // stream_id (no extension) → true if native tv_archive=1
+
+	stopChan chan struct{}
 }
 
 // New creates a Manager. When enabled is false all methods are safe no-ops.
@@ -49,13 +57,54 @@ func New(enabled bool, dir string, duration int) *Manager {
 	if duration <= 0 {
 		duration = 4
 	}
-	return &Manager{
+	m := &Manager{
 		enabled:         enabled,
 		dir:             dir,
 		duration:        duration,
 		buffers:         make(map[string]*DiskBuffer),
 		upstreamCatchup: make(map[string]bool),
+		stopChan:        make(chan struct{}),
 	}
+	if enabled {
+		go m.cleanupGoroutine()
+	}
+	return m
+}
+
+// cleanupGoroutine periodically removes stopped buffers whose grace period has elapsed.
+func (m *Manager) cleanupGoroutine() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.stopChan:
+			return
+		case <-ticker.C:
+			m.cleanupStoppedBuffers()
+		}
+	}
+}
+
+func (m *Manager) cleanupStoppedBuffers() {
+	threshold := time.Now().Add(-bufferGracePeriod)
+
+	m.mu.Lock()
+	var toDelete []string
+	for id, buf := range m.buffers {
+		if t := buf.StoppedAt(); !t.IsZero() && t.Before(threshold) {
+			toDelete = append(toDelete, id)
+		}
+	}
+	for _, id := range toDelete {
+		buf := m.buffers[id]
+		delete(m.buffers, id)
+		if err := buf.Delete(); err != nil {
+			utils.WarnLog("Catchup: grace-period cleanup failed for stream %s: %v", id, err)
+		} else {
+			utils.InfoLog("Catchup: grace-period cleanup deleted buffer for stream %s", id)
+		}
+	}
+	m.mu.Unlock()
 }
 
 // IsEnabled reports whether local catchup buffering is active.
@@ -113,7 +162,24 @@ func (m *Manager) GetBuffer(streamID string) *DiskBuffer {
 	return m.buffers[streamID]
 }
 
-// DeleteBuffer stops the buffer for streamID and removes its file from disk.
+// StopBuffer stops writing to the buffer for streamID but keeps the file on disk
+// for bufferGracePeriod so that timeshift requests arriving just after the live
+// stream ends can still read from it. The cleanup goroutine deletes it later.
+func (m *Manager) StopBuffer(streamID string) {
+	if m == nil {
+		return
+	}
+	m.mu.RLock()
+	buf, ok := m.buffers[streamID]
+	m.mu.RUnlock()
+
+	if ok {
+		buf.Stop()
+		utils.InfoLog("Catchup: stopped writing buffer for stream %s (file kept for %s grace period)", streamID, bufferGracePeriod)
+	}
+}
+
+// DeleteBuffer stops and immediately removes the buffer file for streamID.
 // Safe to call while rewind readers hold open handles (Linux unlink semantics).
 func (m *Manager) DeleteBuffer(streamID string) {
 	if m == nil {
@@ -162,11 +228,19 @@ func (m *Manager) HasUpstreamCatchup(id string) bool {
 	return m.upstreamCatchup[bare]
 }
 
-// Cleanup stops and deletes all active buffers. Called on server shutdown.
+// Cleanup stops the background goroutine and deletes all active buffers.
+// Called on server shutdown.
 func (m *Manager) Cleanup() {
 	if m == nil {
 		return
 	}
+	// Stop the cleanup goroutine.
+	select {
+	case <-m.stopChan:
+	default:
+		close(m.stopChan)
+	}
+
 	m.mu.Lock()
 	buffers := m.buffers
 	m.buffers = make(map[string]*DiskBuffer)

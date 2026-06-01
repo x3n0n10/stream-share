@@ -136,6 +136,42 @@ func (c *Config) xtreamStreamPlay(ctx *gin.Context) {
 	c.xtreamStream(ctx, rpURL)
 }
 
+// alignTimestampToBuffer corrects a timezone-naive timestamp to UTC by trying
+// half-hour increments (covering all real-world UTC offsets) until the result
+// falls within the buffer's known UTC time range. This handles clients like
+// TiviMate that send timestamps in their local timezone without a timezone indicator.
+func alignTimestampToBuffer(t time.Time, buf *catchup.DiskBuffer) time.Time {
+	bufStart := buf.StartTime()
+	bufEnd := buf.StoppedAt()
+	if bufEnd.IsZero() {
+		bufEnd = time.Now()
+	}
+	// Allow a 1-minute slop on either side to handle sub-minute rounding.
+	lo := bufStart.Add(-time.Minute)
+	hi := bufEnd.Add(time.Minute)
+
+	if t.After(lo) && t.Before(hi) {
+		return t // already in range (timestamp was UTC or server and client share timezone)
+	}
+
+	// Try offsets from −14h to +14h in 30-minute steps (covers all IANA zones).
+	for halfHours := -28; halfHours <= 28; halfHours++ {
+		if halfHours == 0 {
+			continue
+		}
+		adjusted := t.Add(time.Duration(-halfHours) * 30 * time.Minute)
+		if adjusted.After(lo) && adjusted.Before(hi) {
+			utils.DebugLog("Timeshift: adjusted timestamp by %+.1fh to match buffer UTC range",
+				float64(-halfHours)*0.5)
+			return adjusted
+		}
+	}
+	// No offset matched — clamp to buffer start so OffsetForTime returns 0.
+	utils.DebugLog("Timeshift: could not align timestamp %s to buffer range [%s, %s]; serving from start",
+		t.UTC().Format(time.RFC3339), bufStart.UTC().Format(time.RFC3339), bufEnd.UTC().Format(time.RFC3339))
+	return bufStart
+}
+
 func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 	duration := ctx.Param("duration")
 	start := ctx.Param("start")
@@ -177,8 +213,14 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 		return
 	}
 
+	// Correct for timezone: TiviMate sends timestamps in the client's local time
+	// but the buffer's index uses UTC. Auto-detect the offset by trying half-hour
+	// increments until the timestamp falls within the buffer's known UTC range.
+	requestedTime = alignTimestampToBuffer(requestedTime, buf)
+	utils.InfoLog("Timeshift: serving stream %s from buffer starting at %s (offset %d bytes)",
+		id, requestedTime.UTC().Format(time.RFC3339), buf.OffsetForTime(requestedTime))
+
 	offset := buf.OffsetForTime(requestedTime)
-	utils.DebugLog("Timeshift: serving stream %s from local buffer at byte offset %d", id, offset)
 	c.serveFromCatchupBuffer(ctx, buf, offset)
 }
 

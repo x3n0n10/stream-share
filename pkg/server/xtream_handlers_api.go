@@ -179,6 +179,10 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
     utils.InfoLog("Action\t%s requested by %s", action, ctx.ClientIP())
     processedResp := xproc.ProcessResponse(resp)
 
+    if action == "get_live_streams" && c.catchupManager != nil && c.catchupManager.IsEnabled() {
+        processedResp = c.injectCatchupFlags(processedResp)
+    }
+
     if config.CacheFolder != "" {
         readableJSON, _ := json.Marshal(processedResp)
         filename := fmt.Sprintf("%s_%s.json", action, time.Now().Format("20060102_150405"))
@@ -189,6 +193,39 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 }
 
 func (c *Config) xtreamPlayerAPIGET(ctx *gin.Context) { c.xtreamPlayerAPI(ctx, ctx.Request.URL.Query()) }
+
+// injectCatchupFlags sets tv_archive=1 on all live streams so TiviMate shows the
+// rewind UI everywhere. It also records which streams have native upstream catchup.
+func (c *Config) injectCatchupFlags(resp interface{}) interface{} {
+    streams, ok := resp.([]interface{})
+    if !ok {
+        return resp
+    }
+    upstreamCatchup := make(map[string]bool, len(streams))
+    for _, item := range streams {
+        m, ok := item.(map[string]interface{})
+        if !ok {
+            continue
+        }
+        streamID := fmt.Sprintf("%v", m["stream_id"])
+        if v, exists := m["tv_archive"]; exists {
+            switch vv := v.(type) {
+            case json.Number:
+                if n, err := vv.Int64(); err == nil {
+                    upstreamCatchup[streamID] = n == 1
+                }
+            case float64:
+                upstreamCatchup[streamID] = vv == 1
+            case int:
+                upstreamCatchup[streamID] = vv == 1
+            }
+        }
+        m["tv_archive"] = 1
+        m["tv_archive_duration"] = c.catchupManager.AdvertisedHours()
+    }
+    c.catchupManager.SetUpstreamCatchup(upstreamCatchup)
+    return streams
+}
 
 func (c *Config) xtreamPlayerAPIPOST(ctx *gin.Context) {
     contents, err := io.ReadAll(ctx.Request.Body)

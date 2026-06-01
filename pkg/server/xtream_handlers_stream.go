@@ -28,11 +28,13 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lucasduport/stream-share/pkg/catchup"
 	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
 	xtreamapi "github.com/lucasduport/stream-share/pkg/xtream"
@@ -141,12 +143,114 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 	duration := ctx.Param("duration")
 	start := ctx.Param("start")
 	id := ctx.Param("id")
-	rpURL, err := url.Parse(fmt.Sprintf("%s/timeshift/%s/%s/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, duration, start, id))
-	if err != nil {
-		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+
+	// Bare stream ID (strip extension) for catchup lookup
+	idRaw := strings.TrimSuffix(id, path.Ext(id))
+
+	// Proxy to upstream when catchup is disabled or channel has native support
+	if c.catchupManager == nil || !c.catchupManager.IsEnabled() || c.catchupManager.HasUpstreamCatchup(idRaw) {
+		rpURL, err := url.Parse(fmt.Sprintf("%s/timeshift/%s/%s/%s/%s/%s",
+			c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, duration, start, id))
+		if err != nil {
+			_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+			return
+		}
+		c.stream(ctx, rpURL)
 		return
 	}
-	c.stream(ctx, rpURL)
+
+	startTime, err := parseTimeshiftStart(start)
+	if err != nil {
+		utils.ErrorLog("Catchup: failed to parse timeshift start %q: %v", start, err)
+		ctx.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+
+	buf := c.catchupManager.GetBuffer(idRaw)
+	if buf == nil {
+		utils.WarnLog("Catchup: no buffer for stream %s (not watched yet or already cleaned up)", idRaw)
+		ctx.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+
+	offset := buf.OffsetForTime(startTime)
+	utils.InfoLog("Catchup: timeshift stream=%s start=%s offset=%d", idRaw, start, offset)
+	c.serveFromCatchupBuffer(ctx, buf, offset)
+}
+
+// parseTimeshiftStart parses a timeshift start parameter.
+// Handles Unix timestamps and TiviMate's "YYYY-MM-DD:HH-MM" local-time format.
+// The local timezone is read from the TZ environment variable.
+func parseTimeshiftStart(start string) (time.Time, error) {
+	if unix, err := strconv.ParseInt(start, 10, 64); err == nil {
+		return time.Unix(unix, 0), nil
+	}
+	loc := time.UTC
+	if tz := os.Getenv("TZ"); tz != "" {
+		if l, err := time.LoadLocation(tz); err == nil {
+			loc = l
+		}
+	}
+	return time.ParseInLocation("2006-01-02:15-04", start, loc)
+}
+
+// serveFromCatchupBuffer streams MPEG-TS data from a local DiskBuffer to the client.
+// It continues reading even as the live stream appends new data (live catchup / time-shifting).
+func (c *Config) serveFromCatchupBuffer(ctx *gin.Context, buf *catchup.DiskBuffer, startOffset int64) {
+	f, err := os.Open(buf.FilePath())
+	if err != nil {
+		utils.ErrorLog("Catchup: failed to open buffer file %s: %v", buf.FilePath(), err)
+		ctx.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+
+	if _, err := f.Seek(startOffset, io.SeekStart); err != nil {
+		utils.ErrorLog("Catchup: failed to seek buffer file: %v", err)
+		ctx.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	ctx.Header("Content-Type", "video/mp2t")
+	ctx.Header("Cache-Control", "no-cache")
+	ctx.Status(http.StatusOK)
+
+	readBuf := make([]byte, 64*1024)
+	clientGone := ctx.Request.Context().Done()
+
+	for {
+		select {
+		case <-clientGone:
+			return
+		default:
+		}
+
+		n, rerr := f.Read(readBuf)
+		if n > 0 {
+			if _, werr := ctx.Writer.Write(readBuf[:n]); werr != nil {
+				return
+			}
+			if fl, ok := ctx.Writer.(http.Flusher); ok {
+				fl.Flush()
+			}
+		}
+		if rerr == io.EOF {
+			if buf.IsStopped() {
+				// Stream ended and all data has been sent
+				return
+			}
+			// Stream still live; wait briefly for more data to be written
+			select {
+			case <-clientGone:
+				return
+			case <-time.After(200 * time.Millisecond):
+				continue
+			}
+		}
+		if rerr != nil {
+			return
+		}
+	}
 }
 
 func (c *Config) xtreamStreamMovieWithCache(ctx *gin.Context) {

@@ -676,10 +676,11 @@ func (sm *SessionManager) stopStream(streamID string) {
 	buffer.clients = make(map[string]*streamClient)
 	buffer.clientsLock.Unlock()
 
-	// Delete the disk buffer immediately. On Linux, open file handles held by
-	// in-flight timeshift readers keep the inode alive until they close.
+	// Stop writing to the disk buffer but keep the file on disk for a grace period.
+	// TiviMate closes the live connection before opening a timeshift/rewind connection,
+	// so the buffer must remain readable for a short time after the stream ends.
 	if buffer.diskBuffer != nil {
-		sm.catchupManager.DeleteBuffer(streamID)
+		sm.catchupManager.StopBuffer(streamID)
 		buffer.diskBuffer = nil
 	}
 

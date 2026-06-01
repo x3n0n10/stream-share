@@ -50,6 +50,7 @@ type DiskBuffer struct {
 	baseOffset int64        // earliest byte offset readers may seek to
 	index      []indexEntry // time→offset samples, protected by mu
 	stopped    bool
+	stoppedAt  time.Time // when Stop() was called; zero if still writing
 }
 
 // NewDiskBuffer opens (or creates) the buffer file for streamID in dir.
@@ -165,6 +166,7 @@ func (b *DiskBuffer) IsStopped() bool {
 }
 
 // Stop closes the write handle. Readers may continue via their own open handles.
+// The file is NOT deleted; call Delete() for that.
 func (b *DiskBuffer) Stop() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -172,10 +174,18 @@ func (b *DiskBuffer) Stop() {
 		return
 	}
 	b.stopped = true
+	b.stoppedAt = time.Now()
 	if b.f != nil {
 		_ = b.f.Close()
 		b.f = nil
 	}
+}
+
+// StoppedAt returns when Stop() was called, or the zero time if still writing.
+func (b *DiskBuffer) StoppedAt() time.Time {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.stoppedAt
 }
 
 // Delete removes the buffer file from disk. On Linux, existing reader file

@@ -43,9 +43,9 @@ nfpms:
 dockers:
   - image_templates:
     - "ghcr.io/x3n0n10/stream-share:{{ .Tag }}-arm64"
-    - "ghcr.io/x3n0n10/stream-share:latest-arm64"
+    - '{{ if not .Prerelease }}ghcr.io/x3n0n10/stream-share:latest-arm64{{ end }}'
     - "x3n0n10/stream-share:{{ .Tag }}-arm64"
-    - "x3n0n10/stream-share:latest-arm64"
+    - '{{ if not .Prerelease }}x3n0n10/stream-share:latest-arm64{{ end }}'
     use: buildx
     goos: linux
     goarch: arm64
@@ -62,9 +62,9 @@ dockers:
 
   - image_templates:
     - "ghcr.io/x3n0n10/stream-share:{{ .Tag }}-amd64"
-    - "ghcr.io/x3n0n10/stream-share:latest-amd64"
+    - '{{ if not .Prerelease }}ghcr.io/x3n0n10/stream-share:latest-amd64{{ end }}'
     - "x3n0n10/stream-share:{{ .Tag }}-amd64"
-    - "x3n0n10/stream-share:latest-amd64"
+    - '{{ if not .Prerelease }}x3n0n10/stream-share:latest-amd64{{ end }}'
     use: buildx
     goos: linux
     goarch: amd64
@@ -85,6 +85,7 @@ docker_manifests:
       - "x3n0n10/stream-share:{{ .Tag }}-amd64"
       - "x3n0n10/stream-share:{{ .Tag }}-arm64"
   - name_template: "x3n0n10/stream-share:latest"
+    skip_push: '{{ if .Prerelease }}true{{ end }}'
     image_templates:
       - "x3n0n10/stream-share:latest-amd64"
       - "x3n0n10/stream-share:latest-arm64"
@@ -93,6 +94,7 @@ docker_manifests:
       - "ghcr.io/x3n0n10/stream-share:{{ .Tag }}-amd64"
       - "ghcr.io/x3n0n10/stream-share:{{ .Tag }}-arm64"
   - name_template: "ghcr.io/x3n0n10/stream-share:latest"
+    skip_push: '{{ if .Prerelease }}true{{ end }}'
     image_templates:
       - "ghcr.io/x3n0n10/stream-share:latest-amd64"
       - "ghcr.io/x3n0n10/stream-share:latest-arm64"

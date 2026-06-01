@@ -136,40 +136,17 @@ func (c *Config) xtreamStreamPlay(ctx *gin.Context) {
 	c.xtreamStream(ctx, rpURL)
 }
 
-// alignTimestampToBuffer corrects a timezone-naive timestamp to UTC by trying
-// half-hour increments (covering all real-world UTC offsets) until the result
-// falls within the buffer's known UTC time range. This handles clients like
-// TiviMate that send timestamps in their local timezone without a timezone indicator.
-func alignTimestampToBuffer(t time.Time, buf *catchup.DiskBuffer) time.Time {
-	bufStart := buf.StartTime()
-	bufEnd := buf.StoppedAt()
-	if bufEnd.IsZero() {
-		bufEnd = time.Now()
-	}
-	// Allow a 1-minute slop on either side to handle sub-minute rounding.
-	lo := bufStart.Add(-time.Minute)
-	hi := bufEnd.Add(time.Minute)
-
-	if t.After(lo) && t.Before(hi) {
-		return t // already in range (timestamp was UTC or server and client share timezone)
-	}
-
-	// Try offsets from −14h to +14h in 30-minute steps (covers all IANA zones).
-	for halfHours := -28; halfHours <= 28; halfHours++ {
-		if halfHours == 0 {
-			continue
-		}
-		adjusted := t.Add(time.Duration(-halfHours) * 30 * time.Minute)
-		if adjusted.After(lo) && adjusted.Before(hi) {
-			utils.DebugLog("Timeshift: adjusted timestamp by %+.1fh to match buffer UTC range",
-				float64(-halfHours)*0.5)
-			return adjusted
+// clientLocation returns the timezone to use when parsing client-supplied
+// timestamps. TiviMate sends timestamps in the user's local time without a
+// timezone indicator, so we use the TZ environment variable (e.g.
+// TZ=Europe/Amsterdam). Falls back to UTC when TZ is unset or invalid.
+func clientLocation() *time.Location {
+	if tz := os.Getenv("TZ"); tz != "" {
+		if loc, err := time.LoadLocation(tz); err == nil {
+			return loc
 		}
 	}
-	// No offset matched — clamp to buffer start so OffsetForTime returns 0.
-	utils.DebugLog("Timeshift: could not align timestamp %s to buffer range [%s, %s]; serving from start",
-		t.UTC().Format(time.RFC3339), bufStart.UTC().Format(time.RFC3339), bufEnd.UTC().Format(time.RFC3339))
-	return bufStart
+	return time.UTC
 }
 
 func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
@@ -193,8 +170,9 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 	startUnix, err := strconv.ParseInt(start, 10, 64)
 	var requestedTime time.Time
 	if err != nil {
-		// TiviMate uses YYYY-MM-DD:HH-MM instead of a Unix timestamp.
-		t, parseErr := time.Parse("2006-01-02:15-04", start)
+		// TiviMate uses YYYY-MM-DD:HH-MM in the client's local timezone (no indicator).
+		// Parse using the TZ env var so the result converts correctly to UTC.
+		t, parseErr := time.ParseInLocation("2006-01-02:15-04", start, clientLocation())
 		if parseErr != nil {
 			utils.ErrorLog("Timeshift: invalid start timestamp %q (tried Unix and YYYY-MM-DD:HH-MM): %v", start, err)
 			ctx.AbortWithStatus(http.StatusBadRequest)
@@ -213,11 +191,7 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 		return
 	}
 
-	// Correct for timezone: TiviMate sends timestamps in the client's local time
-	// but the buffer's index uses UTC. Auto-detect the offset by trying half-hour
-	// increments until the timestamp falls within the buffer's known UTC range.
-	requestedTime = alignTimestampToBuffer(requestedTime, buf)
-	utils.InfoLog("Timeshift: serving stream %s from buffer starting at %s (offset %d bytes)",
+	utils.DebugLog("Timeshift: serving stream %s from buffer starting at %s (offset %d bytes)",
 		id, requestedTime.UTC().Format(time.RFC3339), buf.OffsetForTime(requestedTime))
 
 	offset := buf.OffsetForTime(requestedTime)

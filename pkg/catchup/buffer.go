@@ -48,9 +48,9 @@ type DiskBuffer struct {
 	startTime time.Time
 	maxBytes  int64 // 0 = unlimited
 
-	writeCh chan []byte    // pump goroutine sends slices here
-	stopCh  chan struct{}  // closed by Stop()
-	stopped atomic.Bool
+	writeCh chan []byte   // pump goroutine sends slices here
+	stopCh  chan struct{} // closed by Stop()
+	stopped int32        // 0 = running, 1 = stopped; accessed via atomic.LoadInt32/CompareAndSwapInt32
 
 	stoppedMu sync.Mutex
 	stoppedAt time.Time
@@ -133,7 +133,7 @@ func (b *DiskBuffer) drainLoop() {
 
 // Write enqueues a copy of p for async disk write. Never blocks; drops if channel full.
 func (b *DiskBuffer) Write(p []byte) {
-	if b.stopped.Load() {
+	if atomic.LoadInt32(&b.stopped) != 0 {
 		return
 	}
 	chunk := make([]byte, len(p))
@@ -148,7 +148,7 @@ func (b *DiskBuffer) Write(p []byte) {
 // Stop signals the drain goroutine to finish after processing remaining queued writes.
 // Safe to call multiple times.
 func (b *DiskBuffer) Stop() {
-	if b.stopped.CompareAndSwap(false, true) {
+	if atomic.CompareAndSwapInt32(&b.stopped, 0, 1) {
 		b.stoppedMu.Lock()
 		b.stoppedAt = time.Now()
 		b.stoppedMu.Unlock()
@@ -163,7 +163,7 @@ func (b *DiskBuffer) Delete() error {
 }
 
 // IsStopped reports whether Stop has been called.
-func (b *DiskBuffer) IsStopped() bool { return b.stopped.Load() }
+func (b *DiskBuffer) IsStopped() bool { return atomic.LoadInt32(&b.stopped) != 0 }
 
 // StoppedAt returns when Stop was called (zero if not yet stopped).
 func (b *DiskBuffer) StoppedAt() time.Time {

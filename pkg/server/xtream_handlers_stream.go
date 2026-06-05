@@ -167,9 +167,33 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 		return
 	}
 
+	// Set response headers before the first write so they reach the client.
+	ctx.Header("Content-Type", "video/mp2t")
+	ctx.Header("Cache-Control", "no-cache")
+
 	offset := buf.OffsetForTime(startTime)
 	utils.InfoLog("Catchup: serving stream %s from local buffer at offset %d (start=%s)", idRaw, offset, start)
 	c.serveFromCatchupBuffer(ctx, buf, offset)
+
+	// If the client disconnected or the handler aborted, we're done.
+	select {
+	case <-ctx.Request.Context().Done():
+		return
+	default:
+	}
+	if ctx.IsAborted() {
+		return
+	}
+
+	// Buffer exhausted — transition seamlessly to the live upstream so TiviMate
+	// catches up and continues watching without reconnecting on its own.
+	liveURL, err := url.Parse(fmt.Sprintf("%s/live/%s/%s/%s",
+		c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, idRaw))
+	if err != nil {
+		return
+	}
+	utils.InfoLog("Catchup: buffer exhausted for %s, transitioning to live upstream", idRaw)
+	c.stream(ctx, liveURL)
 }
 
 // parseTimeshiftStart parses a timeshift start parameter.
@@ -222,10 +246,6 @@ func (c *Config) serveFromCatchupBuffer(ctx *gin.Context, buf *catchup.DiskBuffe
 	defer f.Close()
 
 	alignToTSPacket(f, startOffset)
-
-	ctx.Header("Content-Type", "video/mp2t")
-	ctx.Header("Cache-Control", "no-cache")
-	ctx.Status(http.StatusOK)
 
 	readBuf := make([]byte, 64*1024)
 	clientGone := ctx.Request.Context().Done()

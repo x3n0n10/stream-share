@@ -9,7 +9,7 @@ on:
         default: true
 
 jobs:
-  snapshot:
+  build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -17,8 +17,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -29,7 +27,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
-        if: ${{ inputs.push_image }}
+        if: inputs.push_image
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -37,16 +35,47 @@ jobs:
           password: ${{ secrets.GHCR_TOKEN }}
 
       - name: Log in to Docker Hub
-        if: ${{ inputs.push_image }}
+        if: inputs.push_image
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USER }}
           password: ${{ secrets.DOCKER_TOKEN }}
 
-      - name: Run GoReleaser (snapshot)
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          version: '~> v2'
-          args: release --snapshot --clean --skip=sign${{ inputs.push_image == false && ',publish' || '' }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set short SHA
+        run: echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: Build and push amd64
+        run: |
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -mod=vendor -o stream-share .
+          docker buildx build \
+            --platform linux/amd64 \
+            --file .Dockerfile.goreleaser \
+            --tag x3n0n10/stream-share:dev-${{ env.SHORT_SHA }}-amd64 \
+            --tag ghcr.io/x3n0n10/stream-share:dev-${{ env.SHORT_SHA }}-amd64 \
+            ${{ inputs.push_image && '--push' || '--load' }} \
+            .
+
+      - name: Build and push arm64
+        run: |
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -mod=vendor -o stream-share .
+          docker buildx build \
+            --platform linux/arm64 \
+            --file .Dockerfile.goreleaser \
+            --tag x3n0n10/stream-share:dev-${{ env.SHORT_SHA }}-arm64 \
+            --tag ghcr.io/x3n0n10/stream-share:dev-${{ env.SHORT_SHA }}-arm64 \
+            ${{ inputs.push_image && '--push' || '--load' }} \
+            .
+
+      - name: Create and push multi-arch manifests
+        if: inputs.push_image
+        run: |
+          docker buildx imagetools create \
+            -t x3n0n10/stream-share:dev-${{ env.SHORT_SHA }} \
+            -t x3n0n10/stream-share:dev \
+            x3n0n10/stream-share:dev-${{ env.SHORT_SHA }}-amd64 \
+            x3n0n10/stream-share:dev-${{ env.SHORT_SHA }}-arm64
+          docker buildx imagetools create \
+            -t ghcr.io/x3n0n10/stream-share:dev-${{ env.SHORT_SHA }} \
+            -t ghcr.io/x3n0n10/stream-share:dev \
+            ghcr.io/x3n0n10/stream-share:dev-${{ env.SHORT_SHA }}-amd64 \
+            ghcr.io/x3n0n10/stream-share:dev-${{ env.SHORT_SHA }}-arm64

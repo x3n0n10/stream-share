@@ -140,7 +140,12 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	serverConfig.catchupManager = catchup.New(catchupEnabled, catchupDir, catchupDur)
 	if catchupEnabled {
 		serverConfig.catchupManager.CleanupOldFiles()
-		utils.InfoLog("Bootstrap: local catchup buffering ENABLED (dir=%s, duration=%dh)", catchupDir, catchupDur)
+		tz := os.Getenv("TZ")
+		if tz == "" {
+			utils.WarnLog("Bootstrap: catchup is ENABLED but TZ env var is not set — timeshift timestamps from clients will be parsed as UTC and rewinds will land at the wrong position. Set TZ to your clients' timezone (e.g. TZ=Europe/Amsterdam).")
+		} else {
+			utils.InfoLog("Bootstrap: local catchup buffering ENABLED (dir=%s, duration=%dh, TZ=%s)", catchupDir, catchupDur, tz)
+		}
 	} else {
 		utils.InfoLog("Bootstrap: local catchup buffering DISABLED (set CATCHUP_ENABLED=true to enable)")
 	}

@@ -188,6 +188,30 @@ func parseTimeshiftStart(start string) (time.Time, error) {
 	return time.ParseInLocation("2006-01-02:15-04", start, loc)
 }
 
+// alignToTSPacket seeks f to startOffset then scans forward (up to 3 packet-widths) for
+// two consecutive MPEG-TS sync bytes (0x47) exactly 188 bytes apart, confirming a packet
+// boundary. f is left positioned at the aligned offset. If no alignment is found, f is
+// repositioned at startOffset.
+func alignToTSPacket(f *os.File, startOffset int64) {
+	const syncByte = byte(0x47)
+	const pktSize = 188
+
+	if _, err := f.Seek(startOffset, io.SeekStart); err != nil {
+		return
+	}
+	search := make([]byte, pktSize*3)
+	n, _ := f.Read(search)
+	search = search[:n]
+	for i := 0; i+pktSize < len(search); i++ {
+		if search[i] == syncByte && search[i+pktSize] == syncByte {
+			_, _ = f.Seek(startOffset+int64(i), io.SeekStart)
+			return
+		}
+	}
+	// No boundary found; restore original position.
+	_, _ = f.Seek(startOffset, io.SeekStart)
+}
+
 func (c *Config) serveFromCatchupBuffer(ctx *gin.Context, buf *catchup.DiskBuffer, startOffset int64) {
 	f, err := os.Open(buf.FilePath())
 	if err != nil {
@@ -197,11 +221,7 @@ func (c *Config) serveFromCatchupBuffer(ctx *gin.Context, buf *catchup.DiskBuffe
 	}
 	defer f.Close()
 
-	if _, err := f.Seek(startOffset, io.SeekStart); err != nil {
-		utils.ErrorLog("Catchup: seek failed in %s: %v", buf.FilePath(), err)
-		ctx.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
+	alignToTSPacket(f, startOffset)
 
 	ctx.Header("Content-Type", "video/mp2t")
 	ctx.Header("Cache-Control", "no-cache")
@@ -209,6 +229,7 @@ func (c *Config) serveFromCatchupBuffer(ctx *gin.Context, buf *catchup.DiskBuffe
 
 	readBuf := make([]byte, 64*1024)
 	clientGone := ctx.Request.Context().Done()
+	drainDone := buf.DrainDone()
 	for {
 		select {
 		case <-clientGone:
@@ -225,10 +246,25 @@ func (c *Config) serveFromCatchupBuffer(ctx *gin.Context, buf *catchup.DiskBuffe
 			}
 		}
 		if rerr == io.EOF {
-			if buf.IsStopped() {
-				return
-			}
 			select {
+			case <-drainDone:
+				// All writes are on disk. Flush any bytes written between our last
+				// read and drain completion, then exit.
+				drainDone = nil // nil channel blocks forever — prevent re-entry
+				for {
+					n2, err2 := f.Read(readBuf)
+					if n2 > 0 {
+						if _, werr := ctx.Writer.Write(readBuf[:n2]); werr != nil {
+							return
+						}
+						if flusher, ok := ctx.Writer.(http.Flusher); ok {
+							flusher.Flush()
+						}
+					}
+					if err2 != nil {
+						return
+					}
+				}
 			case <-clientGone:
 				return
 			case <-time.After(200 * time.Millisecond):

@@ -48,9 +48,10 @@ type DiskBuffer struct {
 	startTime time.Time
 	maxBytes  int64 // 0 = unlimited
 
-	writeCh chan []byte   // pump goroutine sends slices here
-	stopCh  chan struct{} // closed by Stop()
-	stopped int32        // 0 = running, 1 = stopped; accessed via atomic.LoadInt32/CompareAndSwapInt32
+	writeCh   chan []byte   // pump goroutine sends slices here
+	stopCh    chan struct{}  // closed by Stop()
+	drainDone chan struct{}  // closed by drainLoop when all writes are flushed to disk
+	stopped   int32         // 0 = running, 1 = stopped; accessed via atomic.LoadInt32/CompareAndSwapInt32
 
 	stoppedMu sync.Mutex
 	stoppedAt time.Time
@@ -78,6 +79,7 @@ func NewDiskBuffer(dir, streamID string, start time.Time, maxBytes int64) (*Disk
 		maxBytes:  maxBytes,
 		writeCh:   make(chan []byte, writeChanCap),
 		stopCh:    make(chan struct{}),
+		drainDone: make(chan struct{}),
 	}
 
 	go b.drainLoop()
@@ -125,10 +127,11 @@ func (b *DiskBuffer) drainLoop() {
 		}
 	}
 
-	// Channel was closed; record final total
+	// Channel was closed; record final total then signal readers that all data is on disk.
 	b.indexMu.Lock()
 	b.total = written
 	b.indexMu.Unlock()
+	close(b.drainDone)
 }
 
 // Write enqueues a copy of p for async disk write. Never blocks; drops if channel full.
@@ -164,6 +167,10 @@ func (b *DiskBuffer) Delete() error {
 
 // IsStopped reports whether Stop has been called.
 func (b *DiskBuffer) IsStopped() bool { return atomic.LoadInt32(&b.stopped) != 0 }
+
+// DrainDone returns a channel that is closed once all queued writes have been flushed to disk.
+// Use this (not IsStopped) as the signal to stop reading from the buffer file.
+func (b *DiskBuffer) DrainDone() <-chan struct{} { return b.drainDone }
 
 // StoppedAt returns when Stop was called (zero if not yet stopped).
 func (b *DiskBuffer) StoppedAt() time.Time {

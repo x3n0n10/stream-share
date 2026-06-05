@@ -159,6 +159,7 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 		ctx.AbortWithStatus(http.StatusBadRequest)
 		return
 	}
+	utils.DebugLog("Catchup: timeshift start raw=%q parsed=%s (unix=%d)", start, startTime.Format(time.RFC3339), startTime.Unix())
 
 	buf := c.catchupManager.GetBuffer(idRaw)
 	if buf == nil {
@@ -166,13 +167,14 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 		ctx.AbortWithStatus(http.StatusNotFound)
 		return
 	}
+	utils.DebugLog("Catchup: buffer for %s started at %s (unix=%d), buffered=%d bytes", idRaw, buf.StartTime().Format(time.RFC3339), buf.StartTime().Unix(), buf.BytesBuffered())
 
 	// Set response headers before the first write so they reach the client.
 	ctx.Header("Content-Type", "video/mp2t")
 	ctx.Header("Cache-Control", "no-cache")
 
 	offset := buf.OffsetForTime(startTime)
-	utils.InfoLog("Catchup: serving stream %s from local buffer at offset %d (start=%s)", idRaw, offset, start)
+	utils.InfoLog("Catchup: serving stream %s from local buffer at offset %d / %d bytes (start raw=%q parsed=%s)", idRaw, offset, buf.BytesBuffered(), start, startTime.Format(time.RFC3339))
 	c.serveFromCatchupBuffer(ctx, buf, offset)
 
 	// If the client disconnected or the handler aborted, we're done.

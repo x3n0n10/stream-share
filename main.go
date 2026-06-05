@@ -18,7 +18,10 @@
 
 package main
 
-import "github.com/lucasduport/stream-share/cmd"
+import (
+	"github.com/lucasduport/stream-share/cmd"
+	_ "time/tzdata" // embed timezone database so TZ env var works in Alpine containers
+)
 
 func main() {
 	cmd.Execute()

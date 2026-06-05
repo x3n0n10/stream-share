@@ -19,10 +19,21 @@
 package main
 
 import (
+	"os"
+	"time"
+	_ "time/tzdata" // embed IANA timezone database so TZ env var works in Alpine containers
+
 	"github.com/lucasduport/stream-share/cmd"
-	_ "time/tzdata" // embed timezone database so TZ env var works in Alpine containers
 )
 
 func main() {
+	// time.Local is lazily initialized on first use and may be cached as UTC
+	// before time/tzdata's init has registered the embedded database.
+	// Explicitly set it here, after all init() functions have completed.
+	if tz := os.Getenv("TZ"); tz != "" {
+		if loc, err := time.LoadLocation(tz); err == nil {
+			time.Local = loc
+		}
+	}
 	cmd.Execute()
 }

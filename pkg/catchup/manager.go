@@ -112,9 +112,10 @@ func (m *Manager) GetBuffer(streamID string) *DiskBuffer {
 	if !m.enabled {
 		return nil
 	}
+	bare := strings.TrimSuffix(streamID, filepath.Ext(streamID))
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.buffers[streamID]
+	return m.buffers[bare]
 }
 
 // StopBuffer stops writing to the buffer but keeps the file alive for gracePeriod,

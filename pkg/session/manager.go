@@ -25,12 +25,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lucasduport/stream-share/pkg/catchup"
 	"github.com/lucasduport/stream-share/pkg/database"
 	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
@@ -57,6 +59,7 @@ type SessionManager struct {
 	clientStallTimeout time.Duration // drop a multiplexed client whose buffer stays full this long
 	httpClient         *http.Client
 	stopChan           chan struct{} // closed by Stop() to terminate background goroutines
+	catchupManager     *catchup.Manager
 }
 
 // Stream multiplexing tuning.
@@ -102,6 +105,9 @@ type StreamBuffer struct {
 	// Stop signal for the upstream pump.
 	stopChan chan struct{}
 	stopOnce sync.Once
+
+	// Optional disk buffer for local catchup (nil when catchup is disabled)
+	diskBuffer *catchup.DiskBuffer
 }
 
 // NewSessionManager creates a new session manager
@@ -140,6 +146,11 @@ func NewSessionManager(db *database.DBManager) *SessionManager {
 // Stop terminates all background goroutines started by the session manager.
 func (sm *SessionManager) Stop() {
 	close(sm.stopChan)
+}
+
+// SetCatchupManager attaches a catchup manager for local disk buffering of live streams.
+func (sm *SessionManager) SetCatchupManager(m *catchup.Manager) {
+	sm.catchupManager = m
 }
 
 // sessionSweepInterval controls how often idle sessions and streams are reaped.
@@ -372,6 +383,12 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		stopChan:    make(chan struct{}),
 	}
 
+	// Start local disk buffer for live streams when catchup is enabled
+	if sm.catchupManager != nil && sm.catchupManager.IsEnabled() && streamType == "live" {
+		bareID := strings.TrimSuffix(path.Base(upstreamURL.Path), path.Ext(upstreamURL.Path))
+		streamBuffer.diskBuffer = sm.catchupManager.StartBuffer(bareID)
+	}
+
 	sm.streamBuffers[streamID] = streamBuffer
 
 	// Start the single upstream pump that fans out to all clients
@@ -494,6 +511,11 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 			chunk := make([]byte, n)
 			copy(chunk, dataBuffer[:n])
 			sm.fanOut(buffer, chunk)
+
+			// Async disk write for local catchup (non-blocking, never stalls the pump)
+			if buffer.diskBuffer != nil {
+				buffer.diskBuffer.Write(chunk)
+			}
 
 			// Touch stream LastRequested to avoid cleanup timeout while data flows
 			sm.streamLock.Lock()
@@ -656,6 +678,13 @@ func (sm *SessionManager) stopStream(streamID string) {
 	}
 	buffer.clients = make(map[string]*streamClient)
 	buffer.clientsLock.Unlock()
+
+	// Stop disk buffer with grace period so in-flight timeshift readers can finish.
+	// TiviMate closes the live connection BEFORE opening timeshift, so we must keep
+	// the file alive briefly.
+	if buffer.diskBuffer != nil && sm.catchupManager != nil {
+		sm.catchupManager.StopBuffer(buffer.diskBuffer.StreamID())
+	}
 
 	// Update the stream session
 	if streamSession, exists := sm.streamSessions[streamID]; exists {

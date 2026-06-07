@@ -161,6 +161,13 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 	}
 	utils.DebugLog("Catchup: timeshift start raw=%q parsed=%s (unix=%d)", start, startTime.Format(time.RFC3339), startTime.Unix())
 
+	// A client is actively reading the catchup buffer (e.g. resuming after a
+	// pause) — cancel any pending pause-grace stop so recording continues
+	// uninterrupted and there's no gap once the buffer catches up to live.
+	if c.sessionManager != nil {
+		c.sessionManager.NotifyCatchupActivity(idRaw)
+	}
+
 	buf := c.catchupManager.GetBuffer(idRaw)
 	if buf == nil {
 		utils.InfoLog("Catchup: no buffer for stream %s (never watched or already cleaned up)", idRaw)

@@ -153,6 +153,24 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		serverConfig.sessionManager.SetCatchupManager(serverConfig.catchupManager)
 	}
 
+	// Pause grace: how long a catchup-enabled live stream stays alive (upstream
+	// connection open, disk recording continuing) after its last viewer
+	// disconnects, so a TiviMate "pause" followed by a timeshift-based resume
+	// has continuous buffered content with no gap. Channel switches are detected
+	// separately and bypass this grace period (see SessionManager.RequestStream).
+	catchupPauseGrace := 5
+	if v := os.Getenv("CATCHUP_PAUSE_GRACE_MINUTES"); v != "" {
+		if d, err := strconv.Atoi(v); err == nil && d >= 0 {
+			catchupPauseGrace = d
+		}
+	}
+	if serverConfig.sessionManager != nil {
+		serverConfig.sessionManager.SetPauseGrace(time.Duration(catchupPauseGrace) * time.Minute)
+		if catchupEnabled && catchupPauseGrace > 0 {
+			utils.InfoLog("Bootstrap: catchup pause grace set to %d minute(s) — paused live streams keep recording for seamless resume", catchupPauseGrace)
+		}
+	}
+
 	// Configure session parameters from environment variables
 	if serverConfig.sessionManager != nil {
 		if v := os.Getenv("SESSION_TIMEOUT_MINUTES"); v != "" {

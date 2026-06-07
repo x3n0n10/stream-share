@@ -60,6 +60,14 @@ type SessionManager struct {
 	httpClient         *http.Client
 	stopChan           chan struct{} // closed by Stop() to terminate background goroutines
 	catchupManager     *catchup.Manager
+
+	// pauseGrace controls how long a catchup-enabled live stream keeps its
+	// upstream connection (and disk recording) alive after its last viewer
+	// disconnects, so a TiviMate "pause" followed by a timeshift-based resume
+	// has continuous buffered content with no gap. 0 disables the behavior
+	// (streams stop immediately, as before). Guarded by streamLock.
+	pauseGrace   time.Duration
+	pendingStops map[string]chan struct{} // streamID -> cancel channel for a scheduled stop
 }
 
 // Stream multiplexing tuning.
@@ -124,6 +132,7 @@ func NewSessionManager(db *database.DBManager) *SessionManager {
 		tempLinkTimeout:    24 * time.Hour,
 		vodCacheStaleAge:   24 * time.Hour,
 		clientStallTimeout: defaultClientStallTimeout,
+		pendingStops:       make(map[string]chan struct{}),
 		stopChan:           make(chan struct{}),
 		httpClient: &http.Client{
 			// No global Timeout: long-running streams must not be cut after 60s
@@ -340,6 +349,11 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 	// shared upstream connection.
 	if existingBuffer, exists := sm.streamBuffers[streamID]; exists && existingBuffer.active {
 		utils.InfoLog("User %s joined existing stream %s (multiplexed)", username, streamID)
+
+		// A viewer returned — cancel any pending pause-grace stop.
+		if sm.cancelPendingStop(streamID) {
+			utils.InfoLog("Stream %s resumed before pause grace expired; continuing uninterrupted", streamID)
+		}
 
 		if streamSession, exists := sm.streamSessions[streamID]; exists {
 			streamSession.AddViewer(username)
@@ -610,17 +624,16 @@ func (sm *SessionManager) GetClientDone(streamID, username string) (<-chan struc
 }
 
 // RemoveClient removes a client from a stream.
+//
+// Deliberately does NOT clear userSession.StreamID/StreamType here: a closed
+// HTTP connection looks identical whether the user is switching channels or
+// "pausing" (TiviMate disconnects, then resumes later via timeshift). Leaving
+// the previous stream ID in place lets RequestStream's switch-detection work
+// correctly regardless of request ordering — it overwrites StreamID when the
+// user starts a genuinely different stream, and converts any pending
+// pause-grace stop on the old stream into an immediate one. Idle sessions are
+// fully reaped by cleanupExpiredSessions/DisconnectUser regardless.
 func (sm *SessionManager) RemoveClient(streamID, username string) {
-	// Clear the user session first, then take streamLock. This respects the
-	// documented lock order (userLock → streamLock) and never holds both at
-	// once, so it cannot deadlock against cleanupExpiredSessions.
-	sm.userLock.Lock()
-	if userSession, exists := sm.userSessions[username]; exists && userSession.StreamID == streamID {
-		userSession.StreamID = ""
-		userSession.StreamType = ""
-	}
-	sm.userLock.Unlock()
-
 	sm.streamLock.Lock()
 	defer sm.streamLock.Unlock()
 
@@ -643,7 +656,15 @@ func (sm *SessionManager) RemoveClient(streamID, username string) {
 		return
 	}
 	if !streamSession.RemoveViewer(username) && buffer.active {
-		sm.stopStream(streamID)
+		// Catchup-enabled live streams get a grace window before stopping for
+		// real, so a TiviMate "pause" (which looks like a disconnect to us)
+		// followed by a resume keeps recording with no gap. A genuine channel
+		// switch is detected and stopped immediately in RequestStream instead.
+		if buffer.diskBuffer != nil && sm.pauseGrace > 0 {
+			sm.schedulePendingStop(streamID)
+		} else {
+			sm.stopStream(streamID)
+		}
 	}
 
 	utils.InfoLog("User %s removed from stream %s", username, streamID)
@@ -657,9 +678,67 @@ func (sm *SessionManager) stopStreamLocking(streamID string) {
 	sm.stopStream(streamID)
 }
 
+// schedulePendingStop delays stopping streamID by sm.pauseGrace instead of
+// stopping it immediately, keeping the upstream pump (and catchup recording)
+// alive in case the viewer resumes — e.g. TiviMate "pauses" by disconnecting
+// and later resumes via a timeshift request. The caller must hold streamLock.
+func (sm *SessionManager) schedulePendingStop(streamID string) {
+	if _, exists := sm.pendingStops[streamID]; exists {
+		return
+	}
+	cancel := make(chan struct{})
+	sm.pendingStops[streamID] = cancel
+	utils.InfoLog("Stream %s has no viewers; keeping it alive for up to %s in case of resume (pause/timeshift)",
+		streamID, utils.HumanDuration(sm.pauseGrace))
+
+	go func() {
+		select {
+		case <-time.After(sm.pauseGrace):
+		case <-cancel:
+			return
+		}
+		sm.streamLock.Lock()
+		defer sm.streamLock.Unlock()
+		if current, ok := sm.pendingStops[streamID]; ok && current == cancel {
+			delete(sm.pendingStops, streamID)
+			utils.InfoLog("Stream %s pause grace expired with no viewers returning; stopping", streamID)
+			sm.stopStream(streamID)
+		}
+	}()
+}
+
+// cancelPendingStop cancels a scheduled stop for streamID, if any (silently —
+// callers that represent a genuine "viewer returned" event should log that
+// themselves; this is also called from stopStream itself, where logging
+// "resumed" would be misleading). The caller must hold streamLock.
+func (sm *SessionManager) cancelPendingStop(streamID string) bool {
+	if cancel, ok := sm.pendingStops[streamID]; ok {
+		close(cancel)
+		delete(sm.pendingStops, streamID)
+		return true
+	}
+	return false
+}
+
+// NotifyCatchupActivity cancels any pending stop for streamID, keeping the
+// upstream connection and disk recording alive while a client is actively
+// reading from its catchup buffer (e.g. rewinding). Safe to call whether or
+// not a stop was actually pending.
+func (sm *SessionManager) NotifyCatchupActivity(streamID string) {
+	sm.streamLock.Lock()
+	defer sm.streamLock.Unlock()
+	if sm.cancelPendingStop(streamID) {
+		utils.InfoLog("Stream %s resumed via catchup before pause grace expired; continuing uninterrupted", streamID)
+	}
+}
+
 // stopStream stops an active stream and disconnects all of its clients.
 // The caller must hold sm.streamLock.
 func (sm *SessionManager) stopStream(streamID string) {
+	// Cancel any scheduled pause-grace stop — we're stopping for real now
+	// (e.g. the viewer switched to a different channel).
+	sm.cancelPendingStop(streamID)
+
 	utils.InfoLog("Stopping stream %s", streamID)
 
 	buffer, exists := sm.streamBuffers[streamID]
@@ -855,6 +934,14 @@ func (sm *SessionManager) SetSessionTimeout(timeout time.Duration) {
 // SetStreamTimeout sets the unused stream timeout duration
 func (sm *SessionManager) SetStreamTimeout(timeout time.Duration) {
 	sm.streamTimeout = timeout
+}
+
+// SetPauseGrace sets how long a catchup-enabled live stream stays alive
+// (upstream connection open, disk recording continuing) after its last
+// viewer disconnects, so a pause/resume via timeshift has no recording gap.
+// 0 disables the behavior.
+func (sm *SessionManager) SetPauseGrace(d time.Duration) {
+	sm.pauseGrace = d
 }
 
 // SetTempLinkTimeout sets the temporary link expiration duration

@@ -60,12 +60,12 @@ func (b *Bot) commandSpecs() []*discordgo.ApplicationCommand {
         {
             Name:                     "status",
             Description:              "Show active streams and users",
-            DefaultMemberPermissions: int64Ptr(discordgo.PermissionManageServer),
+            DefaultMemberPermissions: int64Ptr(discordgo.PermissionManageGuild),
         },
         {
             Name:                     "disconnect",
             Description:              "Forcibly disconnect a user",
-            DefaultMemberPermissions: int64Ptr(discordgo.PermissionManageServer),
+            DefaultMemberPermissions: int64Ptr(discordgo.PermissionManageGuild),
             Options: []*discordgo.ApplicationCommandOption{
                 {Type: discordgo.ApplicationCommandOptionString, Name: "username", Description: "Username to disconnect", Required: true},
             },
@@ -73,7 +73,7 @@ func (b *Bot) commandSpecs() []*discordgo.ApplicationCommand {
         {
             Name:                     "timeout",
             Description:              "Temporarily block a user for N minutes",
-            DefaultMemberPermissions: int64Ptr(discordgo.PermissionManageServer),
+            DefaultMemberPermissions: int64Ptr(discordgo.PermissionManageGuild),
             Options: []*discordgo.ApplicationCommandOption{
                 {Type: discordgo.ApplicationCommandOptionString, Name: "username", Description: "Username to timeout", Required: true},
                 {Type: discordgo.ApplicationCommandOptionInteger, Name: "minutes", Description: "Timeout duration in minutes (>0)", Required: true, MinValue: floatPtr(1)},

@@ -58,19 +58,22 @@ func (b *Bot) commandSpecs() []*discordgo.ApplicationCommand {
             Description: "List cached items and when they expire",
         },
         {
-            Name:        "status",
-            Description: "Show active streams and users",
+            Name:                     "status",
+            Description:              "Show active streams and users",
+            DefaultMemberPermissions: int64Ptr(discordgo.PermissionManageServer),
         },
         {
-            Name:        "disconnect",
-            Description: "Forcibly disconnect a user",
+            Name:                     "disconnect",
+            Description:              "Forcibly disconnect a user",
+            DefaultMemberPermissions: int64Ptr(discordgo.PermissionManageServer),
             Options: []*discordgo.ApplicationCommandOption{
                 {Type: discordgo.ApplicationCommandOptionString, Name: "username", Description: "Username to disconnect", Required: true},
             },
         },
         {
-            Name:        "timeout",
-            Description: "Temporarily block a user for N minutes",
+            Name:                     "timeout",
+            Description:              "Temporarily block a user for N minutes",
+            DefaultMemberPermissions: int64Ptr(discordgo.PermissionManageServer),
             Options: []*discordgo.ApplicationCommandOption{
                 {Type: discordgo.ApplicationCommandOptionString, Name: "username", Description: "Username to timeout", Required: true},
                 {Type: discordgo.ApplicationCommandOptionInteger, Name: "minutes", Description: "Timeout duration in minutes (>0)", Required: true, MinValue: floatPtr(1)},
@@ -80,6 +83,7 @@ func (b *Bot) commandSpecs() []*discordgo.ApplicationCommand {
 }
 
 func floatPtr(v float64) *float64 { return &v }
+func int64Ptr(v int64) *int64    { return &v }
 
 // registerSlashCommands registers commands globally or in a dev guild.
 func (b *Bot) registerSlashCommands() error {
@@ -179,17 +183,47 @@ func (b *Bot) handleApplicationCommand(s *discordgo.Session, i *discordgo.Intera
         b.handleCachedList(s, mc)
 
     case "status":
+        if !b.isAdmin(i.Member) {
+            _ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+                Type: discordgo.InteractionResponseChannelMessageWithSource,
+                Data: &discordgo.InteractionResponseData{
+                    Flags:   discordgo.MessageFlagsEphemeral,
+                    Content: "You don't have permission to use this command.",
+                },
+            })
+            return
+        }
         _ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Content: "Getting status…"}})
     mc := toMessageCreateFromInteraction(i, "")
         b.handleStatus(s, mc, nil)
 
     case "disconnect":
+        if !b.isAdmin(i.Member) {
+            _ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+                Type: discordgo.InteractionResponseChannelMessageWithSource,
+                Data: &discordgo.InteractionResponseData{
+                    Flags:   discordgo.MessageFlagsEphemeral,
+                    Content: "You don't have permission to use this command.",
+                },
+            })
+            return
+        }
         username := optString(i, "username")
         _ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Content: "Disconnecting…"}})
     mc := toMessageCreateFromInteraction(i, "")
         b.handleDisconnect(s, mc, []string{username})
 
     case "timeout":
+        if !b.isAdmin(i.Member) {
+            _ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+                Type: discordgo.InteractionResponseChannelMessageWithSource,
+                Data: &discordgo.InteractionResponseData{
+                    Flags:   discordgo.MessageFlagsEphemeral,
+                    Content: "You don't have permission to use this command.",
+                },
+            })
+            return
+        }
         username := optString(i, "username")
         minutes := int(optInt(i, "minutes"))
         _ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Content: "Applying timeout…"}})

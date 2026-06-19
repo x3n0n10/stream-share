@@ -19,9 +19,11 @@
 package database
 
 import (
+    "context"
     "database/sql"
     "errors"
     "fmt"
+    "time"
 
     "github.com/lucasduport/stream-share/pkg/utils"
 )
@@ -33,15 +35,17 @@ func (m *DBManager) LinkDiscordToLDAP(discordID, discordName, ldapUsername strin
         return fmt.Errorf("database not initialized")
     }
 
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
     stmt := `
-        INSERT INTO discord_ldap_mapping (discord_id, discord_name, ldap_username) 
+        INSERT INTO discord_ldap_mapping (discord_id, discord_name, ldap_username)
         VALUES ($1, $2, $3)
-        ON CONFLICT(discord_id) DO UPDATE SET 
+        ON CONFLICT(discord_id) DO UPDATE SET
           discord_name = EXCLUDED.discord_name,
           ldap_username = EXCLUDED.ldap_username,
           last_active = CURRENT_TIMESTAMP
     `
-    _, err := m.db.Exec(stmt, discordID, discordName, ldapUsername)
+    _, err := m.db.ExecContext(ctx, stmt, discordID, discordName, ldapUsername)
     if err != nil {
         utils.ErrorLog("Database error linking Discord to LDAP: %v", err)
         return err
@@ -57,9 +61,11 @@ func (m *DBManager) GetLDAPUserByDiscordID(discordID string) (string, error) {
         return "", fmt.Errorf("database not initialized")
     }
 
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
     var ldapUsername string
-    err := m.db.QueryRow(`
-        SELECT ldap_username FROM discord_ldap_mapping 
+    err := m.db.QueryRowContext(ctx, `
+        SELECT ldap_username FROM discord_ldap_mapping
         WHERE discord_id = $1
     `, discordID).Scan(&ldapUsername)
 
@@ -82,9 +88,11 @@ func (m *DBManager) GetDiscordByLDAPUser(ldapUsername string) (string, string, e
         return "", "", fmt.Errorf("database not initialized")
     }
 
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
     var discordID, discordName string
-    err := m.db.QueryRow(`
-        SELECT discord_id, discord_name FROM discord_ldap_mapping 
+    err := m.db.QueryRowContext(ctx, `
+        SELECT discord_id, discord_name FROM discord_ldap_mapping
         WHERE ldap_username = $1
     `, ldapUsername).Scan(&discordID, &discordName)
 

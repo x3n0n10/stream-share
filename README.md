@@ -17,6 +17,11 @@ StreamShare is a comprehensive IPTV management solution that allows secure shari
 - **VOD Caching and Local Playback**
   - Cache movies or episodes locally (1–14 days) with progress tracking
   - Automatically stream from cached content for downloads and VOD/series endpoints when available
+- **Local Catchup Buffering**
+  - Every active live stream is written to disk as it plays, enabling pause and rewind on any channel — even those without provider-side catchup support
+  - TiviMate (and other Xtream-compatible players) automatically show the rewind UI on all channels
+  - Channels that already have native catchup continue to use the provider's own timeshift endpoint unchanged
+  - Configurable buffer duration (default 4 hours) and pause grace period for seamless pause/resume
 - **User Experience**
   - Enhanced VOD search, including series episodes (queries like "the office s02e04")
   - Discord bot with prettier embed-based responses, dropdown selection, and pagination
@@ -225,6 +230,36 @@ Cache movies or episodes to disk for faster start times and to reduce upstream u
 Configuration:
 - `CACHE_FOLDER` — Absolute path where cached files are stored.
 - `INTERNAL_API_KEY` — API key used by the internal API (Discord bot and tools).
+
+---
+
+## Local Catchup Buffering
+
+StreamShare can buffer every active live stream to disk as it plays, giving all channels a rewind/catchup capability regardless of whether your IPTV provider supports it.
+
+### How It Works
+
+1. When a viewer starts watching a live channel, a `.ts` file is opened in the configured buffer directory and the stream is written to it in real time.
+2. A time-to-offset index is maintained in memory so any point in the stream can be found quickly.
+3. `get_live_streams` responses are patched to set `tv_archive=1` on all channels, so TiviMate (and other Xtream-compatible players) show the rewind UI everywhere.
+4. When a timeshift request arrives, stream-share checks whether the channel has **native** provider catchup:
+   - **Yes** → the request is proxied to the provider's own timeshift endpoint (zero change from before).
+   - **No** → the request is served from the local disk buffer at the requested timestamp offset.
+5. When all viewers leave, the buffer keeps recording for a configurable grace period (`CATCHUP_PAUSE_GRACE_MINUTES`) so that a TiviMate "pause" (which looks like a disconnect at the protocol level) can resume seamlessly via timeshift. A genuine channel switch is detected separately and stops recording immediately.
+
+### Disk Usage
+
+At 10 Mbps a 4-hour buffer is approximately **18 GB per active channel**. Only channels that are currently being watched are buffered — idle channels use no space. Files are deleted when a stream stops and cleaned up on startup.
+
+### Configuration
+
+| Env var | Default | Description |
+|---|---|---|
+| `CATCHUP_ENABLED` | `false` | Set to `true` to enable |
+| `CATCHUP_BUFFER_DIR` | `$TMPDIR/stream-share-catchup` | Directory for buffer `.ts` files |
+| `CATCHUP_DURATION` | `4` | Hours of catchup to buffer and advertise to clients |
+| `CATCHUP_PAUSE_GRACE_MINUTES` | `5` | Minutes to keep recording after the last viewer leaves (for pause/resume); channel switches bypass this |
+| `TZ` | — | **Required.** Must match the timezone of your IPTV clients — TiviMate sends local time in timeshift URLs (e.g. `TZ=Europe/Amsterdam`) |
 
 ---
 

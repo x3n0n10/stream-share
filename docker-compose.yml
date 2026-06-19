@@ -68,9 +68,17 @@ services:
       CACHE_FOLDER: "/cache"           # Folder to store cached VOD files
       VOD_CACHE_STALE_HOURS: "24"      # Delete cached VOD files not accessed for this many hours
 
+      # Local Catchup Buffering
+      TZ: "Europe/Amsterdam"           # Timezone — MUST match the timezone of your IPTV clients (TiviMate sends local time)
+      CATCHUP_ENABLED: "false"         # Set to "true" to enable local catchup buffering
+      CATCHUP_BUFFER_DIR: "/catchup"   # Directory for catchup buffer files (~18 GB per active channel at 10 Mbps for 4 hours)
+      CATCHUP_DURATION: "4"            # Hours of catchup to buffer and advertise to clients
+      CATCHUP_PAUSE_GRACE_MINUTES: "5" # Minutes to keep recording after the last viewer leaves, so a paused channel can resume via timeshift without a gap (channel switches bypass this)
+
     volumes:
       - ss_config:/root     # Persistent configuration storage (config, state)
       - ss_cache:/cache     # VOD cache storage (movies/series)
+      - ss_catchup:/catchup # Catchup buffer storage (live stream recordings)
 
     depends_on:
       - db
@@ -107,4 +115,5 @@ volumes:
   ss_config:
   ss_data:
   ss_cache:
+  ss_catchup:
   postgres_data:

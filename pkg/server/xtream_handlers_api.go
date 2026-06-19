@@ -181,6 +181,9 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 
     utils.InfoLog("Action\t%s requested by %s", action, ctx.ClientIP())
     processedResp := xtreamapi.ProcessResponse(resp)
+    if action == "get_live_streams" && c.catchupManager != nil && c.catchupManager.IsEnabled() {
+        processedResp = c.injectCatchupFlags(processedResp)
+    }
 
     if config.CacheFolder != "" && utils.IsDebugLogEnabled() {
         readableJSON, _ := json.Marshal(processedResp)
@@ -192,6 +195,34 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 }
 
 func (c *Config) xtreamPlayerAPIGET(ctx *gin.Context) { c.xtreamPlayerAPI(ctx, ctx.Request.URL.Query()) }
+
+func (c *Config) injectCatchupFlags(resp interface{}) interface{} {
+    streams, ok := resp.([]interface{})
+    if !ok {
+        return resp
+    }
+    upstreamCatchup := make(map[string]bool, len(streams))
+    for _, item := range streams {
+        m, ok := item.(map[string]interface{})
+        if !ok {
+            continue
+        }
+        streamID := fmt.Sprintf("%v", m["stream_id"])
+        if v, exists := m["tv_archive"]; exists {
+            switch vv := v.(type) {
+            case json.Number:
+                n, _ := vv.Int64()
+                upstreamCatchup[streamID] = n == 1
+            case float64:
+                upstreamCatchup[streamID] = vv == 1
+            }
+        }
+        m["tv_archive"] = 1
+        m["tv_archive_duration"] = c.catchupManager.AdvertisedHours()
+    }
+    c.catchupManager.SetUpstreamCatchup(upstreamCatchup)
+    return streams
+}
 
 func (c *Config) xtreamPlayerAPIPOST(ctx *gin.Context) {
     contents, err := io.ReadAll(ctx.Request.Body)

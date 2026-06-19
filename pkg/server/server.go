@@ -35,6 +35,7 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/jamesnetherton/m3u"
+	"github.com/lucasduport/stream-share/pkg/catchup"
 	"github.com/lucasduport/stream-share/pkg/config"
 	"github.com/lucasduport/stream-share/pkg/database"
 	"github.com/lucasduport/stream-share/pkg/discord"
@@ -63,6 +64,7 @@ type Config struct {
 
 	// New components
 	sessionManager *session.SessionManager
+	catchupManager *catchup.Manager
 	db             *database.DBManager
 	discordBot     *discord.Bot
 
@@ -121,6 +123,52 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		utils.ErrorLog("Bootstrap: sessionManager is NIL - multiplexing will NOT be used")
 	} else {
 		utils.InfoLog("Bootstrap: sessionManager initialized OK")
+	}
+
+	// Initialize local catchup buffering from environment variables
+	catchupEnabled := os.Getenv("CATCHUP_ENABLED") == "true"
+	catchupDir := os.Getenv("CATCHUP_BUFFER_DIR")
+	if catchupDir == "" {
+		catchupDir = filepath.Join(os.TempDir(), "stream-share-catchup")
+	}
+	catchupDur := 4
+	if v := os.Getenv("CATCHUP_DURATION"); v != "" {
+		if d, err := strconv.Atoi(v); err == nil && d > 0 {
+			catchupDur = d
+		}
+	}
+	serverConfig.catchupManager = catchup.New(catchupEnabled, catchupDir, catchupDur)
+	if catchupEnabled {
+		serverConfig.catchupManager.CleanupOldFiles()
+		tz := os.Getenv("TZ")
+		if tz == "" {
+			utils.WarnLog("Bootstrap: catchup is ENABLED but TZ env var is not set — timeshift timestamps from clients will be parsed as UTC and rewinds will land at the wrong position. Set TZ to your clients' timezone (e.g. TZ=Europe/Amsterdam).")
+		} else {
+			utils.InfoLog("Bootstrap: local catchup buffering ENABLED (dir=%s, duration=%dh, TZ=%s)", catchupDir, catchupDur, tz)
+		}
+	} else {
+		utils.InfoLog("Bootstrap: local catchup buffering DISABLED (set CATCHUP_ENABLED=true to enable)")
+	}
+	if serverConfig.sessionManager != nil {
+		serverConfig.sessionManager.SetCatchupManager(serverConfig.catchupManager)
+	}
+
+	// Pause grace: how long a catchup-enabled live stream stays alive (upstream
+	// connection open, disk recording continuing) after its last viewer
+	// disconnects, so a TiviMate "pause" followed by a timeshift-based resume
+	// has continuous buffered content with no gap. Channel switches are detected
+	// separately and bypass this grace period (see SessionManager.RequestStream).
+	catchupPauseGrace := 5
+	if v := os.Getenv("CATCHUP_PAUSE_GRACE_MINUTES"); v != "" {
+		if d, err := strconv.Atoi(v); err == nil && d >= 0 {
+			catchupPauseGrace = d
+		}
+	}
+	if serverConfig.sessionManager != nil {
+		serverConfig.sessionManager.SetPauseGrace(time.Duration(catchupPauseGrace) * time.Minute)
+		if catchupEnabled && catchupPauseGrace > 0 {
+			utils.InfoLog("Bootstrap: catchup pause grace set to %d minute(s) — paused live streams keep recording for seamless resume", catchupPauseGrace)
+		}
 	}
 
 	// Configure session parameters from environment variables
@@ -260,6 +308,9 @@ func (c *Config) Serve() error {
 	if c.sessionManager != nil {
 		defer c.sessionManager.Stop()
 	}
+	if c.catchupManager != nil {
+		defer c.catchupManager.Cleanup()
+	}
 
 	// Start Discord bot if configured
 	if c.discordBot != nil {
@@ -310,20 +361,8 @@ func (c *Config) addProxyCredentialRoutes(router *gin.Engine) {
 	// Series
 	router.GET("/series/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsSeriesStreamHandler)
 
-	// Timeshift
-	router.GET("/timeshift/:username/:password/:duration/:start/:id", c.authWithPathCredentials(), func(ctx *gin.Context) {
-		duration := ctx.Param("duration")
-		start := ctx.Param("start")
-		id := ctx.Param("id")
-		utils.DebugLog("Timeshift request with proxy credentials: duration=%s, start=%s, id=%s", duration, start, id)
-		rpURL, err := url.Parse(fmt.Sprintf("%s/timeshift/%s/%s/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, duration, start, id))
-		if err != nil {
-			utils.ErrorLog("Failed to parse upstream URL: %v", err)
-			ctx.AbortWithStatus(http.StatusInternalServerError)
-			return
-		}
-		c.multiplexedStream(ctx, rpURL)
-	})
+	// Timeshift — routed through xtreamStreamTimeshift which handles local catchup
+	router.GET("/timeshift/:username/:password/:duration/:start/:id", c.authWithPathCredentials(), c.xtreamStreamTimeshift)
 
 	utils.InfoLog("[stream-share] Routes initialized with direct stream URL support")
 }

@@ -182,7 +182,7 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 
 	offset := buf.OffsetForTime(startTime)
 	utils.InfoLog("Catchup: serving stream %s from local buffer at offset %d / %d bytes (start raw=%q parsed=%s)", idRaw, offset, buf.BytesBuffered(), start, startTime.Format(time.RFC3339))
-	c.serveFromCatchupBuffer(ctx, buf, offset)
+	c.serveFromCatchupBuffer(ctx, buf, startTime)
 
 	// If the client disconnected or the handler aborted, we're done.
 	select {
@@ -241,10 +241,39 @@ func alignToTSPacket(f *os.File, startOffset int64) {
 	_, _ = f.Seek(startOffset, io.SeekStart)
 }
 
-func (c *Config) serveFromCatchupBuffer(ctx *gin.Context, buf *catchup.DiskBuffer, startOffset int64) {
-	f, err := os.Open(buf.FilePath())
+// serveFromCatchupBuffer serves a timeshift request from the local disk buffer.
+// It resolves the correct file for startTime (which may be the previous file after a
+// rotation), serves that file to completion, then seamlessly continues from the current
+// file when necessary — so rewinds that span a rotation boundary play through without
+// interruption.
+func (c *Config) serveFromCatchupBuffer(ctx *gin.Context, buf *catchup.DiskBuffer, startTime time.Time) {
+	filePath, startOffset := buf.FileForTime(startTime)
+	currentPath := buf.FilePath()
+
+	if filePath != currentPath {
+		// Serving from the previous (fully-written) file. A closed drainDone signals
+		// "no more data to wait for" — the prev file is complete.
+		closedCh := make(chan struct{})
+		close(closedCh)
+		c.streamFileSegment(ctx, filePath, startOffset, closedCh)
+		if ctx.Request.Context().Err() != nil || ctx.IsAborted() {
+			return
+		}
+		// Seamlessly continue from the beginning of the current file.
+		filePath = buf.FilePath() // re-read in case another rotation happened
+		startOffset = 0
+	}
+
+	c.streamFileSegment(ctx, filePath, startOffset, buf.DrainDone())
+}
+
+// streamFileSegment serves bytes from filePath starting at startOffset, flushing to the
+// client as they arrive. It blocks until drainDone closes (all data written), polling
+// every 200 ms when EOF is hit before that point.
+func (c *Config) streamFileSegment(ctx *gin.Context, filePath string, startOffset int64, drainDone <-chan struct{}) {
+	f, err := os.Open(filePath)
 	if err != nil {
-		utils.ErrorLog("Catchup: failed to open buffer file %s: %v", buf.FilePath(), err)
+		utils.ErrorLog("Catchup: failed to open buffer file %s: %v", filePath, err)
 		ctx.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
@@ -254,7 +283,6 @@ func (c *Config) serveFromCatchupBuffer(ctx *gin.Context, buf *catchup.DiskBuffe
 
 	readBuf := make([]byte, 64*1024)
 	clientGone := ctx.Request.Context().Done()
-	drainDone := buf.DrainDone()
 	for {
 		select {
 		case <-clientGone:

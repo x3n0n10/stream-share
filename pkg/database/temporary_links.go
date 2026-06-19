@@ -15,7 +15,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
- 
+
 package database
 
 import (
@@ -33,8 +33,10 @@ func (m *DBManager) CreateTemporaryLink(token, username, url, streamID, title st
     if m == nil || m.db == nil {
         return fmt.Errorf("database not initialized")
     }
-    _, err := m.db.Exec(`
-        INSERT INTO temporary_links (token, username, url, expires_at, stream_id, title) 
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    _, err := m.db.ExecContext(ctx, `
+        INSERT INTO temporary_links (token, username, url, expires_at, stream_id, title)
         VALUES ($1, $2, $3, $4, $5, $6)
     `, token, username, url, expirationTime, streamID, title)
     if err != nil {
@@ -51,10 +53,12 @@ func (m *DBManager) GetTemporaryLink(token string) (*types.TemporaryLink, error)
         return nil, fmt.Errorf("database not initialized")
     }
 
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
     link := &types.TemporaryLink{}
-    err := m.db.QueryRow(`
+    err := m.db.QueryRowContext(ctx, `
         SELECT token, username, url, expires_at, stream_id, title
-        FROM temporary_links 
+        FROM temporary_links
         WHERE token = $1 AND expires_at > CURRENT_TIMESTAMP
     `, token).Scan(&link.Token, &link.Username, &link.URL, &link.ExpiresAt, &link.StreamID, &link.Title)
 
@@ -70,7 +74,9 @@ func (m *DBManager) CleanupExpiredLinks() (int64, error) {
     if m == nil || m.db == nil {
         return 0, fmt.Errorf("database not initialized")
     }
-    result, err := m.db.Exec(`DELETE FROM temporary_links WHERE expires_at < CURRENT_TIMESTAMP`)
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    result, err := m.db.ExecContext(ctx, `DELETE FROM temporary_links WHERE expires_at < CURRENT_TIMESTAMP`)
     if err != nil {
         utils.ErrorLog("Database error cleaning up expired links: %v", err)
         return 0, err

@@ -69,6 +69,15 @@ type SessionManager struct {
 	// (streams stop immediately, as before). Guarded by streamLock.
 	pauseGrace   time.Duration
 	pendingStops map[string]chan struct{} // streamID -> cancel channel for a scheduled stop
+
+	// vodViewTimers holds grace timers that delay tearing down a synthetic VOD
+	// view after its last range request. Cached VOD is served via many short
+	// Range requests with gaps between them while the player drains its buffer;
+	// without a grace window the synthetic session would flicker out of /status
+	// between requests. A new request cancels the pending timer. Keyed by
+	// streamID + "\x00" + username. Guarded by its own mutex.
+	vodViewTimersMu sync.Mutex
+	vodViewTimers   map[string]*time.Timer
 }
 
 // Stream multiplexing tuning.
@@ -134,6 +143,7 @@ func NewSessionManager(db *database.DBManager) *SessionManager {
 		vodCacheStaleAge:   24 * time.Hour,
 		clientStallTimeout: defaultClientStallTimeout,
 		pendingStops:       make(map[string]chan struct{}),
+		vodViewTimers:      make(map[string]*time.Timer),
 		stopChan:           make(chan struct{}),
 		httpClient: &http.Client{
 			// No global Timeout: long-running streams must not be cut after 60s
@@ -156,6 +166,13 @@ func NewSessionManager(db *database.DBManager) *SessionManager {
 // Stop terminates all background goroutines started by the session manager.
 func (sm *SessionManager) Stop() {
 	close(sm.stopChan)
+
+	sm.vodViewTimersMu.Lock()
+	for key, t := range sm.vodViewTimers {
+		t.Stop()
+		delete(sm.vodViewTimers, key)
+	}
+	sm.vodViewTimersMu.Unlock()
 }
 
 // SetCatchupManager attaches a catchup manager for local disk buffering of live streams.
@@ -891,8 +908,16 @@ func (sm *SessionManager) DisconnectUser(username string) {
 	utils.InfoLog("User %s forcibly disconnected", username)
 }
 
-// RegisterVODView creates a synthetic stream session so status commands see users watching local files.
+// vodViewKey identifies a synthetic VOD view by stream and user.
+func vodViewKey(streamID, username string) string { return streamID + "\x00" + username }
+
+// RegisterVODView creates a synthetic stream session so status commands see users
+// watching local files. Cached VOD is served as many short Range requests, so any
+// pending grace-period teardown for this view is cancelled here: as long as the
+// player keeps requesting, the session stays visible in /status.
 func (sm *SessionManager) RegisterVODView(username, streamID, streamType, title string) {
+	sm.cancelVODViewTimer(streamID, username)
+
 	sm.userLock.Lock()
 	if sess, exists := sm.userSessions[username]; exists {
 		sess.StreamID = streamID
@@ -906,6 +931,7 @@ func (sm *SessionManager) RegisterVODView(username, streamID, streamType, title 
 	if ss, exists := sm.streamSessions[streamID]; exists {
 		ss.AddViewer(username)
 		ss.LastRequested = time.Now()
+		ss.Active = true
 	} else {
 		ss := &types.StreamSession{
 			StreamID: streamID, StreamType: streamType, StreamTitle: title,
@@ -917,8 +943,40 @@ func (sm *SessionManager) RegisterVODView(username, streamID, streamType, title 
 	}
 }
 
-// UnregisterVODView removes a user from a synthetic VOD viewing session.
+// UnregisterVODView schedules removal of a synthetic VOD view after a grace
+// period rather than tearing it down immediately. Players fetch cached files in
+// short Range requests with gaps in between while the local buffer plays; a
+// grace window keeps the session in /status across those gaps. A subsequent
+// RegisterVODView (i.e. the next range request) cancels the pending removal.
 func (sm *SessionManager) UnregisterVODView(username, streamID string) {
+	key := vodViewKey(streamID, username)
+	sm.vodViewTimersMu.Lock()
+	if t, ok := sm.vodViewTimers[key]; ok {
+		t.Stop()
+	}
+	sm.vodViewTimers[key] = time.AfterFunc(sm.streamTimeout, func() {
+		sm.vodViewTimersMu.Lock()
+		delete(sm.vodViewTimers, key)
+		sm.vodViewTimersMu.Unlock()
+		sm.removeVODView(username, streamID)
+	})
+	sm.vodViewTimersMu.Unlock()
+}
+
+// cancelVODViewTimer stops any pending grace-period removal for a VOD view.
+func (sm *SessionManager) cancelVODViewTimer(streamID, username string) {
+	key := vodViewKey(streamID, username)
+	sm.vodViewTimersMu.Lock()
+	if t, ok := sm.vodViewTimers[key]; ok {
+		t.Stop()
+		delete(sm.vodViewTimers, key)
+	}
+	sm.vodViewTimersMu.Unlock()
+}
+
+// removeVODView detaches a user from a synthetic VOD viewing session once the
+// grace period has elapsed without further range requests.
+func (sm *SessionManager) removeVODView(username, streamID string) {
 	sm.userLock.Lock()
 	if sess, exists := sm.userSessions[username]; exists && sess.StreamID == streamID {
 		sess.StreamID = ""

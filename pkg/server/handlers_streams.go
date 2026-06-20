@@ -72,7 +72,7 @@ func (c *Config) getStreamInfo(ctx *gin.Context) {
 		return
 	}
 
-	utils.DebugLog("API: Found active stream %s with %d viewers", streamID, len(stream.GetViewers()))
+	utils.DebugLog("API: Found active %s with %d viewers", c.streamLabel(streamID), len(stream.GetViewers()))
 	ctx.JSON(http.StatusOK, types.APIResponse{
 		Success: true,
 		Data:    stream,

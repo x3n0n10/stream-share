@@ -20,6 +20,7 @@ package server
 
 import (
 	"bufio"
+	"fmt"
 	"net/url"
 	"os"
 	"path"
@@ -157,4 +158,15 @@ func (c *Config) getChannelNameByID(streamID string) (string, bool) {
 	channelIndexMu.RUnlock()
 
 	return lookupAPIChannelName(id)
+}
+
+// streamLabel formats a stream for logging as "Channel Name (Stream <id>)",
+// falling back to "Stream <id>" when no name is known. The id is reported
+// without its file extension for readability.
+func (c *Config) streamLabel(streamID string) string {
+	id := normalizeStreamID(streamID)
+	if name, ok := c.getChannelNameByID(streamID); ok && strings.TrimSpace(name) != "" {
+		return fmt.Sprintf("%s (Stream %s)", strings.TrimSpace(name), id)
+	}
+	return fmt.Sprintf("Stream %s", id)
 }

@@ -116,6 +116,7 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	}
 	serverConfig.db = db
 	serverConfig.sessionManager = session.NewSessionManager(db)
+	serverConfig.sessionManager.SetNameResolver(serverConfig.getChannelNameByID)
 	utils.InfoLog("Session manager initialized with database connection")
 
 	// After session manager init
@@ -440,7 +441,7 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 	if c.db != nil && tempLink.StreamID != "" {
 		idRaw := strings.TrimSuffix(tempLink.StreamID, path.Ext(tempLink.StreamID))
 		if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil && entry.Status == "ready" {
-			utils.InfoLog("Download via cache for stream %s -> %s", tempLink.StreamID, entry.FilePath)
+			utils.InfoLog("Download via cache for %s -> %s", c.streamLabel(tempLink.StreamID), entry.FilePath)
 			ext := strings.ToLower(path.Ext(entry.FilePath)); if ext == "" { ext = ".mp4" }
 			_ = c.db.TouchVODCache(idRaw)
 			var ct string
@@ -520,7 +521,7 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	if c.db != nil && (streamType == "movie" || streamType == "series") {
 		if entry, err := c.db.GetVODCache(streamIDRaw); err == nil && entry != nil && entry.Status == "ready" {
 			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
-				utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, streamIDRaw, entry.FilePath)
+				utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, c.streamLabel(streamIDRaw), entry.FilePath)
 				// Content-Type based on file extension
 				var ct string
 				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" { ct = "video/mp2t" } else if ext == ".mkv" { ct = "video/x-matroska" } else { ct = "video/mp4" }
@@ -528,7 +529,7 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 				serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
 				return
 			}
-			utils.WarnLog("Multiplex: cached %s missing on disk for stream %s at %s; falling back to upstream", streamType, streamIDRaw, entry.FilePath)
+			utils.WarnLog("Multiplex: cached %s missing on disk for %s at %s; falling back to upstream", streamType, c.streamLabel(streamIDRaw), entry.FilePath)
 		}
 	}
 
@@ -539,20 +540,21 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	}
 
 	// Request the stream through the session manager for multiplexing
+	label := c.streamLabel(streamID)
 	buffer, err := c.sessionManager.RequestStream(username, streamID, streamType, streamTitle, targetURL)
 	if err != nil {
-		utils.ErrorLog("Multiplex: RequestStream failed for user=%s streamID=%s err=%v", username, streamID, err)
+		utils.ErrorLog("Multiplex: RequestStream failed for user=%s %s err=%v", username, label, err)
 		ctx.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
 	if buffer == nil {
-		utils.WarnLog("Multiplex: buffer returned is NIL for streamID=%s (user=%s)", streamID, username)
+		utils.WarnLog("Multiplex: buffer returned is NIL for %s (user=%s)", label, username)
 	}
 
 	// Get the data channel and termination signal for this client
 	dataChan, exists := c.sessionManager.GetClientChannel(streamID, username)
 	if !exists {
-		utils.ErrorLog("Failed to get client channel for user=%s, streamID=%s", username, streamID)
+		utils.ErrorLog("Failed to get client channel for user=%s, %s", username, label)
 		ctx.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
@@ -563,18 +565,18 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	setNoBufferingHeaders(ctx, contentTypeForPath(targetURL.Path))
 
 	// Stream data to the client
-	utils.InfoLog("Starting multiplexed stream for user %s (stream %s)", username, streamID)
+	utils.InfoLog("Starting multiplexed stream for user %s (%s)", username, label)
 
 	ctx.Stream(func(w io.Writer) bool {
 		select {
 		case data, ok := <-dataChan:
 			if !ok {
-				utils.DebugLog("Stream channel closed for user %s (stream %s)", username, streamID)
+				utils.DebugLog("Stream channel closed for user %s (%s)", username, label)
 				return false
 			}
 			if _, err := w.Write(data); err != nil {
 				// Client disconnected
-				utils.DebugLog("Client write error for user %s (stream %s): %v", username, streamID, err)
+				utils.DebugLog("Client write error for user %s (%s): %v", username, label, err)
 				return false
 			}
 			// Force immediate delivery to client to avoid periodic buffering
@@ -584,17 +586,17 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 			return true
 		case <-doneChan:
 			// Pump dropped this client (slow viewer) or the stream stopped
-			utils.DebugLog("Stream done signal for user %s (stream %s)", username, streamID)
+			utils.DebugLog("Stream done signal for user %s (%s)", username, label)
 			return false
 		case <-clientGone:
 			// Client closed the connection while we were waiting for data
-			utils.DebugLog("Client disconnected (idle) for user %s (stream %s)", username, streamID)
+			utils.DebugLog("Client disconnected (idle) for user %s (%s)", username, label)
 			return false
 		}
 	})
 
 	// Clean up after streaming is done
-	utils.InfoLog("Stream ended for user %s (stream %s)", username, streamID)
+	utils.InfoLog("Stream ended for user %s (%s)", username, label)
 	c.sessionManager.RemoveClient(streamID, username)
 }
 

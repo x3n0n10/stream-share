@@ -459,10 +459,13 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 	c.stream(ctx, targetURL)
 }
 
-// multiplexedStream handles streaming with connection multiplexing
-// multiplexedStream proxies a stream while sharing a single upstream connection
-// across multiple clients for the same content using the SessionManager.
-func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
+// resolveRequestUsername derives the viewer identity for session tracking. It
+// prefers the authenticated username set by middleware, then path/query params,
+// and finally falls back to the client IP. The fallback matters for the direct
+// Xtream-credentials routes (e.g. /movie/<user>/<pass>/:id), which have no auth
+// middleware and therefore no username in context — without it, VOD views would
+// never be registered and /status would miss them.
+func (c *Config) resolveRequestUsername(ctx *gin.Context) string {
 	username := ctx.GetString("username")
 	if username == "" {
 		username = ctx.Param("username")
@@ -473,6 +476,14 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	if username == "" {
 		username = ctx.ClientIP()
 	}
+	return username
+}
+
+// multiplexedStream handles streaming with connection multiplexing
+// multiplexedStream proxies a stream while sharing a single upstream connection
+// across multiple clients for the same content using the SessionManager.
+func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
+	username := c.resolveRequestUsername(ctx)
 
 	// Extract stream ID and type
 	streamID := path.Base(targetURL.Path)

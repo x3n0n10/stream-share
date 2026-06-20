@@ -621,10 +621,10 @@ func (c *Config) marshallInto(into *os.File, xtream bool) error {
 		var buffer bytes.Buffer
 
 		buffer.WriteString("#EXTINF:")                       // nolint: errcheck
-		buffer.WriteString(fmt.Sprintf("%d ", track.Length)) // nolint: errcheck
+		fmt.Fprintf(&buffer, "%d ", track.Length)
 		for i := range track.Tags {
 			if i == len(track.Tags)-1 {
-				buffer.WriteString(fmt.Sprintf("%s=%q", track.Tags[i].Name, track.Tags[i].Value)) // nolint: errcheck
+				fmt.Fprintf(&buffer, "%s=%q", track.Tags[i].Name, track.Tags[i].Value)
 				continue
 			}
 			buffer.WriteString(fmt.Sprintf("%s=%q ", track.Tags[i].Name, track.Tags[i].Value)) // nolint: errcheck

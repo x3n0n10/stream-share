@@ -105,10 +105,9 @@ func (c *Config) statusSummary(ctx *gin.Context) {
 			if strings.TrimSpace(title) == "" {
 				title = it.StreamID
 			}
-			b.WriteString(fmt.Sprintf(
-				"- %s [%s] — %d viewer(s): %s (since %s)\n",
+			fmt.Fprintf(&b, "- %s [%s] — %d viewer(s): %s (since %s)\n",
 				title, it.StreamType, it.ViewerCount, strings.Join(it.Viewers, ", "), it.Duration,
-			))
+			)
 		}
 	}
 

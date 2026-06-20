@@ -430,7 +430,7 @@ func (c *Config) xtreamStreamMovieWithCache(ctx *gin.Context) {
 }
 
 func (c *Config) xtreamStreamMovie(ctx *gin.Context) {
-	if utils.GetEnvOrDefault("USE_VOD_CACHING", "false") == "true" {
+	if c.VODCacheEnabled {
 		c.xtreamStreamMovieWithCache(ctx)
 	} else {
 		id := ctx.Param("id")
@@ -537,7 +537,7 @@ func (c *Config) xtreamStreamSeriesWithCache(ctx *gin.Context) {
 }
 
 func (c *Config) xtreamStreamSeries(ctx *gin.Context) {
-	if utils.GetEnvOrDefault("USE_VOD_CACHING", "false") == "true" {
+	if c.VODCacheEnabled {
 		c.xtreamStreamSeriesWithCache(ctx)
 	} else {
 		id := ctx.Param("id")
@@ -576,7 +576,7 @@ func (c *Config) xtreamProxyCredentialsLiveStreamHandler(ctx *gin.Context) {
 }
 
 func (c *Config) xtreamProxyCredentialsMovieStreamHandler(ctx *gin.Context) {
-	if utils.GetEnvOrDefault("USE_VOD_CACHING", "false") == "true" {
+	if c.VODCacheEnabled {
 		c.xtreamProxyCredentialsMovieStreamHandlerWithCache(ctx)
 	} else {
 		id := ctx.Param("id")
@@ -686,7 +686,7 @@ func (c *Config) xtreamProxyCredentialsMovieStreamHandlerWithCache(ctx *gin.Cont
 }
 
 func (c *Config) xtreamProxyCredentialsSeriesStreamHandler(ctx *gin.Context) {
-	if utils.GetEnvOrDefault("USE_VOD_CACHING", "false") == "true" {
+	if c.VODCacheEnabled {
 		c.xtreamProxyCredentialsSeriesStreamHandlerWithCache(ctx)
 	} else {
 		id := ctx.Param("id")

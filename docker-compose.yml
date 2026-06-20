@@ -8,16 +8,16 @@ services:
       # M3U Configuration
       M3U_URL: ""                      # URL or path to M3U file
       M3U_FILE_NAME: "file.m3u"        # Name of the generated M3U file
-      M3U_CACHE_EXPIRATION: "24"       # Cache expiration in hours
+      M3U_CACHE_EXPIRATION_HOURS: "24"       # Cache expiration in hours
 
       # Server Configuration
       PORT: 8080                       # Port to listen on
       ADVERTISED_PORT: 443             # Port to advertise in URLs (for reverse proxy)
       HOSTNAME: ""                     # Hostname to use in URLs
-      REVERSE_PROXY: "true"            # Whether behind a reverse proxy (for correct URL generation)
-      PUBLIC_BASE_URL: ""              # Base URL for public-facing links, e.g. https://my.domain.com/stream-share (overrides REVERSE_PROXY heuristics)
+      REVERSE_PROXY_ENABLED: "true"            # Whether behind a reverse proxy (for correct URL generation)
+      PUBLIC_BASE_URL: ""              # Base URL for public-facing links, e.g. https://my.domain.com/stream-share (overrides REVERSE_PROXY_ENABLED heuristics)
       GIN_MODE: "release"              # Gin mode (debug or release) - read by Gin automatically if set
-      HTTPS: "1"                       # Use HTTPS in generated URLs
+      HTTPS_ENABLED: "1"                       # Use HTTPS in generated URLs
       CUSTOM_ENDPOINT: ""              # Custom endpoint path
       CUSTOM_ID: ""                    # Custom ID for URL paths
       
@@ -25,14 +25,14 @@ services:
       XTREAM_USER: ""                  # Xtream API username
       XTREAM_PASSWORD: ""              # Xtream API password
       XTREAM_BASE_URL: ""              # Xtream API base URL
-      XTREAM_API_GET: "false"          # Generate get.php from API
+      XTREAM_API_GET_ENABLED: "false"          # Generate get.php from API
 
       # Legacy authentication (when LDAP is disabled)
-      USER: ""                         # Username for basic auth
-      PASSWORD: ""                     # Password for basic auth
+      AUTH_USER: ""                         # Username for basic auth
+      AUTH_PASSWORD: ""                     # Password for basic auth
       
       # Debug options
-      DEBUG_LOGGING: "true"            # Enable debug logging
+      LOG_DEBUG_ENABLED: "true"            # Enable debug logging
 
       # LDAP Authentication
       LDAP_ENABLED: "true"             # Enable LDAP authentication
@@ -63,14 +63,14 @@ services:
       MULTIPLEX_STALL_TIMEOUT_SECONDS: "30"  # Drop a multiplexed viewer whose buffer stalls this long (protects co-viewers)
 
       # Caching (single root; subfolders are created internally: <root>/vod and <root>/catchup)
-      USE_VOD_CACHING: "true"          # Enable on-demand VOD caching
+      VOD_CACHE_ENABLED: "true"          # Enable on-demand VOD caching
       CACHE_FOLDER: "/cache"           # Root cache folder — VOD files go in /cache/vod, catchup buffers in /cache/catchup
       VOD_CACHE_STALE_HOURS: "24"      # Delete cached VOD files not accessed for this many hours
 
       # Local Catchup Buffering
       TZ: "Europe/Amsterdam"           # Timezone — MUST match the timezone of your IPTV clients (TiviMate sends local time)
       CATCHUP_ENABLED: "false"         # Set to "true" to enable local catchup buffering (~18 GB per active channel at 10 Mbps for 4 hours)
-      CATCHUP_DURATION: "4"            # Hours of catchup to buffer and advertise to clients
+      CATCHUP_DURATION_HOURS: "4"            # Hours of catchup to buffer and advertise to clients
       CATCHUP_PAUSE_GRACE_MINUTES: "5" # Minutes to keep recording after the last viewer leaves, so a paused channel can resume via timeshift without a gap (channel switches bypass this)
 
     volumes:

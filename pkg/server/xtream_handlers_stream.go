@@ -341,15 +341,13 @@ func (c *Config) xtreamStreamMovieWithCache(ctx *gin.Context) {
 		return
 	}
 	if c.sessionManager != nil {
-		username := ctx.GetString("username")
-		if username == "" {
-			username = ctx.Param("username")
-		}
+		username := c.resolveRequestUsername(ctx)
 		if username != "" {
 			movieTitle := idRaw
-			if name, ok := c.getChannelNameByID(idRaw); ok && strings.TrimSpace(name) != "" {
+			if name, ok := c.resolveTitleAtStart(idRaw, "movie"); ok && strings.TrimSpace(name) != "" {
 				movieTitle = name
 			}
+			utils.InfoLog("VOD movie started: %s for user %s", movieTitle, username)
 			c.sessionManager.RegisterVODView(username, idRaw, "movie", movieTitle)
 			defer c.sessionManager.UnregisterVODView(username, idRaw)
 		}
@@ -368,12 +366,12 @@ func (c *Config) xtreamStreamMovieWithCache(ctx *gin.Context) {
 				}
 				_ = c.db.TouchVODCache(idRaw)
 				if strings.ToLower(entry.Status) == "ready" {
-					utils.InfoLog("Serving cached movie for %s from %s", idRaw, entry.FilePath)
+					utils.InfoLog("Serving cached movie for %s from %s", c.vodLabel(idRaw), entry.FilePath)
 					serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
 					return
 				}
 				// Final file exists but DB status is stale (rename completed before DB update).
-				utils.InfoLog("Serving complete cached file for %s (DB status pending update)", idRaw)
+				utils.InfoLog("Serving complete cached file for %s (DB status pending update)", c.vodLabel(idRaw))
 				serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
 				return
 			}
@@ -459,15 +457,13 @@ func (c *Config) xtreamStreamSeriesWithCache(ctx *gin.Context) {
 		return
 	}
 	if c.sessionManager != nil {
-		username := ctx.GetString("username")
-		if username == "" {
-			username = ctx.Param("username")
-		}
+		username := c.resolveRequestUsername(ctx)
 		if username != "" {
 			seriesTitle := idRaw
-			if name, ok := c.getChannelNameByID(idRaw); ok && strings.TrimSpace(name) != "" {
+			if name, ok := c.resolveTitleAtStart(idRaw, "series"); ok && strings.TrimSpace(name) != "" {
 				seriesTitle = name
 			}
+			utils.InfoLog("VOD series started: %s for user %s", seriesTitle, username)
 			c.sessionManager.RegisterVODView(username, idRaw, "series", seriesTitle)
 			defer c.sessionManager.UnregisterVODView(username, idRaw)
 		}
@@ -485,12 +481,12 @@ func (c *Config) xtreamStreamSeriesWithCache(ctx *gin.Context) {
 				}
 				_ = c.db.TouchVODCache(idRaw)
 				if strings.ToLower(entry.Status) == "ready" {
-					utils.InfoLog("Serving cached episode for %s from %s", idRaw, entry.FilePath)
+					utils.InfoLog("Serving cached episode for %s from %s", c.vodLabel(idRaw), entry.FilePath)
 					serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
 					return
 				}
 				// Final file exists but DB status is stale (rename completed before DB update).
-				utils.InfoLog("Serving complete cached file for %s (DB status pending update)", idRaw)
+				utils.InfoLog("Serving complete cached file for %s (DB status pending update)", c.vodLabel(idRaw))
 				serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
 				return
 			}
@@ -612,15 +608,13 @@ func (c *Config) xtreamProxyCredentialsMovieStreamHandlerWithCache(ctx *gin.Cont
 	}
 	utils.DebugLog("Direct movie stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
 	if c.sessionManager != nil {
-		username := ctx.GetString("username")
-		if username == "" {
-			username = ctx.Param("username")
-		}
+		username := c.resolveRequestUsername(ctx)
 		if username != "" {
 			movieTitle := idRaw
-			if name, ok := c.getChannelNameByID(idRaw); ok && strings.TrimSpace(name) != "" {
+			if name, ok := c.resolveTitleAtStart(idRaw, "movie"); ok && strings.TrimSpace(name) != "" {
 				movieTitle = name
 			}
+			utils.InfoLog("VOD movie started: %s for user %s", movieTitle, username)
 			c.sessionManager.RegisterVODView(username, idRaw, "movie", movieTitle)
 			defer c.sessionManager.UnregisterVODView(username, idRaw)
 		}
@@ -638,12 +632,12 @@ func (c *Config) xtreamProxyCredentialsMovieStreamHandlerWithCache(ctx *gin.Cont
 				}
 				_ = c.db.TouchVODCache(idRaw)
 				if strings.ToLower(entry.Status) == "ready" {
-					utils.InfoLog("Serving cached movie (proxy creds path) for %s from %s", idRaw, entry.FilePath)
+					utils.InfoLog("Serving cached movie (proxy creds path) for %s from %s", c.vodLabel(idRaw), entry.FilePath)
 					serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
 					return
 				}
 				// Final file exists but DB status is stale (rename completed before DB update).
-				utils.InfoLog("Serving complete cached file for %s (DB status pending update)", idRaw)
+				utils.InfoLog("Serving complete cached file for %s (DB status pending update)", c.vodLabel(idRaw))
 				serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
 				return
 			}
@@ -727,15 +721,13 @@ func (c *Config) xtreamProxyCredentialsSeriesStreamHandlerWithCache(ctx *gin.Con
 	}
 	utils.DebugLog("Direct series stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
 	if c.sessionManager != nil {
-		username := ctx.GetString("username")
-		if username == "" {
-			username = ctx.Param("username")
-		}
+		username := c.resolveRequestUsername(ctx)
 		if username != "" {
 			seriesTitle := idRaw
-			if name, ok := c.getChannelNameByID(idRaw); ok && strings.TrimSpace(name) != "" {
+			if name, ok := c.resolveTitleAtStart(idRaw, "series"); ok && strings.TrimSpace(name) != "" {
 				seriesTitle = name
 			}
+			utils.InfoLog("VOD series started: %s for user %s", seriesTitle, username)
 			c.sessionManager.RegisterVODView(username, idRaw, "series", seriesTitle)
 			defer c.sessionManager.UnregisterVODView(username, idRaw)
 		}
@@ -753,12 +745,12 @@ func (c *Config) xtreamProxyCredentialsSeriesStreamHandlerWithCache(ctx *gin.Con
 				}
 				_ = c.db.TouchVODCache(idRaw)
 				if strings.ToLower(entry.Status) == "ready" {
-					utils.InfoLog("Serving cached episode (proxy creds path) for %s from %s", idRaw, entry.FilePath)
+					utils.InfoLog("Serving cached episode (proxy creds path) for %s from %s", c.vodLabel(idRaw), entry.FilePath)
 					serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
 					return
 				}
 				// Final file exists but DB status is stale (rename completed before DB update).
-				utils.InfoLog("Serving complete cached file for %s (DB status pending update)", idRaw)
+				utils.InfoLog("Serving complete cached file for %s (DB status pending update)", c.vodLabel(idRaw))
 				serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
 				return
 			}

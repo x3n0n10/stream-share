@@ -116,7 +116,7 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	}
 	serverConfig.db = db
 	serverConfig.sessionManager = session.NewSessionManager(db)
-	serverConfig.sessionManager.SetNameResolver(serverConfig.getChannelNameByID)
+	serverConfig.sessionManager.SetNameResolver(serverConfig.resolveStreamName)
 	utils.InfoLog("Session manager initialized with database connection")
 
 	// After session manager init
@@ -441,7 +441,7 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 	if c.db != nil && tempLink.StreamID != "" {
 		idRaw := strings.TrimSuffix(tempLink.StreamID, path.Ext(tempLink.StreamID))
 		if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil && entry.Status == "ready" {
-			utils.InfoLog("Download via cache for %s -> %s", c.streamLabel(tempLink.StreamID), entry.FilePath)
+			utils.InfoLog("Download via cache for %s -> %s", c.vodLabel(tempLink.StreamID), entry.FilePath)
 			ext := strings.ToLower(path.Ext(entry.FilePath)); if ext == "" { ext = ".mp4" }
 			_ = c.db.TouchVODCache(idRaw)
 			var ct string
@@ -459,10 +459,13 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 	c.stream(ctx, targetURL)
 }
 
-// multiplexedStream handles streaming with connection multiplexing
-// multiplexedStream proxies a stream while sharing a single upstream connection
-// across multiple clients for the same content using the SessionManager.
-func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
+// resolveRequestUsername derives the viewer identity for session tracking. It
+// prefers the authenticated username set by middleware, then path/query params,
+// and finally falls back to the client IP. The fallback matters for the direct
+// Xtream-credentials routes (e.g. /movie/<user>/<pass>/:id), which have no auth
+// middleware and therefore no username in context — without it, VOD views would
+// never be registered and /status would miss them.
+func (c *Config) resolveRequestUsername(ctx *gin.Context) string {
 	username := ctx.GetString("username")
 	if username == "" {
 		username = ctx.Param("username")
@@ -473,6 +476,14 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	if username == "" {
 		username = ctx.ClientIP()
 	}
+	return username
+}
+
+// multiplexedStream handles streaming with connection multiplexing
+// multiplexedStream proxies a stream while sharing a single upstream connection
+// across multiple clients for the same content using the SessionManager.
+func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
+	username := c.resolveRequestUsername(ctx)
 
 	// Extract stream ID and type
 	streamID := path.Base(targetURL.Path)
@@ -504,10 +515,13 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 		}
 	}
 
-	// Title from query parameter, M3U index lookup, or fallback to stream ID
+	// Title from query parameter, name resolution (live index or lazy VOD
+	// get_vod_info), or fallback to stream ID. Resolving here — before
+	// RequestStream takes streamLock — both stores the title on the session and
+	// warms the VOD cache so later locked log lookups resolve without network I/O.
 	streamTitle := targetURL.Query().Get("title")
 	if streamTitle == "" {
-		if name, ok := c.getChannelNameByID(streamIDRaw); ok && strings.TrimSpace(name) != "" {
+		if name, ok := c.resolveTitleAtStart(streamIDRaw, streamType); ok && strings.TrimSpace(name) != "" {
 			streamTitle = name
 		} else {
 			streamTitle = streamID

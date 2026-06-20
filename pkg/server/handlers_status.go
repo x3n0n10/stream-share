@@ -63,10 +63,11 @@ func (c *Config) statusSummary(ctx *gin.Context) {
 		}
 		dur := time.Since(s.StartTime).Truncate(time.Second)
 
-		// Prefer channel name from M3U mapping if StreamTitle is empty or equals the ID
+		// Prefer the stored title; if it is empty or just the raw ID, resolve the
+		// name (live channel index, or a lazy get_vod_info lookup for VOD).
 		title := strings.TrimSpace(s.StreamTitle)
 		if title == "" || title == s.StreamID {
-			if name, ok := c.getChannelNameByID(s.StreamID); ok && strings.TrimSpace(name) != "" {
+			if name, ok := c.resolveTitleAtStart(s.StreamID, s.StreamType); ok && strings.TrimSpace(name) != "" {
 				title = name
 			}
 		}

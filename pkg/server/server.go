@@ -116,7 +116,7 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	}
 	serverConfig.db = db
 	serverConfig.sessionManager = session.NewSessionManager(db)
-	serverConfig.sessionManager.SetNameResolver(serverConfig.getChannelNameByID)
+	serverConfig.sessionManager.SetNameResolver(serverConfig.resolveStreamName)
 	utils.InfoLog("Session manager initialized with database connection")
 
 	// After session manager init
@@ -441,7 +441,7 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 	if c.db != nil && tempLink.StreamID != "" {
 		idRaw := strings.TrimSuffix(tempLink.StreamID, path.Ext(tempLink.StreamID))
 		if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil && entry.Status == "ready" {
-			utils.InfoLog("Download via cache for %s -> %s", c.streamLabel(tempLink.StreamID), entry.FilePath)
+			utils.InfoLog("Download via cache for %s -> %s", c.vodLabel(tempLink.StreamID), entry.FilePath)
 			ext := strings.ToLower(path.Ext(entry.FilePath)); if ext == "" { ext = ".mp4" }
 			_ = c.db.TouchVODCache(idRaw)
 			var ct string
@@ -504,10 +504,13 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 		}
 	}
 
-	// Title from query parameter, M3U index lookup, or fallback to stream ID
+	// Title from query parameter, name resolution (live index or lazy VOD
+	// get_vod_info), or fallback to stream ID. Resolving here — before
+	// RequestStream takes streamLock — both stores the title on the session and
+	// warms the VOD cache so later locked log lookups resolve without network I/O.
 	streamTitle := targetURL.Query().Get("title")
 	if streamTitle == "" {
-		if name, ok := c.getChannelNameByID(streamIDRaw); ok && strings.TrimSpace(name) != "" {
+		if name, ok := c.resolveTitleAtStart(streamIDRaw, streamType); ok && strings.TrimSpace(name) != "" {
 			streamTitle = name
 		} else {
 			streamTitle = streamID

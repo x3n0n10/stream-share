@@ -33,7 +33,35 @@ var (
 	channelIndex      map[string]string
 	channelIndexPath  string
 	channelIndexMTime time.Time
+
+	// apiChannelIndex maps normalized stream IDs to channel names harvested from
+	// the Xtream get_live_streams API response. It is populated whenever a player
+	// fetches the live stream list, so name resolution works even when the
+	// proxified M3U playlist was never generated (pure Xtream API mode).
+	apiChannelIndexMu sync.RWMutex
+	apiChannelIndex   map[string]string
 )
+
+// updateAPIChannelIndex replaces the API-sourced name index with id→name pairs.
+func updateAPIChannelIndex(names map[string]string) {
+	if len(names) == 0 {
+		return
+	}
+	apiChannelIndexMu.Lock()
+	apiChannelIndex = names
+	apiChannelIndexMu.Unlock()
+}
+
+// lookupAPIChannelName returns the channel name for a normalized stream ID.
+func lookupAPIChannelName(normalizedID string) (string, bool) {
+	apiChannelIndexMu.RLock()
+	defer apiChannelIndexMu.RUnlock()
+	if apiChannelIndex == nil {
+		return "", false
+	}
+	name, ok := apiChannelIndex[normalizedID]
+	return name, ok
+}
 
 // normalizeStreamID trims common file extensions from the last path segment
 func normalizeStreamID(id string) string {
@@ -112,14 +140,21 @@ func (c *Config) ensureChannelIndex() {
 	channelIndexMTime = info.ModTime()
 }
 
-// getChannelNameByID returns the channel name for a given stream ID if known
+// getChannelNameByID returns the channel name for a given stream ID if known.
+// It prefers the proxified M3U index and falls back to names harvested from the
+// Xtream get_live_streams API, so resolution works in both M3U and API modes.
 func (c *Config) getChannelNameByID(streamID string) (string, bool) {
+	id := normalizeStreamID(streamID)
+
 	c.ensureChannelIndex()
 	channelIndexMu.RLock()
-	defer channelIndexMu.RUnlock()
-	if channelIndex == nil {
-		return "", false
+	if channelIndex != nil {
+		if name, ok := channelIndex[id]; ok {
+			channelIndexMu.RUnlock()
+			return name, true
+		}
 	}
-	name, ok := channelIndex[normalizeStreamID(streamID)]
-	return name, ok
+	channelIndexMu.RUnlock()
+
+	return lookupAPIChannelName(id)
 }

@@ -341,10 +341,7 @@ func (c *Config) xtreamStreamMovieWithCache(ctx *gin.Context) {
 		return
 	}
 	if c.sessionManager != nil {
-		username := ctx.GetString("username")
-		if username == "" {
-			username = ctx.Param("username")
-		}
+		username := c.resolveRequestUsername(ctx)
 		if username != "" {
 			movieTitle := idRaw
 			if name, ok := c.resolveTitleAtStart(idRaw, "movie"); ok && strings.TrimSpace(name) != "" {
@@ -460,10 +457,7 @@ func (c *Config) xtreamStreamSeriesWithCache(ctx *gin.Context) {
 		return
 	}
 	if c.sessionManager != nil {
-		username := ctx.GetString("username")
-		if username == "" {
-			username = ctx.Param("username")
-		}
+		username := c.resolveRequestUsername(ctx)
 		if username != "" {
 			seriesTitle := idRaw
 			if name, ok := c.resolveTitleAtStart(idRaw, "series"); ok && strings.TrimSpace(name) != "" {
@@ -614,10 +608,7 @@ func (c *Config) xtreamProxyCredentialsMovieStreamHandlerWithCache(ctx *gin.Cont
 	}
 	utils.DebugLog("Direct movie stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
 	if c.sessionManager != nil {
-		username := ctx.GetString("username")
-		if username == "" {
-			username = ctx.Param("username")
-		}
+		username := c.resolveRequestUsername(ctx)
 		if username != "" {
 			movieTitle := idRaw
 			if name, ok := c.resolveTitleAtStart(idRaw, "movie"); ok && strings.TrimSpace(name) != "" {
@@ -730,10 +721,7 @@ func (c *Config) xtreamProxyCredentialsSeriesStreamHandlerWithCache(ctx *gin.Con
 	}
 	utils.DebugLog("Direct series stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
 	if c.sessionManager != nil {
-		username := ctx.GetString("username")
-		if username == "" {
-			username = ctx.Param("username")
-		}
+		username := c.resolveRequestUsername(ctx)
 		if username != "" {
 			seriesTitle := idRaw
 			if name, ok := c.resolveTitleAtStart(idRaw, "series"); ok && strings.TrimSpace(name) != "" {

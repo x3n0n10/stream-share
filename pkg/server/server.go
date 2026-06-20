@@ -28,7 +28,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -94,7 +93,10 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	}
 
 	// Initialize debug logging from environment variable
-	utils.Config.DebugLoggingEnabled = os.Getenv("DEBUG_LOGGING") == "true"
+	utils.Config.DebugLoggingEnabled = os.Getenv("LOG_DEBUG_ENABLED") == "true"
+
+	// Pin the internal API key from configuration if provided
+	SetAPIKey(config.InternalAPIKey)
 
 	// Create server configuration
 	serverConfig := &Config{
@@ -126,14 +128,12 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		utils.InfoLog("Bootstrap: sessionManager initialized OK")
 	}
 
-	// Initialize local catchup buffering from environment variables
-	catchupEnabled := os.Getenv("CATCHUP_ENABLED") == "true"
+	// Initialize local catchup buffering from configuration
+	catchupEnabled := config.CatchupEnabled
 	catchupDir := utils.CatchupBufferDir()
 	catchupDur := 4
-	if v := os.Getenv("CATCHUP_DURATION"); v != "" {
-		if d, err := strconv.Atoi(v); err == nil && d > 0 {
-			catchupDur = d
-		}
+	if config.CatchupDurationHours > 0 {
+		catchupDur = config.CatchupDurationHours
 	}
 	serverConfig.catchupManager = catchup.New(catchupEnabled, catchupDir, catchupDur)
 	if catchupEnabled {
@@ -157,10 +157,8 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	// has continuous buffered content with no gap. Channel switches are detected
 	// separately and bypass this grace period (see SessionManager.RequestStream).
 	catchupPauseGrace := 5
-	if v := os.Getenv("CATCHUP_PAUSE_GRACE_MINUTES"); v != "" {
-		if d, err := strconv.Atoi(v); err == nil && d >= 0 {
-			catchupPauseGrace = d
-		}
+	if config.CatchupPauseGraceMinutes >= 0 {
+		catchupPauseGrace = config.CatchupPauseGraceMinutes
 	}
 	if serverConfig.sessionManager != nil {
 		serverConfig.sessionManager.SetPauseGrace(time.Duration(catchupPauseGrace) * time.Minute)
@@ -169,63 +167,44 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		}
 	}
 
-	// Configure session parameters from environment variables
+	// Configure session parameters from configuration. Each setter is only
+	// applied when the value is > 0, leaving the manager defaults otherwise.
 	if serverConfig.sessionManager != nil {
-		if v := os.Getenv("SESSION_TIMEOUT_MINUTES"); v != "" {
-			if mins, err := strconv.Atoi(v); err == nil && mins > 0 {
-				serverConfig.sessionManager.SetSessionTimeout(time.Duration(mins) * time.Minute)
-				utils.InfoLog("Session timeout set to %d minutes", mins)
-			} else {
-				utils.WarnLog("Invalid SESSION_TIMEOUT_MINUTES: %s", v)
-			}
+		if mins := config.SessionTimeoutMinutes; mins > 0 {
+			serverConfig.sessionManager.SetSessionTimeout(time.Duration(mins) * time.Minute)
+			utils.InfoLog("Session timeout set to %d minutes", mins)
 		}
-		if v := os.Getenv("STREAM_TIMEOUT_MINUTES"); v != "" {
-			if mins, err := strconv.Atoi(v); err == nil && mins > 0 {
-				serverConfig.sessionManager.SetStreamTimeout(time.Duration(mins) * time.Minute)
-				utils.InfoLog("Stream timeout set to %d minutes", mins)
-			} else {
-				utils.WarnLog("Invalid STREAM_TIMEOUT_MINUTES: %s", v)
-			}
+		if mins := config.StreamTimeoutMinutes; mins > 0 {
+			serverConfig.sessionManager.SetStreamTimeout(time.Duration(mins) * time.Minute)
+			utils.InfoLog("Stream timeout set to %d minutes", mins)
 		}
-		if v := os.Getenv("TEMP_LINK_HOURS"); v != "" {
-			if hours, err := strconv.Atoi(v); err == nil && hours > 0 {
-				serverConfig.sessionManager.SetTempLinkTimeout(time.Duration(hours) * time.Hour)
-				utils.InfoLog("Temporary link timeout set to %d hours", hours)
-			} else {
-				utils.WarnLog("Invalid TEMP_LINK_HOURS: %s", v)
-			}
+		if hours := config.TempLinkHours; hours > 0 {
+			serverConfig.sessionManager.SetTempLinkTimeout(time.Duration(hours) * time.Hour)
+			utils.InfoLog("Temporary link timeout set to %d hours", hours)
 		}
-		if v := os.Getenv("VOD_CACHE_STALE_HOURS"); v != "" {
-			if hours, err := strconv.Atoi(v); err == nil && hours > 0 {
-				serverConfig.sessionManager.SetVODCacheStaleAge(time.Duration(hours) * time.Hour)
-				utils.InfoLog("VOD cache stale age set to %d hours", hours)
-			} else {
-				utils.WarnLog("Invalid VOD_CACHE_STALE_HOURS: %s", v)
-			}
+		if hours := config.VODCacheStaleHours; hours > 0 {
+			serverConfig.sessionManager.SetVODCacheStaleAge(time.Duration(hours) * time.Hour)
+			utils.InfoLog("VOD cache stale age set to %d hours", hours)
 		}
-		if v := os.Getenv("MULTIPLEX_STALL_TIMEOUT_SECONDS"); v != "" {
-			if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-				serverConfig.sessionManager.SetClientStallTimeout(time.Duration(secs) * time.Second)
-				utils.InfoLog("Multiplex client stall timeout set to %d seconds", secs)
-			} else {
-				utils.WarnLog("Invalid MULTIPLEX_STALL_TIMEOUT_SECONDS: %s", v)
-			}
+		if secs := config.MultiplexStallTimeoutSeconds; secs > 0 {
+			serverConfig.sessionManager.SetClientStallTimeout(time.Duration(secs) * time.Second)
+			utils.InfoLog("Multiplex client stall timeout set to %d seconds", secs)
 		}
 	}
 
 	// Initialize Discord bot if token is provided
-	discordToken := os.Getenv("DISCORD_BOT_TOKEN")
+	discordToken := config.DiscordBotToken
 	if discordToken != "" {
 		utils.InfoLog("Initializing Discord bot")
-		discordAdminRole := os.Getenv("DISCORD_ADMIN_ROLE_ID")
+		discordAdminRole := config.DiscordAdminRoleID
 
-		// Get API URL from config, defaulting to host/port, but honor REVERSE_PROXY
-		apiURL := os.Getenv("DISCORD_API_URL")
+		// Get API URL from config, defaulting to host/port, but honor reverse proxy
+		apiURL := config.DiscordAPIURL
 		if apiURL == "" {
 			protocol := "http"
 			if config.HTTPS { protocol = "https" }
 			hostPart := fmt.Sprintf("%s:%d", config.HostConfig.Hostname, config.HostConfig.Port)
-			if rev := strings.ToLower(strings.TrimSpace(os.Getenv("REVERSE_PROXY"))); rev == "1" || rev == "true" || rev == "yes" {
+			if config.ReverseProxyEnabled {
 				// Behind reverse proxy: use hostname without port by default
 				hostPart = config.HostConfig.Hostname
 			}

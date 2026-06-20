@@ -65,7 +65,7 @@ func New(user, password, baseURL, userAgent string) (*Client, error) {
     if err != nil {
         return nil, utils.PrintErrorAndReturn(fmt.Errorf("invalid base URL: %w", err))
     }
-    insecureTLS := os.Getenv("XTREAM_INSECURE_TLS") == "true"
+    insecureTLS := os.Getenv("XTREAM_INSECURE_TLS_ENABLED") == "true"
     transport := http.DefaultTransport
     if insecureTLS {
         transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}

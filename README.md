@@ -85,8 +85,8 @@ http://yourstreamshare.com:8080/12/test/1?username=test&password=passwordtest
 streamshare --m3u-url http://provider.com/get.php?username=user&password=pass&type=m3u_plus&output=m3u8 \
        --port 8080 \
        --hostname streamshare.example.com \
-       --user test \
-       --password passwordtest
+       --auth-user test \
+       --auth-password passwordtest
 ```
 Access your playlist at:  
 `http://streamshare.example.com:8080/iptv.m3u?username=test&password=passwordtest`
@@ -102,8 +102,8 @@ streamshare --m3u-url http://provider.com:1234/get.php?username=user&password=pa
        --xtream-user provider_username \
        --xtream-password provider_password \
        --xtream-base-url http://provider.com:1234 \
-       --user your_username \
-       --password your_password
+       --auth-user your_username \
+       --auth-password your_password
 ```
 
 **Access with Your Credentials:**
@@ -256,7 +256,7 @@ At 10 Mbps a 4-hour buffer is approximately **18 GB per active channel**. Only c
 | Env var | Default | Description |
 |---|---|---|
 | `CATCHUP_ENABLED` | `false` | Set to `true` to enable |
-| `CATCHUP_DURATION` | `4` | Hours of catchup to buffer and advertise to clients |
+| `CATCHUP_DURATION_HOURS` | `4` | Hours of catchup to buffer and advertise to clients |
 | `CATCHUP_PAUSE_GRACE_MINUTES` | `5` | Minutes to keep recording after the last viewer leaves (for pause/resume); channel switches bypass this |
 | `TZ` | — | **Required.** Must match the timezone of your IPTV clients — TiviMate sends local time in timeshift URLs (e.g. `TZ=Europe/Amsterdam`) |
 

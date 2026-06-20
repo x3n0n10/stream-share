@@ -40,7 +40,7 @@ const (
 
 // getErrorDetailLevel returns the configured error detail level from environment
 func getErrorDetailLevel() ErrorDetailLevel {
-	level := strings.ToLower(os.Getenv("ERROR_DETAIL_LEVEL"))
+	level := strings.ToLower(os.Getenv("LOG_ERROR_DETAIL_LEVEL"))
 	switch level {
 	case "none":
 		return ErrorDetailNone

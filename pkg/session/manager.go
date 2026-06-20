@@ -60,6 +60,7 @@ type SessionManager struct {
 	httpClient         *http.Client
 	stopChan           chan struct{} // closed by Stop() to terminate background goroutines
 	catchupManager     *catchup.Manager
+	nameResolver       func(streamID string) (string, bool) // optional channel-name lookup for logs
 
 	// pauseGrace controls how long a catchup-enabled live stream keeps its
 	// upstream connection (and disk recording) alive after its last viewer
@@ -162,6 +163,24 @@ func (sm *SessionManager) SetCatchupManager(m *catchup.Manager) {
 	sm.catchupManager = m
 }
 
+// SetNameResolver attaches a channel-name lookup used to label streams in logs.
+func (sm *SessionManager) SetNameResolver(f func(streamID string) (string, bool)) {
+	sm.nameResolver = f
+}
+
+// streamLabel formats a stream for logging as "Channel Name (Stream <id>)",
+// falling back to "Stream <id>" when no name is known. The id is reported
+// without its file extension for readability.
+func (sm *SessionManager) streamLabel(streamID string) string {
+	id := strings.TrimSuffix(streamID, path.Ext(streamID))
+	if sm.nameResolver != nil {
+		if name, ok := sm.nameResolver(streamID); ok && strings.TrimSpace(name) != "" {
+			return fmt.Sprintf("%s (Stream %s)", strings.TrimSpace(name), id)
+		}
+	}
+	return fmt.Sprintf("Stream %s", id)
+}
+
 // sessionSweepInterval controls how often idle sessions and streams are reaped.
 // It is deliberately short so a stalled viewer that halts its stream's pump
 // releases the shared upstream connection promptly (within streamTimeout of going
@@ -240,8 +259,8 @@ func (sm *SessionManager) cleanupUnusedStreams() {
 
 	for streamID, session := range sm.streamSessions {
 		if session.LastRequested.Before(threshold) && session.Active {
-			utils.InfoLog("Stream %s has been inactive for %s, stopping",
-				streamID, utils.HumanDuration(time.Since(session.LastRequested)))
+			utils.DebugLog("%s has been inactive for %s, stopping",
+				sm.streamLabel(streamID), utils.HumanDuration(time.Since(session.LastRequested)))
 			sm.stopStream(streamID)
 		}
 	}
@@ -348,11 +367,11 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 	// If this stream already exists, attach the user as an additional viewer of the
 	// shared upstream connection.
 	if existingBuffer, exists := sm.streamBuffers[streamID]; exists && existingBuffer.active {
-		utils.InfoLog("User %s joined existing stream %s (multiplexed)", username, streamID)
+		utils.InfoLog("User %s joined existing %s (multiplexed)", username, sm.streamLabel(streamID))
 
 		// A viewer returned — cancel any pending pause-grace stop.
 		if sm.cancelPendingStop(streamID) {
-			utils.InfoLog("Stream %s resumed before pause grace expired; continuing uninterrupted", streamID)
+			utils.DebugLog("%s resumed before pause grace expired; continuing uninterrupted", sm.streamLabel(streamID))
 		}
 
 		if streamSession, exists := sm.streamSessions[streamID]; exists {
@@ -366,7 +385,7 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		if old, alreadyClient := existingBuffer.clients[username]; alreadyClient {
 			old.close()
 			delete(existingBuffer.clients, username)
-			utils.InfoLog("User %s reconnected to stream %s; replaced stale client", username, streamID)
+			utils.DebugLog("User %s reconnected to %s; replaced stale client", username, sm.streamLabel(streamID))
 		}
 		existingBuffer.clients[username] = newStreamClient()
 		existingBuffer.clientsLock.Unlock()
@@ -419,7 +438,7 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		}
 	}
 
-	utils.InfoLog("Started new stream %s for user %s", streamID, username)
+	utils.InfoLog("Started new %s for user %s", sm.streamLabel(streamID), username)
 	return streamBuffer, nil
 }
 
@@ -499,8 +518,8 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 
 	// Accept 200 (expected) and 206 (some providers return it unconditionally).
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		utils.ErrorLog("Upstream returned status %d for stream %s",
-			resp.StatusCode, buffer.streamID)
+		utils.ErrorLog("Upstream returned status %d for %s",
+			resp.StatusCode, sm.streamLabel(buffer.streamID))
 		sm.stopStreamLocking(buffer.streamID)
 		return
 	}
@@ -513,7 +532,7 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 		// Stop requested
 		select {
 		case <-buffer.stopChan:
-			utils.DebugLog("Stream %s stopped", buffer.streamID)
+			utils.DebugLog("%s stopped", sm.streamLabel(buffer.streamID))
 			return
 		default:
 		}
@@ -573,7 +592,7 @@ func (sm *SessionManager) fanOut(buffer *StreamBuffer, chunk []byte) {
 		go func(name string, cl *streamClient) {
 			defer wg.Done()
 			if sm.deliver(buffer, cl, chunk, sole) {
-				utils.WarnLog("Dropping slow client %s from stream %s (buffer stalled)", name, buffer.streamID)
+				utils.WarnLog("Dropping slow client %s from %s (buffer stalled)", name, sm.streamLabel(buffer.streamID))
 				sm.RemoveClient(buffer.streamID, name)
 			}
 		}(names[i], targets[i])
@@ -667,7 +686,7 @@ func (sm *SessionManager) RemoveClient(streamID, username string) {
 		}
 	}
 
-	utils.InfoLog("User %s removed from stream %s", username, streamID)
+	utils.InfoLog("User %s removed from %s", username, sm.streamLabel(streamID))
 }
 
 // stopStreamLocking acquires streamLock and stops the stream. Used by the
@@ -688,8 +707,8 @@ func (sm *SessionManager) schedulePendingStop(streamID string) {
 	}
 	cancel := make(chan struct{})
 	sm.pendingStops[streamID] = cancel
-	utils.InfoLog("Stream %s has no viewers; keeping it alive for up to %s in case of resume (pause/timeshift)",
-		streamID, utils.HumanDuration(sm.pauseGrace))
+	utils.DebugLog("%s has no viewers; keeping it alive for up to %s in case of resume (pause/timeshift)",
+		sm.streamLabel(streamID), utils.HumanDuration(sm.pauseGrace))
 
 	go func() {
 		select {
@@ -701,7 +720,7 @@ func (sm *SessionManager) schedulePendingStop(streamID string) {
 		defer sm.streamLock.Unlock()
 		if current, ok := sm.pendingStops[streamID]; ok && current == cancel {
 			delete(sm.pendingStops, streamID)
-			utils.InfoLog("Stream %s pause grace expired with no viewers returning; stopping", streamID)
+			utils.DebugLog("%s pause grace expired with no viewers returning; stopping", sm.streamLabel(streamID))
 			sm.stopStream(streamID)
 		}
 	}()
@@ -728,7 +747,7 @@ func (sm *SessionManager) NotifyCatchupActivity(streamID string) {
 	sm.streamLock.Lock()
 	defer sm.streamLock.Unlock()
 	if sm.cancelPendingStop(streamID) {
-		utils.InfoLog("Stream %s resumed via catchup before pause grace expired; continuing uninterrupted", streamID)
+		utils.DebugLog("%s resumed via catchup before pause grace expired; continuing uninterrupted", sm.streamLabel(streamID))
 	}
 }
 
@@ -739,7 +758,7 @@ func (sm *SessionManager) stopStream(streamID string) {
 	// (e.g. the viewer switched to a different channel).
 	sm.cancelPendingStop(streamID)
 
-	utils.InfoLog("Stopping stream %s", streamID)
+	utils.DebugLog("Stopping %s", sm.streamLabel(streamID))
 
 	buffer, exists := sm.streamBuffers[streamID]
 	if !exists || !buffer.active {
@@ -770,7 +789,7 @@ func (sm *SessionManager) stopStream(streamID string) {
 		streamSession.Active = false
 	}
 
-	utils.InfoLog("Stream %s stopped and all clients disconnected", streamID)
+	utils.DebugLog("%s stopped and all clients disconnected", sm.streamLabel(streamID))
 }
 
 // GenerateTemporaryLink creates a temporary download link

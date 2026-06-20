@@ -103,7 +103,7 @@ func (m *Manager) StartBuffer(streamID string) *DiskBuffer {
 		return nil
 	}
 	m.buffers[streamID] = buf
-	utils.InfoLog("Catchup: started buffer for stream %s at %s", streamID, buf.FilePath())
+	utils.DebugLog("Catchup: started buffer for stream %s at %s", streamID, buf.FilePath())
 	return buf
 }
 
@@ -155,7 +155,7 @@ func (m *Manager) StopBuffer(streamID string) {
 			}
 			delete(m.buffers, streamID)
 			delete(m.graceCancels, streamID)
-			utils.InfoLog("Catchup: grace period expired, deleted buffer for stream %s", streamID)
+			utils.DebugLog("Catchup: grace period expired, deleted buffer for stream %s", streamID)
 		}
 	}()
 }

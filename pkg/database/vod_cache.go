@@ -15,10 +15,11 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
- 
+
 package database
 
 import (
+    "context"
     "database/sql"
     "fmt"
     "time"
@@ -30,7 +31,9 @@ import (
 // UpsertVODCache stores or updates a cache entry
 func (m *DBManager) UpsertVODCache(e *types.VODCacheEntry) error {
     if m == nil || m.db == nil { return fmt.Errorf("database not initialized") }
-    _, err := m.db.Exec(`
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    _, err := m.db.ExecContext(ctx, `
         INSERT INTO vod_cache (stream_id, type, title, series_title, season, episode, file_path, requested_by, downloaded_bytes, total_bytes, size_bytes, status, created_at, expires_at, last_access)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,COALESCE($13, CURRENT_TIMESTAMP),$14,COALESCE($15, CURRENT_TIMESTAMP))
         ON CONFLICT(stream_id) DO UPDATE SET
@@ -55,7 +58,9 @@ func (m *DBManager) UpsertVODCache(e *types.VODCacheEntry) error {
 // GetVODCache returns a cache entry for a stream id if exists and not expired
 func (m *DBManager) GetVODCache(streamID string) (*types.VODCacheEntry, error) {
     if m == nil || m.db == nil { return nil, fmt.Errorf("database not initialized") }
-    row := m.db.QueryRow(`SELECT stream_id, type, title, series_title, season, episode, file_path, requested_by, downloaded_bytes, total_bytes, size_bytes, status, created_at, expires_at, last_access
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    row := m.db.QueryRowContext(ctx, `SELECT stream_id, type, title, series_title, season, episode, file_path, requested_by, downloaded_bytes, total_bytes, size_bytes, status, created_at, expires_at, last_access
         FROM vod_cache WHERE stream_id=$1 AND expires_at > CURRENT_TIMESTAMP`, streamID)
     var e types.VODCacheEntry
     if err := row.Scan(&e.StreamID, &e.Type, &e.Title, &e.SeriesTitle, &e.Season, &e.Episode, &e.FilePath, &e.RequestedBy, &e.DownloadedBytes, &e.TotalBytes, &e.SizeBytes, &e.Status, &e.CreatedAt, &e.ExpiresAt, &e.LastAccess); err != nil {
@@ -67,14 +72,18 @@ func (m *DBManager) GetVODCache(streamID string) (*types.VODCacheEntry, error) {
 // TouchVODCache updates last_access
 func (m *DBManager) TouchVODCache(streamID string) error {
     if m == nil || m.db == nil { return fmt.Errorf("database not initialized") }
-    _, err := m.db.Exec(`UPDATE vod_cache SET last_access=CURRENT_TIMESTAMP WHERE stream_id=$1`, streamID)
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    _, err := m.db.ExecContext(ctx, `UPDATE vod_cache SET last_access=CURRENT_TIMESTAMP WHERE stream_id=$1`, streamID)
     return err
 }
 
 // CleanupExpiredCache deletes expired rows
 func (m *DBManager) CleanupExpiredCache() (int64, error) {
     if m == nil || m.db == nil { return 0, fmt.Errorf("database not initialized") }
-    res, err := m.db.Exec(`DELETE FROM vod_cache WHERE expires_at < CURRENT_TIMESTAMP`)
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    res, err := m.db.ExecContext(ctx, `DELETE FROM vod_cache WHERE expires_at < CURRENT_TIMESTAMP`)
     if err != nil { return 0, err }
     n, _ := res.RowsAffected()
     if n > 0 { utils.InfoLog("Cleaned up %d expired vod_cache entries", n) }
@@ -85,7 +94,9 @@ func (m *DBManager) CleanupExpiredCache() (int64, error) {
 // In-progress downloads (status != 'ready') are excluded.
 func (m *DBManager) GetStaleVODCache(threshold time.Time) ([]types.VODCacheEntry, error) {
     if m == nil || m.db == nil { return nil, fmt.Errorf("database not initialized") }
-    rows, err := m.db.Query(`SELECT stream_id, file_path, last_access
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    rows, err := m.db.QueryContext(ctx, `SELECT stream_id, file_path, last_access
         FROM vod_cache WHERE status = 'ready' AND last_access < $1`, threshold)
     if err != nil { return nil, err }
     defer func() { _ = rows.Close() }()
@@ -97,26 +108,33 @@ func (m *DBManager) GetStaleVODCache(threshold time.Time) ([]types.VODCacheEntry
         }
         list = append(list, e)
     }
+    if err := rows.Err(); err != nil {
+        return nil, err
+    }
     return list, nil
 }
 
 // DeleteVODCacheEntry removes a single cache row by stream ID.
 func (m *DBManager) DeleteVODCacheEntry(streamID string) error {
     if m == nil || m.db == nil { return fmt.Errorf("database not initialized") }
-    _, err := m.db.Exec(`DELETE FROM vod_cache WHERE stream_id = $1`, streamID)
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    _, err := m.db.ExecContext(ctx, `DELETE FROM vod_cache WHERE stream_id = $1`, streamID)
     return err
 }
 
 // ListVODCache returns non-expired cache entries ordered by soonest expiry first. If limit<=0, returns all.
 func (m *DBManager) ListVODCache(limit int) ([]types.VODCacheEntry, error) {
     if m == nil || m.db == nil { return nil, fmt.Errorf("database not initialized") }
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
     var rows *sql.Rows
     var err error
     if limit > 0 {
-        rows, err = m.db.Query(`SELECT stream_id, type, title, series_title, season, episode, file_path, requested_by, downloaded_bytes, total_bytes, size_bytes, status, created_at, expires_at, last_access
+        rows, err = m.db.QueryContext(ctx, `SELECT stream_id, type, title, series_title, season, episode, file_path, requested_by, downloaded_bytes, total_bytes, size_bytes, status, created_at, expires_at, last_access
             FROM vod_cache WHERE expires_at > CURRENT_TIMESTAMP ORDER BY expires_at ASC LIMIT $1`, limit)
     } else {
-        rows, err = m.db.Query(`SELECT stream_id, type, title, series_title, season, episode, file_path, requested_by, downloaded_bytes, total_bytes, size_bytes, status, created_at, expires_at, last_access
+        rows, err = m.db.QueryContext(ctx, `SELECT stream_id, type, title, series_title, season, episode, file_path, requested_by, downloaded_bytes, total_bytes, size_bytes, status, created_at, expires_at, last_access
             FROM vod_cache WHERE expires_at > CURRENT_TIMESTAMP ORDER BY expires_at ASC`)
     }
     if err != nil { return nil, err }
@@ -128,6 +146,9 @@ func (m *DBManager) ListVODCache(limit int) ([]types.VODCacheEntry, error) {
             return nil, err
         }
         list = append(list, e)
+    }
+    if err := rows.Err(); err != nil {
+        return nil, err
     }
     return list, nil
 }

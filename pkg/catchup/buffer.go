@@ -31,8 +31,9 @@ import (
 )
 
 const (
-	indexSampleInterval = 1 << 20 // sample every 1 MB
-	writeChanCap        = 2048    // ~256 MB slack at 128 KB chunks before drops
+	indexSampleInterval = 1 << 20        // sample every 1 MB
+	writeChanCap        = 2048           // ~256 MB slack at 128 KB chunks before drops
+	rotationGracePeriod = 60 * time.Second
 )
 
 type indexEntry struct {
@@ -40,63 +41,68 @@ type indexEntry struct {
 	byteOffset int64
 }
 
-// DiskBuffer writes an append-only MPEG-TS file and maintains a time→offset index.
-// All disk writes happen in a dedicated goroutine so callers are never blocked.
-type DiskBuffer struct {
-	streamID  string
+// segment holds the metadata for one on-disk buffer file.
+type segment struct {
 	filePath  string
 	startTime time.Time
-	maxBytes  int64 // 0 = unlimited
+	index     []indexEntry
+	total     int64 // bytes written to this file
+}
 
-	writeCh   chan []byte   // pump goroutine sends slices here
-	stopCh    chan struct{}  // closed by Stop()
-	drainDone chan struct{}  // closed by drainLoop when all writes are flushed to disk
-	stopped   int32         // 0 = running, 1 = stopped; accessed via atomic.LoadInt32/CompareAndSwapInt32
+// DiskBuffer writes an append-only MPEG-TS file and maintains a time→offset index.
+// All disk writes happen in a dedicated goroutine so callers are never blocked.
+//
+// When maxBytes > 0 and the current file reaches that size it is rotated: current
+// becomes prev (still seekable), a new file is opened, and the file that was in prev
+// is deleted after rotationGracePeriod so in-flight readers can finish. At most two
+// files exist on disk at once (≤ 2×maxBytes), always covering a full window of history.
+type DiskBuffer struct {
+	streamID string
+	maxBytes int64 // 0 = unlimited
+
+	writeCh   chan []byte  // pump goroutine sends slices here
+	drainDone chan struct{} // closed by drainLoop when all writes are flushed to disk
+	stopped   int32        // accessed via atomic
 
 	stoppedMu sync.Mutex
 	stoppedAt time.Time
 
-	indexMu    sync.RWMutex
-	index      []indexEntry
-	total      int64 // bytes successfully written
-	baseOffset int64 // earliest readable byte (advances when maxBytes exceeded)
+	indexMu sync.RWMutex // guards current and prev
+	current segment      // actively-written file
+	prev    segment      // previous file after a rotation; empty filePath means none
 }
 
 // NewDiskBuffer creates a buffer that writes to dir/<streamID>_<unix>.ts.
-// maxBytes == 0 means unlimited; otherwise old data is logically trimmed.
+// maxBytes == 0 means unlimited; otherwise the file rotates when it fills,
+// keeping the previous segment available for seeking.
 func NewDiskBuffer(dir, streamID string, start time.Time, maxBytes int64) (*DiskBuffer, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("catchup: mkdir %s: %w", dir, err)
 	}
-
-	fname := fmt.Sprintf("%s_%d.ts", sanitizeID(streamID), start.Unix())
-	fpath := filepath.Join(dir, fname)
-
 	b := &DiskBuffer{
 		streamID:  streamID,
-		filePath:  fpath,
-		startTime: start,
 		maxBytes:  maxBytes,
+		current:   segment{filePath: newFilePath(dir, streamID, start), startTime: start},
 		writeCh:   make(chan []byte, writeChanCap),
-		stopCh:    make(chan struct{}),
 		drainDone: make(chan struct{}),
 	}
-
 	go b.drainLoop()
 	return b, nil
 }
 
 // drainLoop runs in its own goroutine and is the ONLY writer to the file.
 func (b *DiskBuffer) drainLoop() {
-	f, err := os.OpenFile(b.filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	b.indexMu.RLock()
+	path := b.current.filePath
+	b.indexMu.RUnlock()
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
-		utils.ErrorLog("Catchup: failed to open buffer file %s: %v", b.filePath, err)
-		// Drain channel so senders never block on a full channel
+		utils.ErrorLog("Catchup: failed to open buffer file %s: %v", path, err)
 		for range b.writeCh {
 		}
 		return
 	}
-	defer f.Close()
 
 	var written int64
 	var sinceLastSample int64
@@ -104,34 +110,72 @@ func (b *DiskBuffer) drainLoop() {
 	for chunk := range b.writeCh {
 		n, werr := f.Write(chunk)
 		if werr != nil {
-			utils.WarnLog("Catchup: write error for %s: %v (continuing)", b.filePath, werr)
+			utils.WarnLog("Catchup: write error for stream %s: %v (continuing)", b.streamID, werr)
 			continue
 		}
 		written += int64(n)
 		sinceLastSample += int64(n)
 
-		// Record a time→offset index entry every 1 MB
 		if sinceLastSample >= indexSampleInterval {
 			b.indexMu.Lock()
-			b.index = append(b.index, indexEntry{wallTime: time.Now(), byteOffset: written})
-			b.total = written
-			if b.maxBytes > 0 && written-b.baseOffset > b.maxBytes {
-				b.baseOffset = written - b.maxBytes
-			}
+			b.current.index = append(b.current.index, indexEntry{wallTime: time.Now(), byteOffset: written})
+			b.current.total = written
 			b.indexMu.Unlock()
 			sinceLastSample = 0
+
+			if b.maxBytes > 0 && written >= b.maxBytes {
+				newF := b.rotate(f)
+				if newF == nil {
+					for range b.writeCh {
+					}
+					return
+				}
+				f = newF
+				written = 0
+			}
 		} else {
 			b.indexMu.Lock()
-			b.total = written
+			b.current.total = written
 			b.indexMu.Unlock()
 		}
 	}
 
-	// Channel was closed; record final total then signal readers that all data is on disk.
+	f.Close()
 	b.indexMu.Lock()
-	b.total = written
+	b.current.total = written
 	b.indexMu.Unlock()
 	close(b.drainDone)
+}
+
+// rotate closes oldFile, promotes current → prev, opens a new current file, and
+// schedules deletion of the file evicted from prev. The caller must not hold indexMu.
+func (b *DiskBuffer) rotate(oldFile *os.File) *os.File {
+	oldFile.Close()
+
+	b.indexMu.Lock()
+	evictPath := b.prev.filePath // evict the file that was already in prev
+	b.prev = b.current           // promote current to prev
+	newTime := time.Now()
+	newPath := newFilePath(filepath.Dir(b.current.filePath), b.streamID, newTime)
+	b.current = segment{filePath: newPath, startTime: newTime}
+	b.indexMu.Unlock()
+
+	if evictPath != "" {
+		go func() {
+			time.Sleep(rotationGracePeriod)
+			if err := os.Remove(evictPath); err != nil && !os.IsNotExist(err) {
+				utils.WarnLog("Catchup: failed to remove evicted buffer file %s: %v", evictPath, err)
+			}
+		}()
+	}
+
+	f, err := os.OpenFile(newPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		utils.ErrorLog("Catchup: failed to open rotated buffer file %s: %v", newPath, err)
+		return nil
+	}
+	utils.InfoLog("Catchup: rotated buffer for stream %s → %s", b.streamID, newPath)
+	return f
 }
 
 // Write enqueues a copy of p for async disk write. Never blocks; drops if channel full.
@@ -148,8 +192,7 @@ func (b *DiskBuffer) Write(p []byte) {
 	}
 }
 
-// Stop signals the drain goroutine to finish after processing remaining queued writes.
-// Safe to call multiple times.
+// Stop signals the drain goroutine to finish. Safe to call multiple times.
 func (b *DiskBuffer) Stop() {
 	if atomic.CompareAndSwapInt32(&b.stopped, 0, 1) {
 		b.stoppedMu.Lock()
@@ -159,75 +202,81 @@ func (b *DiskBuffer) Stop() {
 	}
 }
 
-// Delete removes the buffer file from disk. Call only after Stop().
+// Delete removes all buffer files from disk. Call only after Stop().
 func (b *DiskBuffer) Delete() error {
-	b.Stop() // idempotent
-	return os.Remove(b.filePath)
+	b.Stop()
+	b.indexMu.RLock()
+	cur, prev := b.current.filePath, b.prev.filePath
+	b.indexMu.RUnlock()
+	_ = os.Remove(prev)
+	return os.Remove(cur)
 }
 
-// IsStopped reports whether Stop has been called.
-func (b *DiskBuffer) IsStopped() bool { return atomic.LoadInt32(&b.stopped) != 0 }
-
-// DrainDone returns a channel that is closed once all queued writes have been flushed to disk.
-// Use this (not IsStopped) as the signal to stop reading from the buffer file.
+func (b *DiskBuffer) IsStopped() bool          { return atomic.LoadInt32(&b.stopped) != 0 }
 func (b *DiskBuffer) DrainDone() <-chan struct{} { return b.drainDone }
+func (b *DiskBuffer) StreamID() string          { return b.streamID }
 
-// StoppedAt returns when Stop was called (zero if not yet stopped).
 func (b *DiskBuffer) StoppedAt() time.Time {
 	b.stoppedMu.Lock()
 	defer b.stoppedMu.Unlock()
 	return b.stoppedAt
 }
 
-// FilePath returns the path of the buffer file.
-func (b *DiskBuffer) FilePath() string { return b.filePath }
+func (b *DiskBuffer) FilePath() string {
+	b.indexMu.RLock()
+	defer b.indexMu.RUnlock()
+	return b.current.filePath
+}
 
-// StreamID returns the stream ID this buffer belongs to.
-func (b *DiskBuffer) StreamID() string { return b.streamID }
+func (b *DiskBuffer) StartTime() time.Time {
+	b.indexMu.RLock()
+	defer b.indexMu.RUnlock()
+	return b.current.startTime
+}
 
-// StartTime returns when the buffer started recording.
-func (b *DiskBuffer) StartTime() time.Time { return b.startTime }
-
-// BytesBuffered returns the number of bytes written so far.
 func (b *DiskBuffer) BytesBuffered() int64 {
 	b.indexMu.RLock()
 	defer b.indexMu.RUnlock()
-	return b.total
+	return b.current.total
 }
 
-// OffsetForTime returns the byte offset in the file that corresponds to wallTime t.
-// Returns baseOffset if t is before the oldest buffered data, or total if after.
+// OffsetForTime returns the byte offset within the current file for t.
+// Use FileForTime when a rewind may span a rotation boundary.
 func (b *DiskBuffer) OffsetForTime(t time.Time) int64 {
 	b.indexMu.RLock()
 	defer b.indexMu.RUnlock()
-
-	if len(b.index) == 0 {
-		return b.baseOffset
-	}
-
-	// Binary search: find last entry whose wallTime <= t
-	pos := sort.Search(len(b.index), func(i int) bool {
-		return b.index[i].wallTime.After(t)
-	})
-	// pos is the first entry AFTER t; pos-1 is what we want
-	pos--
-
-	var offset int64
-	if pos < 0 {
-		// t is before the first index entry — start from the beginning
-		offset = 0
-	} else {
-		offset = b.index[pos].byteOffset
-	}
-
-	// Clamp to baseOffset (data before this is no longer on disk)
-	if offset < b.baseOffset {
-		offset = b.baseOffset
-	}
-	return offset
+	return searchIndex(b.current.index, t)
 }
 
-// sanitizeID strips characters unsafe for use in file names.
+// FileForTime returns the file path and byte offset that best cover t.
+// When t falls before the current file's start, the previous file is returned.
+// The caller should continue into the current file from offset 0 after reaching EOF.
+func (b *DiskBuffer) FileForTime(t time.Time) (filePath string, offset int64) {
+	b.indexMu.RLock()
+	defer b.indexMu.RUnlock()
+	if b.prev.filePath != "" && t.Before(b.current.startTime) {
+		return b.prev.filePath, searchIndex(b.prev.index, t)
+	}
+	return b.current.filePath, searchIndex(b.current.index, t)
+}
+
+// searchIndex binary-searches idx and returns the byte offset for t.
+func searchIndex(idx []indexEntry, t time.Time) int64 {
+	if len(idx) == 0 {
+		return 0
+	}
+	pos := sort.Search(len(idx), func(i int) bool { return idx[i].wallTime.After(t) })
+	pos-- // first entry AFTER t → pos-1 is what we want
+	if pos < 0 {
+		return 0
+	}
+	return idx[pos].byteOffset
+}
+
+func newFilePath(dir, streamID string, t time.Time) string {
+	return filepath.Join(dir, fmt.Sprintf("%s_%d.ts", sanitizeID(streamID), t.Unix()))
+}
+
 func sanitizeID(id string) string {
 	safe := make([]byte, 0, len(id))
 	for i := 0; i < len(id); i++ {

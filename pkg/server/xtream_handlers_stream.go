@@ -170,18 +170,18 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 
 	buf := c.catchupManager.GetBuffer(idRaw)
 	if buf == nil {
-		utils.InfoLog("Catchup: no buffer for stream %s (never watched or already cleaned up)", idRaw)
+		utils.DebugLog("Catchup: no buffer for %s (never watched or already cleaned up)", c.streamLabel(idRaw))
 		ctx.AbortWithStatus(http.StatusNotFound)
 		return
 	}
-	utils.DebugLog("Catchup: buffer for %s started at %s (unix=%d), buffered=%d bytes", idRaw, buf.StartTime().Format(time.RFC3339), buf.StartTime().Unix(), buf.BytesBuffered())
+	utils.DebugLog("Catchup: buffer for %s started at %s (unix=%d), buffered=%d bytes", c.streamLabel(idRaw), buf.StartTime().Format(time.RFC3339), buf.StartTime().Unix(), buf.BytesBuffered())
 
 	// Set response headers before the first write so they reach the client.
 	ctx.Header("Content-Type", "video/mp2t")
 	ctx.Header("Cache-Control", "no-cache")
 
 	offset := buf.OffsetForTime(startTime)
-	utils.InfoLog("Catchup: serving stream %s from local buffer at offset %d / %d bytes (start raw=%q parsed=%s)", idRaw, offset, buf.BytesBuffered(), start, startTime.Format(time.RFC3339))
+	utils.DebugLog("Catchup: serving %s from local buffer at offset %d / %d bytes (start raw=%q parsed=%s)", c.streamLabel(idRaw), offset, buf.BytesBuffered(), start, startTime.Format(time.RFC3339))
 	c.serveFromCatchupBuffer(ctx, buf, startTime)
 
 	// If the client disconnected or the handler aborted, we're done.
@@ -201,7 +201,7 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 	if err != nil {
 		return
 	}
-	utils.InfoLog("Catchup: buffer exhausted for %s, transitioning to live upstream", idRaw)
+	utils.DebugLog("Catchup: buffer exhausted for %s, transitioning to live upstream", c.streamLabel(idRaw))
 	c.stream(ctx, liveURL)
 }
 

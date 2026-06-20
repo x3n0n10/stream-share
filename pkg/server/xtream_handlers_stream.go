@@ -390,10 +390,7 @@ func (c *Config) xtreamStreamMovieWithCache(ctx *gin.Context) {
 		}
 		finalID += resolvedExt
 		upstream := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
-		cacheDir := strings.TrimSpace(os.Getenv("CACHE_FOLDER"))
-		if cacheDir == "" {
-			cacheDir = filepath.Join(os.TempDir(), "stream-share-cache")
-		}
+		cacheDir := utils.VODCacheDir()
 		_ = os.MkdirAll(cacheDir, 0o755)
 		dest := filepath.Join(cacheDir, idRaw+resolvedExt)
 		expires := time.Now().Add(7 * 24 * time.Hour)
@@ -503,10 +500,7 @@ func (c *Config) xtreamStreamSeriesWithCache(ctx *gin.Context) {
 		}
 		finalID += resolvedExt
 		upstream := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
-		cacheDir := strings.TrimSpace(os.Getenv("CACHE_FOLDER"))
-		if cacheDir == "" {
-			cacheDir = filepath.Join(os.TempDir(), "stream-share-cache")
-		}
+		cacheDir := utils.VODCacheDir()
 		_ = os.MkdirAll(cacheDir, 0o755)
 		dest := filepath.Join(cacheDir, idRaw+resolvedExt)
 		expires := time.Now().Add(7 * 24 * time.Hour)
@@ -654,10 +648,7 @@ func (c *Config) xtreamProxyCredentialsMovieStreamHandlerWithCache(ctx *gin.Cont
 		}
 		finalID += resolvedExt
 		upstream := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
-		cacheDir := strings.TrimSpace(os.Getenv("CACHE_FOLDER"))
-		if cacheDir == "" {
-			cacheDir = filepath.Join(os.TempDir(), "stream-share-cache")
-		}
+		cacheDir := utils.VODCacheDir()
 		_ = os.MkdirAll(cacheDir, 0o755)
 		dest := filepath.Join(cacheDir, idRaw+resolvedExt)
 		expires := time.Now().Add(7 * 24 * time.Hour)
@@ -766,10 +757,7 @@ func (c *Config) xtreamProxyCredentialsSeriesStreamHandlerWithCache(ctx *gin.Con
 		}
 		finalID += resolvedExt
 		upstream := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
-		cacheDir := strings.TrimSpace(os.Getenv("CACHE_FOLDER"))
-		if cacheDir == "" {
-			cacheDir = filepath.Join(os.TempDir(), "stream-share-cache")
-		}
+		cacheDir := utils.VODCacheDir()
 		_ = os.MkdirAll(cacheDir, 0o755)
 		dest := filepath.Join(cacheDir, idRaw+resolvedExt)
 		expires := time.Now().Add(7 * 24 * time.Hour)

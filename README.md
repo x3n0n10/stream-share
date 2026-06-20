@@ -228,7 +228,7 @@ Cache movies or episodes to disk for faster start times and to reduce upstream u
 - Cached items automatically serve for both downloads and VOD/series streaming endpoints when available.
 
 Configuration:
-- `CACHE_FOLDER` — Absolute path where cached files are stored.
+- `CACHE_FOLDER` — Absolute path to the root cache directory. stream-share creates purpose-specific subfolders underneath it: `<CACHE_FOLDER>/vod` for cached VOD media and `<CACHE_FOLDER>/catchup` for live catchup buffers. Defaults to `$TMPDIR/stream-share` when unset.
 - `INTERNAL_API_KEY` — API key used by the internal API (Discord bot and tools).
 
 ---
@@ -256,7 +256,6 @@ At 10 Mbps a 4-hour buffer is approximately **18 GB per active channel**. Only c
 | Env var | Default | Description |
 |---|---|---|
 | `CATCHUP_ENABLED` | `false` | Set to `true` to enable |
-| `CATCHUP_BUFFER_DIR` | `$TMPDIR/stream-share-catchup` | Directory for buffer `.ts` files |
 | `CATCHUP_DURATION` | `4` | Hours of catchup to buffer and advertise to clients |
 | `CATCHUP_PAUSE_GRACE_MINUTES` | `5` | Minutes to keep recording after the last viewer leaves (for pause/resume); channel switches bypass this |
 | `TZ` | — | **Required.** Must match the timezone of your IPTV clients — TiviMate sends local time in timeshift URLs (e.g. `TZ=Europe/Amsterdam`) |

@@ -627,7 +627,7 @@ func (c *Config) marshallInto(into *os.File, xtream bool) error {
 				fmt.Fprintf(&buffer, "%s=%q", track.Tags[i].Name, track.Tags[i].Value)
 				continue
 			}
-			buffer.WriteString(fmt.Sprintf("%s=%q ", track.Tags[i].Name, track.Tags[i].Value)) // nolint: errcheck
+			fmt.Fprintf(&buffer, "%s=%q ", track.Tags[i].Name, track.Tags[i].Value)
 		}
 
 		uri, err := c.replaceURL(track.URI, i-ret, xtream)

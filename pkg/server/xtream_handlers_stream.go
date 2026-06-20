@@ -277,7 +277,7 @@ func (c *Config) streamFileSegment(ctx *gin.Context, filePath string, startOffse
 		ctx.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	alignToTSPacket(f, startOffset)
 

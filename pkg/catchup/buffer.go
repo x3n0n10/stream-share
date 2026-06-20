@@ -140,7 +140,7 @@ func (b *DiskBuffer) drainLoop() {
 		}
 	}
 
-	f.Close()
+	_ = f.Close()
 	b.indexMu.Lock()
 	b.current.total = written
 	b.indexMu.Unlock()
@@ -150,7 +150,7 @@ func (b *DiskBuffer) drainLoop() {
 // rotate closes oldFile, promotes current → prev, opens a new current file, and
 // schedules deletion of the file evicted from prev. The caller must not hold indexMu.
 func (b *DiskBuffer) rotate(oldFile *os.File) *os.File {
-	oldFile.Close()
+	_ = oldFile.Close()
 
 	b.indexMu.Lock()
 	evictPath := b.prev.filePath // evict the file that was already in prev

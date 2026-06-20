@@ -148,7 +148,7 @@ func TestGetEnvOrDefault_set(t *testing.T) {
 }
 
 func TestGetEnvOrDefault_unset(t *testing.T) {
-	os.Unsetenv("TEST_KEY_XYZ_UNSET")
+	_ = os.Unsetenv("TEST_KEY_XYZ_UNSET")
 	if got := GetEnvOrDefault("TEST_KEY_XYZ_UNSET", "fallback"); got != "fallback" {
 		t.Fatalf("want %q, got %q", "fallback", got)
 	}

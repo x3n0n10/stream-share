@@ -214,11 +214,8 @@ func (c *Config) ensureVODM3UCache() (string, error) {
 	vodM3UMu.Lock()
 	defer vodM3UMu.Unlock()
 
-	// Cache directory preference: CACHE_FOLDER env or temp dir
-	cacheDir := os.Getenv("CACHE_FOLDER")
-	if cacheDir == "" {
-		cacheDir = filepath.Join(os.TempDir(), ".stream-share")
-	}
+	// VOD M3U index lives alongside the cached VOD media files.
+	cacheDir := utils.VODCacheDir()
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", err
 	}

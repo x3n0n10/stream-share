@@ -128,10 +128,7 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 
 	// Initialize local catchup buffering from environment variables
 	catchupEnabled := os.Getenv("CATCHUP_ENABLED") == "true"
-	catchupDir := os.Getenv("CATCHUP_BUFFER_DIR")
-	if catchupDir == "" {
-		catchupDir = filepath.Join(os.TempDir(), "stream-share-catchup")
-	}
+	catchupDir := utils.CatchupBufferDir()
 	catchupDur := 4
 	if v := os.Getenv("CATCHUP_DURATION"); v != "" {
 		if d, err := strconv.Atoi(v); err == nil && d > 0 {

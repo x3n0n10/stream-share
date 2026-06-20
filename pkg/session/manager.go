@@ -1042,11 +1042,7 @@ func (sm *SessionManager) SetClientStallTimeout(d time.Duration) {
 // cleanupStaleVODFiles deletes cached VOD files (and their DB rows) that have
 // not been accessed within vodCacheStaleAge. In-progress downloads are skipped.
 func (sm *SessionManager) cleanupStaleVODFiles() {
-	cacheDir := strings.TrimSpace(os.Getenv("CACHE_FOLDER"))
-	if cacheDir == "" {
-		cacheDir = os.TempDir()
-	}
-	cacheDir = filepath.Clean(cacheDir)
+	cacheDir := filepath.Clean(utils.VODCacheDir())
 
 	threshold := time.Now().Add(-sm.vodCacheStaleAge)
 	entries, err := sm.db.GetStaleVODCache(threshold)

@@ -487,8 +487,7 @@ func (c *Config) startCache(ctx *gin.Context) {
 	}
 
 	// Determine target folder
-	baseDir := os.Getenv("CACHE_FOLDER")
-	if strings.TrimSpace(baseDir) == "" { baseDir = filepath.Join(os.TempDir(), "stream-share-cache") }
+	baseDir := utils.VODCacheDir()
 	_ = os.MkdirAll(baseDir, 0o755)
 
 	// Resolve extension to build proper upstream URL

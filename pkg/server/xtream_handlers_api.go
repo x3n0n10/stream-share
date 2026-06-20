@@ -201,10 +201,11 @@ func (c *Config) xtreamPlayerAPIGET(ctx *gin.Context) { c.xtreamPlayerAPI(ctx, c
 
 // harvestChannelNames extracts stream_id → name pairs from a get_live_streams
 // response and refreshes the API channel name index used by /status and logs.
-func harvestChannelNames(resp interface{}) {
+// It returns the number of channel names indexed.
+func harvestChannelNames(resp interface{}) int {
     streams, ok := resp.([]interface{})
     if !ok {
-        return
+        return 0
     }
     names := make(map[string]string, len(streams))
     for _, item := range streams {
@@ -220,6 +221,29 @@ func harvestChannelNames(resp interface{}) {
         }
     }
     updateAPIChannelIndex(names)
+    return len(names)
+}
+
+// warmChannelNameIndex fetches get_live_streams once so channel names can be
+// resolved even before a player requests the list through the proxy — e.g. right
+// after a container restart, when a player (TiviMate in Xtream API mode) serves
+// the channel list from its own cache and never re-fetches it.
+func (c *Config) warmChannelNameIndex() {
+    client, err := xtreamapi.New(c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL, "")
+    if err != nil {
+        utils.WarnLog("Channel name warm-up: failed to create Xtream client: %v", err)
+        return
+    }
+    resp, _, _, err := client.Action(c.ProxyConfig, "get_live_streams", nil)
+    if err != nil {
+        utils.WarnLog("Channel name warm-up: get_live_streams failed: %v", err)
+        return
+    }
+    if n := harvestChannelNames(xtreamapi.ProcessResponse(resp)); n > 0 {
+        utils.InfoLog("Channel name warm-up: indexed %d channel names from get_live_streams", n)
+    } else {
+        utils.WarnLog("Channel name warm-up: get_live_streams returned no usable channel names")
+    }
 }
 
 func (c *Config) injectCatchupFlags(resp interface{}) interface{} {

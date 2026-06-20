@@ -305,6 +305,10 @@ func (c *Config) Serve() error {
 		return err
 	}
 
+	// Warm the channel-name index from get_live_streams so /status and logs can
+	// resolve names immediately, without waiting for a player to request the list.
+	go c.warmChannelNameIndex()
+
 	if c.sessionManager != nil {
 		defer c.sessionManager.Stop()
 	}

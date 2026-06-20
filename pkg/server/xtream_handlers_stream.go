@@ -347,9 +347,10 @@ func (c *Config) xtreamStreamMovieWithCache(ctx *gin.Context) {
 		}
 		if username != "" {
 			movieTitle := idRaw
-			if name, ok := c.getChannelNameByID(idRaw); ok && strings.TrimSpace(name) != "" {
+			if name, ok := c.resolveTitleAtStart(idRaw, "movie"); ok && strings.TrimSpace(name) != "" {
 				movieTitle = name
 			}
+			utils.InfoLog("VOD movie started: %s for user %s", movieTitle, username)
 			c.sessionManager.RegisterVODView(username, idRaw, "movie", movieTitle)
 			defer c.sessionManager.UnregisterVODView(username, idRaw)
 		}
@@ -465,9 +466,10 @@ func (c *Config) xtreamStreamSeriesWithCache(ctx *gin.Context) {
 		}
 		if username != "" {
 			seriesTitle := idRaw
-			if name, ok := c.getChannelNameByID(idRaw); ok && strings.TrimSpace(name) != "" {
+			if name, ok := c.resolveTitleAtStart(idRaw, "series"); ok && strings.TrimSpace(name) != "" {
 				seriesTitle = name
 			}
+			utils.InfoLog("VOD series started: %s for user %s", seriesTitle, username)
 			c.sessionManager.RegisterVODView(username, idRaw, "series", seriesTitle)
 			defer c.sessionManager.UnregisterVODView(username, idRaw)
 		}
@@ -618,9 +620,10 @@ func (c *Config) xtreamProxyCredentialsMovieStreamHandlerWithCache(ctx *gin.Cont
 		}
 		if username != "" {
 			movieTitle := idRaw
-			if name, ok := c.getChannelNameByID(idRaw); ok && strings.TrimSpace(name) != "" {
+			if name, ok := c.resolveTitleAtStart(idRaw, "movie"); ok && strings.TrimSpace(name) != "" {
 				movieTitle = name
 			}
+			utils.InfoLog("VOD movie started: %s for user %s", movieTitle, username)
 			c.sessionManager.RegisterVODView(username, idRaw, "movie", movieTitle)
 			defer c.sessionManager.UnregisterVODView(username, idRaw)
 		}
@@ -733,9 +736,10 @@ func (c *Config) xtreamProxyCredentialsSeriesStreamHandlerWithCache(ctx *gin.Con
 		}
 		if username != "" {
 			seriesTitle := idRaw
-			if name, ok := c.getChannelNameByID(idRaw); ok && strings.TrimSpace(name) != "" {
+			if name, ok := c.resolveTitleAtStart(idRaw, "series"); ok && strings.TrimSpace(name) != "" {
 				seriesTitle = name
 			}
+			utils.InfoLog("VOD series started: %s for user %s", seriesTitle, username)
 			c.sessionManager.RegisterVODView(username, idRaw, "series", seriesTitle)
 			defer c.sessionManager.UnregisterVODView(username, idRaw)
 		}

@@ -160,12 +160,13 @@ func (c *Config) getChannelNameByID(streamID string) (string, bool) {
 	return lookupAPIChannelName(id)
 }
 
-// streamLabel formats a stream for logging as "Channel Name (Stream <id>)",
-// falling back to "Stream <id>" when no name is known. The id is reported
-// without its file extension for readability.
+// streamLabel formats a stream for logging as "Name (Stream <id>)", falling back
+// to "Stream <id>" when no name is known. It resolves live channel names and any
+// already-cached VOD titles without network I/O. The id is reported without its
+// file extension for readability.
 func (c *Config) streamLabel(streamID string) string {
 	id := normalizeStreamID(streamID)
-	if name, ok := c.getChannelNameByID(streamID); ok && strings.TrimSpace(name) != "" {
+	if name, ok := c.resolveStreamName(streamID); ok && strings.TrimSpace(name) != "" {
 		return fmt.Sprintf("%s (Stream %s)", strings.TrimSpace(name), id)
 	}
 	return fmt.Sprintf("Stream %s", id)

@@ -30,6 +30,9 @@ import (
 func newTestManager() *SessionManager {
 	sm := NewSessionManager(nil)
 	sm.SetClientStallTimeout(200 * time.Millisecond)
+	// Synthetic VOD views are torn down a streamTimeout after their last range
+	// request; keep that short so tests don't wait the 2-minute default.
+	sm.SetStreamTimeout(50 * time.Millisecond)
 	return sm
 }
 
@@ -109,9 +112,28 @@ func TestUnregisterVODView_removesSession(t *testing.T) {
 	sm.RegisterVODView("alice", "vod123", "movie", "Test Movie")
 	sm.UnregisterVODView("alice", "vod123")
 
-	if _, ok := sm.GetStreamInfo("vod123"); ok {
-		t.Fatal("stream should be removed after last viewer unregisters")
+	// Removal is deferred by a grace window (streamTimeout) so the session
+	// survives the gaps between a player's range requests. It should still be
+	// present immediately after unregister, then gone once the grace elapses.
+	if _, ok := sm.GetStreamInfo("vod123"); !ok {
+		t.Fatal("stream should survive the grace window after last range request")
 	}
+	if !waitForStreamGone(sm, "vod123", time.Second) {
+		t.Fatal("stream should be removed after the grace window elapses")
+	}
+}
+
+// waitForStreamGone polls until the stream session is gone or the deadline hits.
+func waitForStreamGone(sm *SessionManager, streamID string, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if _, ok := sm.GetStreamInfo(streamID); !ok {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	_, ok := sm.GetStreamInfo(streamID)
+	return !ok
 }
 
 func TestVODView_multipleViewers(t *testing.T) {
@@ -123,15 +145,17 @@ func TestVODView_multipleViewers(t *testing.T) {
 		sm.RegisterVODView(u, "vod123", "movie", "Test Movie")
 	}
 
-	// Only alice leaves — stream should still exist for bob.
+	// Only alice leaves — stream should still exist for bob (and survive alice's
+	// grace window, since bob is still an active viewer).
 	sm.UnregisterVODView("alice", "vod123")
+	time.Sleep(100 * time.Millisecond) // longer than the grace window
 	if _, ok := sm.GetStreamInfo("vod123"); !ok {
-		t.Fatal("stream should still exist after first viewer leaves")
+		t.Fatal("stream should still exist while bob is watching")
 	}
 
-	// Bob leaves — stream should be gone.
+	// Bob leaves — stream should be gone once his grace window elapses.
 	sm.UnregisterVODView("bob", "vod123")
-	if _, ok := sm.GetStreamInfo("vod123"); ok {
+	if !waitForStreamGone(sm, "vod123", time.Second) {
 		t.Fatal("stream should be removed after all viewers leave")
 	}
 }

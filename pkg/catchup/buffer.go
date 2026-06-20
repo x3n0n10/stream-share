@@ -174,7 +174,7 @@ func (b *DiskBuffer) rotate(oldFile *os.File) *os.File {
 		utils.ErrorLog("Catchup: failed to open rotated buffer file %s: %v", newPath, err)
 		return nil
 	}
-	utils.InfoLog("Catchup: rotated buffer for stream %s → %s", b.streamID, newPath)
+	utils.DebugLog("Catchup: rotated buffer for stream %s → %s", b.streamID, newPath)
 	return f
 }
 

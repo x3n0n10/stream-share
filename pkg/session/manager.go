@@ -259,7 +259,7 @@ func (sm *SessionManager) cleanupUnusedStreams() {
 
 	for streamID, session := range sm.streamSessions {
 		if session.LastRequested.Before(threshold) && session.Active {
-			utils.InfoLog("%s has been inactive for %s, stopping",
+			utils.DebugLog("%s has been inactive for %s, stopping",
 				sm.streamLabel(streamID), utils.HumanDuration(time.Since(session.LastRequested)))
 			sm.stopStream(streamID)
 		}
@@ -371,7 +371,7 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 
 		// A viewer returned — cancel any pending pause-grace stop.
 		if sm.cancelPendingStop(streamID) {
-			utils.InfoLog("%s resumed before pause grace expired; continuing uninterrupted", sm.streamLabel(streamID))
+			utils.DebugLog("%s resumed before pause grace expired; continuing uninterrupted", sm.streamLabel(streamID))
 		}
 
 		if streamSession, exists := sm.streamSessions[streamID]; exists {
@@ -385,7 +385,7 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		if old, alreadyClient := existingBuffer.clients[username]; alreadyClient {
 			old.close()
 			delete(existingBuffer.clients, username)
-			utils.InfoLog("User %s reconnected to %s; replaced stale client", username, sm.streamLabel(streamID))
+			utils.DebugLog("User %s reconnected to %s; replaced stale client", username, sm.streamLabel(streamID))
 		}
 		existingBuffer.clients[username] = newStreamClient()
 		existingBuffer.clientsLock.Unlock()
@@ -707,7 +707,7 @@ func (sm *SessionManager) schedulePendingStop(streamID string) {
 	}
 	cancel := make(chan struct{})
 	sm.pendingStops[streamID] = cancel
-	utils.InfoLog("%s has no viewers; keeping it alive for up to %s in case of resume (pause/timeshift)",
+	utils.DebugLog("%s has no viewers; keeping it alive for up to %s in case of resume (pause/timeshift)",
 		sm.streamLabel(streamID), utils.HumanDuration(sm.pauseGrace))
 
 	go func() {
@@ -720,7 +720,7 @@ func (sm *SessionManager) schedulePendingStop(streamID string) {
 		defer sm.streamLock.Unlock()
 		if current, ok := sm.pendingStops[streamID]; ok && current == cancel {
 			delete(sm.pendingStops, streamID)
-			utils.InfoLog("%s pause grace expired with no viewers returning; stopping", sm.streamLabel(streamID))
+			utils.DebugLog("%s pause grace expired with no viewers returning; stopping", sm.streamLabel(streamID))
 			sm.stopStream(streamID)
 		}
 	}()
@@ -747,7 +747,7 @@ func (sm *SessionManager) NotifyCatchupActivity(streamID string) {
 	sm.streamLock.Lock()
 	defer sm.streamLock.Unlock()
 	if sm.cancelPendingStop(streamID) {
-		utils.InfoLog("%s resumed via catchup before pause grace expired; continuing uninterrupted", sm.streamLabel(streamID))
+		utils.DebugLog("%s resumed via catchup before pause grace expired; continuing uninterrupted", sm.streamLabel(streamID))
 	}
 }
 
@@ -758,7 +758,7 @@ func (sm *SessionManager) stopStream(streamID string) {
 	// (e.g. the viewer switched to a different channel).
 	sm.cancelPendingStop(streamID)
 
-	utils.InfoLog("Stopping %s", sm.streamLabel(streamID))
+	utils.DebugLog("Stopping %s", sm.streamLabel(streamID))
 
 	buffer, exists := sm.streamBuffers[streamID]
 	if !exists || !buffer.active {
@@ -789,7 +789,7 @@ func (sm *SessionManager) stopStream(streamID string) {
 		streamSession.Active = false
 	}
 
-	utils.InfoLog("%s stopped and all clients disconnected", sm.streamLabel(streamID))
+	utils.DebugLog("%s stopped and all clients disconnected", sm.streamLabel(streamID))
 }
 
 // GenerateTemporaryLink creates a temporary download link

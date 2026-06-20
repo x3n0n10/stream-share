@@ -565,7 +565,7 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	setNoBufferingHeaders(ctx, contentTypeForPath(targetURL.Path))
 
 	// Stream data to the client
-	utils.InfoLog("Starting multiplexed stream for user %s (%s)", username, label)
+	utils.DebugLog("Starting multiplexed stream for user %s (%s)", username, label)
 
 	ctx.Stream(func(w io.Writer) bool {
 		select {
@@ -596,7 +596,7 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	})
 
 	// Clean up after streaming is done
-	utils.InfoLog("Stream ended for user %s (%s)", username, label)
+	utils.DebugLog("Stream ended for user %s (%s)", username, label)
 	c.sessionManager.RemoveClient(streamID, username)
 }
 

@@ -53,7 +53,7 @@ const (
 
 func init() {
 	// Initialize logging configuration from environment
-	Config.DebugLoggingEnabled = os.Getenv("DEBUG_LOGGING") == "true"
+	Config.DebugLoggingEnabled = os.Getenv("LOG_DEBUG_ENABLED") == "true"
 	
 	// Set log level from environment
 	logLevel := strings.ToLower(os.Getenv("LOG_LEVEL"))

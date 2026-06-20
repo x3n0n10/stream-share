@@ -25,9 +25,9 @@ import (
 	"os"
 	"strings"
 
-	homedir "github.com/mitchellh/go-homedir"
 	"github.com/lucasduport/stream-share/pkg/config"
 	"github.com/lucasduport/stream-share/pkg/server"
+	homedir "github.com/mitchellh/go-homedir"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -82,7 +82,7 @@ It supports:
 		}
 
 		// Initialize debug logging and cache folder
-		config.DebugLoggingEnabled = viper.GetBool("debug-logging")
+		config.DebugLoggingEnabled = viper.GetBool("log-debug-enabled")
 		config.CacheFolder = viper.GetString("cache-folder")
 		if config.CacheFolder != "" && !strings.HasSuffix(config.CacheFolder, "/") {
 			config.CacheFolder += "/"
@@ -98,24 +98,51 @@ It supports:
 			XtreamUser:           config.CredentialString(xtreamUser),
 			XtreamPassword:       config.CredentialString(xtreamPassword),
 			XtreamBaseURL:        xtreamBaseURL,
-			M3UCacheExpiration:   viper.GetInt("m3u-cache-expiration"),
-			User:                 config.CredentialString(viper.GetString("user")),
-			Password:             config.CredentialString(viper.GetString("password")),
+			M3UCacheExpiration:   viper.GetInt("m3u-cache-expiration-hours"),
+			User:                 config.CredentialString(viper.GetString("auth-user")),
+			Password:             config.CredentialString(viper.GetString("auth-password")),
 			AdvertisedPort:       viper.GetInt("advertised-port"),
-			HTTPS:                viper.GetBool("https"),
+			HTTPS:                viper.GetBool("https-enabled"),
 			M3UFileName:          viper.GetString("m3u-file-name"),
 			CustomEndpoint:       viper.GetString("custom-endpoint"),
 			CustomId:             viper.GetString("custom-id"),
-			XtreamGenerateApiGet: viper.GetBool("xtream-api-get"),
+			XtreamGenerateApiGet: viper.GetBool("xtream-api-get-enabled"),
 			// LDAP configuration
-			LDAPEnabled:          viper.GetBool("ldap-enabled"),
-			LDAPServer:           viper.GetString("ldap-server"),
-			LDAPBaseDN:           viper.GetString("ldap-base-dn"),
-			LDAPBindDN:           viper.GetString("ldap-bind-dn"),
-			LDAPBindPassword:     viper.GetString("ldap-bind-password"),
-			LDAPUserAttribute:    viper.GetString("ldap-user-attribute"),
-			LDAPGroupAttribute:   viper.GetString("ldap-group-attribute"),
-			LDAPRequiredGroup:    viper.GetString("ldap-required-group"),
+			LDAPEnabled:        viper.GetBool("ldap-enabled"),
+			LDAPServer:         viper.GetString("ldap-server"),
+			LDAPBaseDN:         viper.GetString("ldap-base-dn"),
+			LDAPBindDN:         viper.GetString("ldap-bind-dn"),
+			LDAPBindPassword:   viper.GetString("ldap-bind-password"),
+			LDAPUserAttribute:  viper.GetString("ldap-user-attribute"),
+			LDAPGroupAttribute: viper.GetString("ldap-group-attribute"),
+			LDAPRequiredGroup:  viper.GetString("ldap-required-group"),
+
+			// Reverse proxy / public URL
+			ReverseProxyEnabled: viper.GetBool("reverse-proxy-enabled"),
+			PublicBaseURL:       viper.GetString("public-base-url"),
+
+			// VOD caching
+			VODCacheEnabled:    viper.GetBool("vod-cache-enabled"),
+			VODCacheStaleHours: viper.GetInt("vod-cache-stale-hours"),
+			VODExtOrder:        viper.GetString("vod-ext-order"),
+			VODExtProbeEnabled: viper.GetBool("vod-ext-probe-enabled"),
+
+			// Catchup
+			CatchupEnabled:           viper.GetBool("catchup-enabled"),
+			CatchupDurationHours:     viper.GetInt("catchup-duration-hours"),
+			CatchupPauseGraceMinutes: viper.GetInt("catchup-pause-grace-minutes"),
+
+			// Session / stream timeouts
+			SessionTimeoutMinutes:        viper.GetInt("session-timeout-minutes"),
+			StreamTimeoutMinutes:         viper.GetInt("stream-timeout-minutes"),
+			TempLinkHours:                viper.GetInt("temp-link-hours"),
+			MultiplexStallTimeoutSeconds: viper.GetInt("multiplex-stall-timeout-seconds"),
+
+			// Internal API / Discord
+			InternalAPIKey:     viper.GetString("internal-api-key"),
+			DiscordBotToken:    viper.GetString("discord-bot-token"),
+			DiscordAdminRoleID: viper.GetString("discord-admin-role-id"),
+			DiscordAPIURL:      viper.GetString("discord-api-url"),
 		}
 
 		// Use port if advertised port is not specified
@@ -157,18 +184,18 @@ func init() {
 	rootCmd.Flags().Int("port", 8080, "Listening port")
 	rootCmd.Flags().Int("advertised-port", 0, "Port to use in generated URLs (for reverse proxy)")
 	rootCmd.Flags().String("hostname", "", "Hostname to use in generated URLs")
-	rootCmd.Flags().BoolP("https", "", false, "Use HTTPS for generated URLs")
-	rootCmd.Flags().Int("m3u-cache-expiration", 1, "M3U cache expiration in hours")
+	rootCmd.Flags().BoolP("https-enabled", "", false, "Use HTTPS for generated URLs")
+	rootCmd.Flags().Int("m3u-cache-expiration-hours", 1, "M3U cache expiration in hours")
 
-	// Authentication configuration 
-	rootCmd.Flags().String("user", "usertest", "Username for basic authentication when LDAP is not enabled")
-	rootCmd.Flags().String("password", "passwordtest", "Password for basic authentication when LDAP is not enabled")
+	// Authentication configuration
+	rootCmd.Flags().String("auth-user", "usertest", "Username for basic authentication when LDAP is not enabled")
+	rootCmd.Flags().String("auth-password", "passwordtest", "Password for basic authentication when LDAP is not enabled")
 
 	// Xtream API configuration
 	rootCmd.Flags().String("xtream-user", "", "Username for accessing the upstream Xtream API")
 	rootCmd.Flags().String("xtream-password", "", "Password for accessing the upstream Xtream API")
 	rootCmd.Flags().String("xtream-base-url", "", "Base URL of the upstream Xtream API service")
-	rootCmd.Flags().BoolP("xtream-api-get", "", false, "Generate get.php endpoint from API data")
+	rootCmd.Flags().BoolP("xtream-api-get-enabled", "", false, "Generate get.php endpoint from API data")
 
 	// LDAP authentication configuration
 	rootCmd.Flags().Bool("ldap-enabled", false, "Enable LDAP authentication instead of basic auth")
@@ -179,6 +206,33 @@ func init() {
 	rootCmd.Flags().String("ldap-user-attribute", "uid", "LDAP username attribute")
 	rootCmd.Flags().String("ldap-group-attribute", "memberOf", "LDAP group attribute")
 	rootCmd.Flags().String("ldap-required-group", "iptv", "Required LDAP group")
+
+	// Reverse proxy / public URL configuration
+	rootCmd.Flags().Bool("reverse-proxy-enabled", false, "Behind a reverse proxy: drop the port in generated public URLs")
+	rootCmd.Flags().String("public-base-url", "", "Public base URL used for generated download links (e.g. https://example.com)")
+
+	// VOD caching configuration
+	rootCmd.Flags().Bool("vod-cache-enabled", false, "Enable local caching of VOD/series streams")
+	rootCmd.Flags().Int("vod-cache-stale-hours", 24, "Hours after which a cached VOD entry is considered stale")
+	rootCmd.Flags().String("vod-ext-order", "", "Comma-separated VOD extension probe order (e.g. .mp4,.ts,.mkv)")
+	rootCmd.Flags().Bool("vod-ext-probe-enabled", false, "Allow network probing to resolve VOD file extensions")
+
+	// Catchup configuration
+	rootCmd.Flags().Bool("catchup-enabled", false, "Enable local catchup buffering for live streams")
+	rootCmd.Flags().Int("catchup-duration-hours", 4, "Number of hours of catchup buffer to retain")
+	rootCmd.Flags().Int("catchup-pause-grace-minutes", 5, "Minutes a catchup live stream keeps recording after the last viewer disconnects")
+
+	// Session / stream timeout configuration
+	rootCmd.Flags().Int("session-timeout-minutes", 0, "Session inactivity timeout in minutes (0 = manager default)")
+	rootCmd.Flags().Int("stream-timeout-minutes", 0, "Stream inactivity timeout in minutes (0 = manager default)")
+	rootCmd.Flags().Int("temp-link-hours", 0, "Temporary download link lifetime in hours (0 = manager default)")
+	rootCmd.Flags().Int("multiplex-stall-timeout-seconds", 0, "Multiplex client stall timeout in seconds (0 = manager default)")
+
+	// Internal API / Discord configuration
+	rootCmd.Flags().String("internal-api-key", "", "Internal API key (generated at startup if unset)")
+	rootCmd.Flags().String("discord-bot-token", "", "Discord bot token (enables the Discord bot when set)")
+	rootCmd.Flags().String("discord-admin-role-id", "", "Discord admin role ID")
+	rootCmd.Flags().String("discord-api-url", "", "Base URL the Discord bot uses to reach this API")
 
 	// Bind all flags to viper
 	if err := viper.BindPFlags(rootCmd.Flags()); err != nil {

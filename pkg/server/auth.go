@@ -55,6 +55,15 @@ func GetAPIKey() string {
 	return internalAPIKey
 }
 
+// SetAPIKey pins the internal API key to the provided value (e.g. from
+// configuration). An empty value leaves the existing (generated or env) key.
+func SetAPIKey(key string) {
+	if key != "" {
+		internalAPIKey = key
+		utils.InfoLog("Using internal API key from configuration")
+	}
+}
+
 // apiKeyAuth middleware validates the internal API key
 func (c *Config) apiKeyAuth() gin.HandlerFunc {
 	return func(ctx *gin.Context) {

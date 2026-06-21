@@ -64,7 +64,7 @@ func (m *DBManager) LoadStreamNames() (map[string]map[string]string, error) {
 	if err != nil {
 		return result, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var id, source, name string
 		if err := rows.Scan(&id, &source, &name); err != nil {

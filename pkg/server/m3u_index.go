@@ -27,6 +27,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/lucasduport/stream-share/pkg/utils"
 )
 
 var (
@@ -44,13 +46,16 @@ var (
 )
 
 // updateAPIChannelIndex replaces the API-sourced name index with id→name pairs.
-func updateAPIChannelIndex(names map[string]string) {
+func (c *Config) updateAPIChannelIndex(names map[string]string) {
 	if len(names) == 0 {
 		return
 	}
 	apiChannelIndexMu.Lock()
 	apiChannelIndex = names
 	apiChannelIndexMu.Unlock()
+	if err := c.db.UpsertStreamNames(names, "api"); err != nil {
+		utils.WarnLog("stream_names: failed to persist API channel index: %v", err)
+	}
 }
 
 // lookupAPIChannelName returns the channel name for a normalized stream ID.
@@ -136,9 +141,51 @@ func (c *Config) ensureChannelIndex() {
 	}
 	// best-effort index
 
+	// Write to DB (best-effort, non-fatal)
+	if err := c.db.UpsertStreamNames(newIndex, "m3u"); err != nil {
+		utils.WarnLog("stream_names: failed to persist M3U channel index: %v", err)
+	}
+
 	channelIndex = newIndex
 	channelIndexPath = m3uPath
 	channelIndexMTime = info.ModTime()
+}
+
+// warmChannelIndexFromDB seeds the in-memory indices from the database on startup.
+func (c *Config) warmChannelIndexFromDB() {
+	bySource, err := c.db.LoadStreamNames()
+	if err != nil {
+		utils.WarnLog("stream_names: failed to load from DB: %v", err)
+		return
+	}
+	if m3uNames := bySource["m3u"]; len(m3uNames) > 0 {
+		channelIndexMu.Lock()
+		if channelIndex == nil {
+			channelIndex = m3uNames
+		}
+		channelIndexMu.Unlock()
+	}
+	if apiNames := bySource["api"]; len(apiNames) > 0 {
+		apiChannelIndexMu.Lock()
+		if apiChannelIndex == nil {
+			apiChannelIndex = apiNames
+		}
+		apiChannelIndexMu.Unlock()
+	}
+	if vodNames := bySource["vod"]; len(vodNames) > 0 {
+		vodNameMu.Lock()
+		for id, name := range vodNames {
+			if _, exists := vodNameIndex[id]; !exists {
+				vodNameIndex[id] = name
+			}
+		}
+		vodNameMu.Unlock()
+	}
+	total := len(bySource["m3u"]) + len(bySource["api"]) + len(bySource["vod"])
+	if total > 0 {
+		utils.InfoLog("stream_names: loaded %d names from DB (m3u=%d, api=%d, vod=%d)",
+			total, len(bySource["m3u"]), len(bySource["api"]), len(bySource["vod"]))
+	}
 }
 
 // getChannelNameByID returns the channel name for a given stream ID if known.

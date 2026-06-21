@@ -390,10 +390,7 @@ func (c *Config) xtreamStreamMovieWithCache(ctx *gin.Context) {
 		}
 		finalID += resolvedExt
 		upstream := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
-		cacheDir := strings.TrimSpace(os.Getenv("CACHE_FOLDER"))
-		if cacheDir == "" {
-			cacheDir = filepath.Join(os.TempDir(), "stream-share-cache")
-		}
+		cacheDir := utils.VODCacheDir()
 		_ = os.MkdirAll(cacheDir, 0o755)
 		dest := filepath.Join(cacheDir, idRaw+resolvedExt)
 		expires := time.Now().Add(7 * 24 * time.Hour)
@@ -433,7 +430,7 @@ func (c *Config) xtreamStreamMovieWithCache(ctx *gin.Context) {
 }
 
 func (c *Config) xtreamStreamMovie(ctx *gin.Context) {
-	if utils.GetEnvOrDefault("USE_VOD_CACHING", "false") == "true" {
+	if c.VODCacheEnabled {
 		c.xtreamStreamMovieWithCache(ctx)
 	} else {
 		id := ctx.Param("id")
@@ -503,10 +500,7 @@ func (c *Config) xtreamStreamSeriesWithCache(ctx *gin.Context) {
 		}
 		finalID += resolvedExt
 		upstream := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
-		cacheDir := strings.TrimSpace(os.Getenv("CACHE_FOLDER"))
-		if cacheDir == "" {
-			cacheDir = filepath.Join(os.TempDir(), "stream-share-cache")
-		}
+		cacheDir := utils.VODCacheDir()
 		_ = os.MkdirAll(cacheDir, 0o755)
 		dest := filepath.Join(cacheDir, idRaw+resolvedExt)
 		expires := time.Now().Add(7 * 24 * time.Hour)
@@ -543,7 +537,7 @@ func (c *Config) xtreamStreamSeriesWithCache(ctx *gin.Context) {
 }
 
 func (c *Config) xtreamStreamSeries(ctx *gin.Context) {
-	if utils.GetEnvOrDefault("USE_VOD_CACHING", "false") == "true" {
+	if c.VODCacheEnabled {
 		c.xtreamStreamSeriesWithCache(ctx)
 	} else {
 		id := ctx.Param("id")
@@ -582,7 +576,7 @@ func (c *Config) xtreamProxyCredentialsLiveStreamHandler(ctx *gin.Context) {
 }
 
 func (c *Config) xtreamProxyCredentialsMovieStreamHandler(ctx *gin.Context) {
-	if utils.GetEnvOrDefault("USE_VOD_CACHING", "false") == "true" {
+	if c.VODCacheEnabled {
 		c.xtreamProxyCredentialsMovieStreamHandlerWithCache(ctx)
 	} else {
 		id := ctx.Param("id")
@@ -654,10 +648,7 @@ func (c *Config) xtreamProxyCredentialsMovieStreamHandlerWithCache(ctx *gin.Cont
 		}
 		finalID += resolvedExt
 		upstream := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
-		cacheDir := strings.TrimSpace(os.Getenv("CACHE_FOLDER"))
-		if cacheDir == "" {
-			cacheDir = filepath.Join(os.TempDir(), "stream-share-cache")
-		}
+		cacheDir := utils.VODCacheDir()
 		_ = os.MkdirAll(cacheDir, 0o755)
 		dest := filepath.Join(cacheDir, idRaw+resolvedExt)
 		expires := time.Now().Add(7 * 24 * time.Hour)
@@ -695,7 +686,7 @@ func (c *Config) xtreamProxyCredentialsMovieStreamHandlerWithCache(ctx *gin.Cont
 }
 
 func (c *Config) xtreamProxyCredentialsSeriesStreamHandler(ctx *gin.Context) {
-	if utils.GetEnvOrDefault("USE_VOD_CACHING", "false") == "true" {
+	if c.VODCacheEnabled {
 		c.xtreamProxyCredentialsSeriesStreamHandlerWithCache(ctx)
 	} else {
 		id := ctx.Param("id")
@@ -766,10 +757,7 @@ func (c *Config) xtreamProxyCredentialsSeriesStreamHandlerWithCache(ctx *gin.Con
 		}
 		finalID += resolvedExt
 		upstream := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
-		cacheDir := strings.TrimSpace(os.Getenv("CACHE_FOLDER"))
-		if cacheDir == "" {
-			cacheDir = filepath.Join(os.TempDir(), "stream-share-cache")
-		}
+		cacheDir := utils.VODCacheDir()
 		_ = os.MkdirAll(cacheDir, 0o755)
 		dest := filepath.Join(cacheDir, idRaw+resolvedExt)
 		expires := time.Now().Add(7 * 24 * time.Hour)

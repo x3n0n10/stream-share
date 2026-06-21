@@ -307,18 +307,17 @@ func (c *Config) createVODDownload(ctx *gin.Context) {
 	}
 
 	// Build the public-facing download URL.
-	// Priority: PUBLIC_BASE_URL > REVERSE_PROXY heuristics > hostname:port.
+	// Priority: PublicBaseURL > reverse proxy heuristics > hostname:port.
 	var downloadURL string
-	if base := strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")), "/"); base != "" {
+	if base := strings.TrimRight(strings.TrimSpace(c.PublicBaseURL), "/"); base != "" {
 		downloadURL = base + "/download/" + token
 	} else {
 		protocol := "http"
 		if c.HTTPS { protocol = "https" }
 		hostPart := fmt.Sprintf("%s:%d", c.HostConfig.Hostname, c.HostConfig.Port)
-		rev := strings.ToLower(strings.TrimSpace(os.Getenv("REVERSE_PROXY")))
-		if rev == "1" || rev == "true" || rev == "yes" {
-			// Behind a reverse proxy: drop the port and optionally mirror DISCORD_API_URL's scheme/host.
-			if api := strings.TrimSpace(os.Getenv("DISCORD_API_URL")); api != "" {
+		if c.ReverseProxyEnabled {
+			// Behind a reverse proxy: drop the port and optionally mirror DiscordAPIURL's scheme/host.
+			if api := strings.TrimSpace(c.DiscordAPIURL); api != "" {
 				if u, err := url.Parse(api); err == nil {
 					if u.Scheme != "" { protocol = u.Scheme }
 					if u.Host != "" { hostPart = u.Host } else { hostPart = c.HostConfig.Hostname }
@@ -349,7 +348,7 @@ func (c *Config) createVODDownload(ctx *gin.Context) {
 func (c *Config) pickVODExtension(ctx *gin.Context, basePath, streamID string) string {
 	// Allow override via env
 	order := []string{".mp4", ".ts", ".mkv", ""}
-	if v := strings.TrimSpace(utils.GetEnvOrDefault("VOD_EXT_ORDER", "")); v != "" {
+	if v := strings.TrimSpace(c.VODExtOrder); v != "" {
 		// comma-separated, keep only known values to avoid surprises
 		parts := strings.Split(v, ",")
 		tmp := make([]string, 0, len(parts))
@@ -487,8 +486,7 @@ func (c *Config) startCache(ctx *gin.Context) {
 	}
 
 	// Determine target folder
-	baseDir := os.Getenv("CACHE_FOLDER")
-	if strings.TrimSpace(baseDir) == "" { baseDir = filepath.Join(os.TempDir(), "stream-share-cache") }
+	baseDir := utils.VODCacheDir()
 	_ = os.MkdirAll(baseDir, 0o755)
 
 	// Resolve extension to build proper upstream URL
@@ -502,10 +500,9 @@ func (c *Config) startCache(ctx *gin.Context) {
 			finalID += ext
 		} else {
 			// 2) Optional: allow network probing only if explicitly enabled
-			probeEnv := strings.ToLower(strings.TrimSpace(os.Getenv("VOD_EXT_PROBE")))
-			if probeEnv == "1" || probeEnv == "true" || probeEnv == "yes" {
+			if c.VODExtProbeEnabled {
 				if ext := c.pickVODExtension(nil, basePath, finalID); ext != "" {
-					utils.DebugLog("Cache: probed extension %s for %s due to VOD_EXT_PROBE", ext, finalID)
+					utils.DebugLog("Cache: probed extension %s for %s due to vod-ext-probe-enabled", ext, finalID)
 					finalID += ext
 				}
 			}

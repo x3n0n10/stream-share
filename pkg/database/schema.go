@@ -101,6 +101,19 @@ func (m *DBManager) initSchema() error {
         return fmt.Errorf("failed to create vod_cache table: %w", err)
     }
 
+    if _, err := m.db.Exec(`
+        CREATE TABLE IF NOT EXISTS stream_names (
+            stream_id TEXT NOT NULL,
+            source    TEXT NOT NULL,
+            name      TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (stream_id, source)
+        )
+    `); err != nil {
+        utils.ErrorLog("Failed to create stream_names table: %v", err)
+        return fmt.Errorf("failed to create stream_names table: %w", err)
+    }
+
     utils.InfoLog("Database schema initialized successfully")
     return nil
 }

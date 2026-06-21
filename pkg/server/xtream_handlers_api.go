@@ -182,7 +182,7 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
     utils.InfoLog("Action\t%s requested by %s", action, ctx.ClientIP())
     processedResp := xtreamapi.ProcessResponse(resp)
     if action == "get_live_streams" {
-        harvestChannelNames(processedResp)
+        c.harvestChannelNames(processedResp)
         if c.catchupManager != nil && c.catchupManager.IsEnabled() {
             processedResp = c.injectCatchupFlags(processedResp)
         }
@@ -202,7 +202,7 @@ func (c *Config) xtreamPlayerAPIGET(ctx *gin.Context) { c.xtreamPlayerAPI(ctx, c
 // harvestChannelNames extracts stream_id → name pairs from a get_live_streams
 // response and refreshes the API channel name index used by /status and logs.
 // It returns the number of channel names indexed.
-func harvestChannelNames(resp interface{}) int {
+func (c *Config) harvestChannelNames(resp interface{}) int {
     streams, ok := resp.([]interface{})
     if !ok {
         return 0
@@ -220,7 +220,7 @@ func harvestChannelNames(resp interface{}) int {
             names[id] = name
         }
     }
-    updateAPIChannelIndex(names)
+    c.updateAPIChannelIndex(names)
     return len(names)
 }
 
@@ -239,7 +239,7 @@ func (c *Config) warmChannelNameIndex() {
         utils.WarnLog("Channel name warm-up: get_live_streams failed: %v", err)
         return
     }
-    if n := harvestChannelNames(xtreamapi.ProcessResponse(resp)); n > 0 {
+    if n := c.harvestChannelNames(xtreamapi.ProcessResponse(resp)); n > 0 {
         utils.InfoLog("Channel name warm-up: indexed %d channel names from get_live_streams", n)
     } else {
         utils.WarnLog("Channel name warm-up: get_live_streams returned no usable channel names")

@@ -757,24 +757,7 @@ func (c *Config) refreshAPIChannelIndex() {
 		utils.WarnLog("stream_names refresh: get_live_streams failed: %v", err)
 		return
 	}
-	streams, ok := resp.([]interface{})
-	if !ok {
-		return
-	}
-	names := make(map[string]string, len(streams))
-	for _, item := range streams {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		id := fmt.Sprintf("%v", m["stream_id"])
-		name, _ := m["name"].(string)
-		if id != "" && strings.TrimSpace(name) != "" {
-			names[normalizeStreamID(id)] = strings.TrimSpace(name)
-		}
-	}
-	if len(names) > 0 {
-		c.updateAPIChannelIndex(names)
-		utils.DebugLog("stream_names: refreshed %d live channel names from upstream", len(names))
+	if n := c.harvestChannelNames(xtreamapi.ProcessResponse(resp)); n > 0 {
+		utils.DebugLog("stream_names: refreshed %d live channel names from upstream", n)
 	}
 }

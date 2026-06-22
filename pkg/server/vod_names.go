@@ -73,7 +73,7 @@ func (c *Config) vodTitleByID(streamID string) (string, bool) {
 	vodNameIndex[id] = title // title may be "" = confirmed no title
 	vodNameMu.Unlock()
 	if title != "" {
-		if err := c.db.UpsertStreamName(id, "vod", title); err != nil {
+		if err := c.db.UpsertStreamName(id, "vod", title, ""); err != nil {
 			utils.WarnLog("stream_names: failed to persist VOD name for %s: %v", id, err)
 		}
 	}
@@ -161,7 +161,7 @@ func (c *Config) cacheVODName(streamID, title string) {
 	vodNameMu.Lock()
 	vodNameIndex[id] = title
 	vodNameMu.Unlock()
-	if err := c.db.UpsertStreamName(id, "vod", title); err != nil {
+	if err := c.db.UpsertStreamName(id, "vod", title, ""); err != nil {
 		utils.WarnLog("stream_names: failed to persist VOD name for %s: %v", id, err)
 	}
 }

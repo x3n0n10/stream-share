@@ -199,7 +199,7 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 
 func (c *Config) xtreamPlayerAPIGET(ctx *gin.Context) { c.xtreamPlayerAPI(ctx, ctx.Request.URL.Query()) }
 
-// harvestChannelNames extracts stream_id → name pairs from a get_live_streams
+// harvestChannelNames extracts stream_id → name pairs and EPG channel IDs from a get_live_streams
 // response and refreshes the API channel name index used by /status and logs.
 // It returns the number of channel names indexed.
 func (c *Config) harvestChannelNames(resp interface{}) int {
@@ -208,19 +208,22 @@ func (c *Config) harvestChannelNames(resp interface{}) int {
         return 0
     }
     names := make(map[string]string, len(streams))
+    epgIDs := make(map[string]string, len(streams))
     for _, item := range streams {
         m, ok := item.(map[string]interface{})
         if !ok {
             continue
         }
         id := normalizeStreamID(fmt.Sprintf("%v", m["stream_id"]))
-        name, _ := m["name"].(string)
-        name = strings.TrimSpace(name)
+        name := strings.TrimSpace(fmt.Sprintf("%v", m["name"]))
         if id != "" && name != "" {
             names[id] = name
         }
+        if epgID, _ := m["epg_channel_id"].(string); strings.TrimSpace(epgID) != "" {
+            epgIDs[id] = strings.TrimSpace(epgID)
+        }
     }
-    c.updateAPIChannelIndex(names)
+    c.updateAPIChannelIndex(names, epgIDs)
     return len(names)
 }
 

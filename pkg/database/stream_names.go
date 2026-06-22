@@ -20,6 +20,18 @@ package database
 
 import "time"
 
+const upsertStreamNameSQL = `
+    INSERT INTO stream_names (stream_id, source, name, updated_at)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (stream_id, source) DO UPDATE
+        SET name = EXCLUDED.name, updated_at = EXCLUDED.updated_at
+`
+
+// UpsertStreamName upserts a single stream name.
+func (m *DBManager) UpsertStreamName(streamID, source, name string) error {
+	return m.UpsertStreamNames(map[string]string{streamID: name}, source)
+}
+
 // UpsertStreamNames batch-upserts id→name pairs for the given source ("m3u", "api", "vod").
 func (m *DBManager) UpsertStreamNames(names map[string]string, source string) error {
 	if m == nil || m.db == nil || len(names) == 0 {
@@ -27,30 +39,11 @@ func (m *DBManager) UpsertStreamNames(names map[string]string, source string) er
 	}
 	now := time.Now()
 	for id, name := range names {
-		if _, err := m.db.Exec(`
-            INSERT INTO stream_names (stream_id, source, name, updated_at)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (stream_id, source) DO UPDATE
-                SET name = EXCLUDED.name, updated_at = EXCLUDED.updated_at
-        `, id, source, name, now); err != nil {
+		if _, err := m.db.Exec(upsertStreamNameSQL, id, source, name, now); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// UpsertStreamName upserts a single stream name.
-func (m *DBManager) UpsertStreamName(streamID, source, name string) error {
-	if m == nil || m.db == nil {
-		return nil
-	}
-	_, err := m.db.Exec(`
-        INSERT INTO stream_names (stream_id, source, name, updated_at)
-        VALUES ($1, $2, $3, NOW())
-        ON CONFLICT (stream_id, source) DO UPDATE
-            SET name = EXCLUDED.name, updated_at = EXCLUDED.updated_at
-    `, streamID, source, name)
-	return err
 }
 
 // LoadStreamNames loads all stream names grouped by source.

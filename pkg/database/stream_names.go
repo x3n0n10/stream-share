@@ -21,52 +21,65 @@ package database
 import "time"
 
 const upsertStreamNameSQL = `
-    INSERT INTO stream_names (stream_id, source, name, updated_at)
-    VALUES ($1, $2, $3, $4)
+    INSERT INTO stream_names (stream_id, source, name, epg_channel_id, updated_at)
+    VALUES ($1, $2, $3, $4, $5)
     ON CONFLICT (stream_id, source) DO UPDATE
-        SET name = EXCLUDED.name, updated_at = EXCLUDED.updated_at
+        SET name = EXCLUDED.name, epg_channel_id = EXCLUDED.epg_channel_id, updated_at = EXCLUDED.updated_at
 `
 
-// UpsertStreamName upserts a single stream name.
-func (m *DBManager) UpsertStreamName(streamID, source, name string) error {
-	return m.UpsertStreamNames(map[string]string{streamID: name}, source)
+// UpsertStreamName upserts a single stream name with an optional EPG channel ID.
+func (m *DBManager) UpsertStreamName(streamID, source, name, epgChannelID string) error {
+	epgIDs := map[string]string{}
+	if epgChannelID != "" {
+		epgIDs[streamID] = epgChannelID
+	}
+	return m.UpsertStreamNames(map[string]string{streamID: name}, epgIDs, source)
 }
 
-// UpsertStreamNames batch-upserts id→name pairs for the given source ("m3u", "api", "vod").
-func (m *DBManager) UpsertStreamNames(names map[string]string, source string) error {
+// UpsertStreamNames batch-upserts id→name pairs (and optional EPG channel IDs) for the given source.
+func (m *DBManager) UpsertStreamNames(names map[string]string, epgIDs map[string]string, source string) error {
 	if m == nil || m.db == nil || len(names) == 0 {
 		return nil
 	}
 	now := time.Now()
 	for id, name := range names {
-		if _, err := m.db.Exec(upsertStreamNameSQL, id, source, name, now); err != nil {
+		epgID := ""
+		if epgIDs != nil {
+			epgID = epgIDs[id]
+		}
+		if _, err := m.db.Exec(upsertStreamNameSQL, id, source, name, epgID, now); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// LoadStreamNames loads all stream names grouped by source.
-// Returns map[source]map[streamID]name.
-func (m *DBManager) LoadStreamNames() (map[string]map[string]string, error) {
-	result := map[string]map[string]string{}
+// LoadStreamNames loads all stream names grouped by source, plus a merged EPG channel ID index.
+// Returns (map[source]map[streamID]name, map[streamID]epgChannelID, error).
+// The EPG index merges across sources; last non-empty value wins (api > m3u).
+func (m *DBManager) LoadStreamNames() (map[string]map[string]string, map[string]string, error) {
+	bySource := map[string]map[string]string{}
+	epgIndex := map[string]string{}
 	if m == nil || m.db == nil {
-		return result, nil
+		return bySource, epgIndex, nil
 	}
-	rows, err := m.db.Query(`SELECT stream_id, source, name FROM stream_names`)
+	rows, err := m.db.Query(`SELECT stream_id, source, name, epg_channel_id FROM stream_names`)
 	if err != nil {
-		return result, err
+		return bySource, epgIndex, err
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
-		var id, source, name string
-		if err := rows.Scan(&id, &source, &name); err != nil {
+		var id, source, name, epgID string
+		if err := rows.Scan(&id, &source, &name, &epgID); err != nil {
 			continue
 		}
-		if result[source] == nil {
-			result[source] = map[string]string{}
+		if bySource[source] == nil {
+			bySource[source] = map[string]string{}
 		}
-		result[source][id] = name
+		bySource[source][id] = name
+		if epgID != "" {
+			epgIndex[id] = epgID
+		}
 	}
-	return result, rows.Err()
+	return bySource, epgIndex, rows.Err()
 }

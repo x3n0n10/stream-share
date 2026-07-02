@@ -44,8 +44,6 @@ dockers:
   - image_templates:
     - "ghcr.io/lucasduport/stream-share:{{ .Tag }}-arm64"
     - "{{ if not .Prerelease }}ghcr.io/lucasduport/stream-share:latest-arm64{{ end }}"
-    - "lucasduport/stream-share:{{ .Tag }}-arm64"
-    - "{{ if not .Prerelease }}lucasduport/stream-share:latest-arm64{{ end }}"
     use: buildx
     goos: linux
     goarch: arm64
@@ -63,8 +61,6 @@ dockers:
   - image_templates:
     - "ghcr.io/lucasduport/stream-share:{{ .Tag }}-amd64"
     - "{{ if not .Prerelease }}ghcr.io/lucasduport/stream-share:latest-amd64{{ end }}"
-    - "lucasduport/stream-share:{{ .Tag }}-amd64"
-    - "{{ if not .Prerelease }}lucasduport/stream-share:latest-amd64{{ end }}"
     use: buildx
     goos: linux
     goarch: amd64
@@ -80,15 +76,6 @@ dockers:
     dockerfile: .Dockerfile.goreleaser
 
 docker_manifests:
-  - name_template: "lucasduport/stream-share:{{ .Tag }}"
-    image_templates:
-      - "lucasduport/stream-share:{{ .Tag }}-amd64"
-      - "lucasduport/stream-share:{{ .Tag }}-arm64"
-  - name_template: "{{ if not .Prerelease }}lucasduport/stream-share:latest{{ end }}"
-    image_templates:
-      - "lucasduport/stream-share:latest-amd64"
-      - "lucasduport/stream-share:latest-arm64"
-    skip_push: "{{ if .Prerelease }}true{{ end }}"
   - name_template: "ghcr.io/lucasduport/stream-share:{{ .Tag }}"
     image_templates:
       - "ghcr.io/lucasduport/stream-share:{{ .Tag }}-amd64"

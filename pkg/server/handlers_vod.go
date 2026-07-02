@@ -192,7 +192,7 @@ func (c *Config) enrichVODPage(ctx *gin.Context) {
 				reqHTTP.Header.Set("Accept", "*/*")
 				if resp, err := client.Do(reqHTTP); err == nil {
 					_, _ = io.Copy(io.Discard, resp.Body)
-					resp.Body.Close()
+					_ = resp.Body.Close()
 					if cr := resp.Header.Get("Content-Range"); cr != "" {
 						if total := strings.TrimSpace(cr[strings.LastIndex(cr, "/")+1:]); total != "*" {
 							if sz, perr := parseInt64(total); perr == nil && sz > 0 {
@@ -306,29 +306,32 @@ func (c *Config) createVODDownload(ctx *gin.Context) {
 		return
 	}
 
-	// Create a proxied download URL with REVERSE_PROXY behavior
-	protocol := "http"
-	if c.ProxyConfig.HTTPS { protocol = "https" }
-	hostPart := fmt.Sprintf("%s:%d", c.HostConfig.Hostname, c.HostConfig.Port)
-	rev := strings.ToLower(strings.TrimSpace(os.Getenv("REVERSE_PROXY")))
-	if rev == "1" || rev == "true" || rev == "yes" {
-		// Reverse proxy front: prefer hostname without explicit port.
-		// If DISCORD_API_URL is set, mirror its scheme and host (which may include port if user specified it).
-		if api := strings.TrimSpace(os.Getenv("DISCORD_API_URL")); api != "" {
-			if u, err := url.Parse(api); err == nil {
-				if u.Scheme != "" { protocol = u.Scheme }
-				if u.Host != "" { hostPart = u.Host } else { hostPart = c.HostConfig.Hostname }
+	// Build the public-facing download URL.
+	// Priority: PublicBaseURL > reverse proxy heuristics > hostname:port.
+	var downloadURL string
+	if base := strings.TrimRight(strings.TrimSpace(c.PublicBaseURL), "/"); base != "" {
+		downloadURL = base + "/download/" + token
+	} else {
+		protocol := "http"
+		if c.HTTPS { protocol = "https" }
+		hostPart := fmt.Sprintf("%s:%d", c.HostConfig.Hostname, c.HostConfig.Port)
+		if c.ReverseProxyEnabled {
+			// Behind a reverse proxy: drop the port and optionally mirror DiscordAPIURL's scheme/host.
+			if api := strings.TrimSpace(c.DiscordAPIURL); api != "" {
+				if u, err := url.Parse(api); err == nil {
+					if u.Scheme != "" { protocol = u.Scheme }
+					if u.Host != "" { hostPart = u.Host } else { hostPart = c.HostConfig.Hostname }
+				} else {
+					hostPart = c.HostConfig.Hostname
+				}
 			} else {
 				hostPart = c.HostConfig.Hostname
 			}
-		} else {
-			// No explicit API URL; keep default hostname, no port
-			hostPart = c.HostConfig.Hostname
 		}
+		downloadURL = fmt.Sprintf("%s://%s/download/%s", protocol, hostPart, token)
 	}
-	downloadURL := fmt.Sprintf("%s://%s/download/%s", protocol, hostPart, token)
 
-	utils.InfoLog("Created VOD download link for user %s, title: %s, token: %s", req.Username, req.Title, token)
+	utils.InfoLog("Created VOD download link for user %s, title: %s", req.Username, req.Title)
 
 	ctx.JSON(http.StatusOK, types.APIResponse{
 		Success: true,
@@ -345,7 +348,7 @@ func (c *Config) createVODDownload(ctx *gin.Context) {
 func (c *Config) pickVODExtension(ctx *gin.Context, basePath, streamID string) string {
 	// Allow override via env
 	order := []string{".mp4", ".ts", ".mkv", ""}
-	if v := strings.TrimSpace(utils.GetEnvOrDefault("VOD_EXT_ORDER", "")); v != "" {
+	if v := strings.TrimSpace(c.VODExtOrder); v != "" {
 		// comma-separated, keep only known values to avoid surprises
 		parts := strings.Split(v, ",")
 		tmp := make([]string, 0, len(parts))
@@ -372,7 +375,7 @@ func (c *Config) pickVODExtension(ctx *gin.Context, basePath, streamID string) s
 			utils.DebugLog("VOD probe skipped/noisy for %s: %v", utils.MaskURL(probeURL), err)
 			continue
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		// Accept 2xx and 206
 		if (resp.StatusCode >= 200 && resp.StatusCode < 300) || resp.StatusCode == http.StatusPartialContent {
 			utils.DebugLog("VOD probe (HEAD) ok %d for %s", resp.StatusCode, utils.MaskURL(probeURL))
@@ -390,7 +393,7 @@ func (c *Config) pickVODExtension(ctx *gin.Context, basePath, streamID string) s
 			getReq.Header.Set("Range", "bytes=0-0")
 			if getResp, getErr := client.Do(getReq); getErr == nil {
 				_, _ = io.Copy(io.Discard, getResp.Body)
-				getResp.Body.Close()
+				_ = getResp.Body.Close()
 				if (getResp.StatusCode >= 200 && getResp.StatusCode < 300) || getResp.StatusCode == http.StatusPartialContent {
 					utils.DebugLog("VOD probe (GET range) ok %d for %s", getResp.StatusCode, utils.MaskURL(probeURL))
 					return ext
@@ -461,6 +464,10 @@ func (c *Config) startCache(ctx *gin.Context) {
 		return
 	}
 	if req.StreamID == "" { ctx.JSON(http.StatusBadRequest, types.APIResponse{Success:false, Error:"stream_id is required"}); return }
+	if strings.Contains(req.StreamID, "/") || strings.Contains(req.StreamID, "..") {
+		ctx.JSON(http.StatusBadRequest, types.APIResponse{Success: false, Error: "invalid stream_id"})
+		return
+	}
 	t := strings.ToLower(strings.TrimSpace(req.Type))
 	if t != "movie" && t != "series" { t = "movie" }
 
@@ -479,8 +486,7 @@ func (c *Config) startCache(ctx *gin.Context) {
 	}
 
 	// Determine target folder
-	baseDir := os.Getenv("CACHE_FOLDER")
-	if strings.TrimSpace(baseDir) == "" { baseDir = filepath.Join(os.TempDir(), "stream-share-cache") }
+	baseDir := utils.VODCacheDir()
 	_ = os.MkdirAll(baseDir, 0o755)
 
 	// Resolve extension to build proper upstream URL
@@ -494,10 +500,9 @@ func (c *Config) startCache(ctx *gin.Context) {
 			finalID += ext
 		} else {
 			// 2) Optional: allow network probing only if explicitly enabled
-			probeEnv := strings.ToLower(strings.TrimSpace(os.Getenv("VOD_EXT_PROBE")))
-			if probeEnv == "1" || probeEnv == "true" || probeEnv == "yes" {
+			if c.VODExtProbeEnabled {
 				if ext := c.pickVODExtension(nil, basePath, finalID); ext != "" {
-					utils.DebugLog("Cache: probed extension %s for %s due to VOD_EXT_PROBE", ext, finalID)
+					utils.DebugLog("Cache: probed extension %s for %s due to vod-ext-probe-enabled", ext, finalID)
 					finalID += ext
 				}
 			}
@@ -538,8 +543,8 @@ func (c *Config) startCache(ctx *gin.Context) {
 		_ = c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: req.StreamID, Type: t, Title: safeTitle, SeriesTitle: req.SeriesTitle, Season: req.Season, Episode: req.Episode, FilePath: filename, RequestedBy: req.Username, Status: "downloading", CreatedAt: time.Now(), ExpiresAt: expires})
 	}
 
-	// Spawn background download
-	go c.fetchToFile(upstream, filename, req.StreamID, expires)
+	// Spawn background download — explicit request, runs until completion regardless of viewer.
+	go c.fetchToFile(context.Background(), upstream, filename, req.StreamID, expires)
 
 	ctx.JSON(http.StatusOK, types.APIResponse{Success: true, Data: map[string]interface{}{
 		"cached": false,
@@ -648,14 +653,15 @@ var vodCacheClient = &http.Client{
 
 // fetchToFile downloads from upstream URL to a local file; marks DB entry ready/failed.
 // On connection drops (unexpected EOF) it retries automatically using a Range header to
-// resume from the current offset, up to maxCacheRetries times.
-func (c *Config) fetchToFile(upstream, dest, streamID string, expires time.Time) {
+// resume from the current offset, up to maxCacheRetries times. Cancelling ctx aborts the
+// download immediately, removes the partial file, and clears the DB entry.
+func (c *Config) fetchToFile(ctx context.Context, upstream, dest, streamID string, expires time.Time) {
 	utils.InfoLog("Caching start: %s -> %s", utils.MaskURL(upstream), dest)
 	tmp := dest + ".part"
 
 	f, err := os.Create(tmp)
 	if err != nil { utils.ErrorLog("Cache: create file error: %v", err); c.cacheFail(streamID); return }
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	const maxCacheRetries = 5
 	var downloaded, total int64
@@ -663,6 +669,9 @@ func (c *Config) fetchToFile(upstream, dest, streamID string, expires time.Time)
 	completed := false
 
 	for attempt := 0; attempt <= maxCacheRetries; attempt++ {
+		if ctx.Err() != nil {
+			break
+		}
 		if attempt > 0 {
 			backoff := time.Duration(attempt) * 3 * time.Second
 			utils.WarnLog("Cache: connection interrupted at %s/%s, retrying in %s (attempt %d/%d)",
@@ -674,7 +683,7 @@ func (c *Config) fetchToFile(upstream, dest, streamID string, expires time.Time)
 			}
 		}
 
-		req, reqErr := http.NewRequestWithContext(context.Background(), "GET", upstream, nil)
+		req, reqErr := http.NewRequestWithContext(ctx, "GET", upstream, nil)
 		if reqErr != nil { utils.ErrorLog("Cache: failed to build request: %v", reqErr); c.cacheFail(streamID); return }
 		req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
 		if downloaded > 0 {
@@ -693,8 +702,8 @@ func (c *Config) fetchToFile(upstream, dest, streamID string, expires time.Time)
 			if downloaded > 0 {
 				utils.WarnLog("Cache: provider ignored Range header, restarting download for %s", streamID)
 				downloaded = 0
-				if tErr := f.Truncate(0); tErr != nil { resp.Body.Close(); utils.ErrorLog("Cache: truncate error: %v", tErr); c.cacheFail(streamID); return }
-				if _, sErr := f.Seek(0, io.SeekStart); sErr != nil { resp.Body.Close(); utils.ErrorLog("Cache: seek error: %v", sErr); c.cacheFail(streamID); return }
+				if tErr := f.Truncate(0); tErr != nil { _ = resp.Body.Close(); utils.ErrorLog("Cache: truncate error: %v", tErr); c.cacheFail(streamID); return }
+				if _, sErr := f.Seek(0, io.SeekStart); sErr != nil { _ = resp.Body.Close(); utils.ErrorLog("Cache: seek error: %v", sErr); c.cacheFail(streamID); return }
 			}
 			if total == 0 {
 				if cl := resp.Header.Get("Content-Length"); cl != "" {
@@ -713,7 +722,7 @@ func (c *Config) fetchToFile(upstream, dest, streamID string, expires time.Time)
 				}
 			}
 		default:
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			utils.WarnLog("Cache: upstream status %d (attempt %d)", resp.StatusCode, attempt)
 			continue
 		}
@@ -724,7 +733,7 @@ func (c *Config) fetchToFile(upstream, dest, streamID string, expires time.Time)
 			nr, er := resp.Body.Read(buf)
 			if nr > 0 {
 				if _, ew := f.Write(buf[:nr]); ew != nil {
-					resp.Body.Close()
+					_ = resp.Body.Close()
 					utils.ErrorLog("Cache: write error: %v", ew); c.cacheFail(streamID); return
 				}
 				downloaded += int64(nr)
@@ -735,7 +744,7 @@ func (c *Config) fetchToFile(upstream, dest, streamID string, expires time.Time)
 			}
 			if er != nil { readErr = er; break }
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		if readErr == io.EOF || (total > 0 && downloaded >= total) {
 			completed = true
@@ -746,6 +755,14 @@ func (c *Config) fetchToFile(upstream, dest, streamID string, expires time.Time)
 	}
 
 	if !completed {
+		if ctx.Err() != nil {
+			utils.InfoLog("Cache: download cancelled for %s; removing partial file", streamID)
+			_ = os.Remove(tmp)
+			if c.db != nil {
+				_ = c.db.DeleteVODCacheEntry(streamID)
+			}
+			return
+		}
 		utils.ErrorLog("Cache: download failed after %d retries: %s", maxCacheRetries, utils.MaskURL(upstream))
 		c.cacheFail(streamID)
 		return
@@ -779,12 +796,12 @@ func (c *Config) cacheFail(streamID string) {
 func findExtInM3U(filePath, basePath, streamID string) string {
 	f, err := os.Open(filePath)
 	if err != nil { return "" }
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") { continue }
-		if !(strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://")) { continue }
+		if !strings.HasPrefix(line, "http://") && !strings.HasPrefix(line, "https://") { continue }
 		// Quick path filter by basePath
 		if !strings.Contains(line, "/"+basePath+"/") { continue }
 		u, err := url.Parse(line)
@@ -801,7 +818,7 @@ func findExtInM3U(filePath, basePath, streamID string) string {
 func findTitleInM3U(filePath, basePath, streamID string) string {
 	f, err := os.Open(filePath)
 	if err != nil { return "" }
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	sc := bufio.NewScanner(f)
 	lastExtinf := ""
 	for sc.Scan() {
@@ -816,7 +833,7 @@ func findTitleInM3U(filePath, basePath, streamID string) string {
 			}
 			continue
 		}
-		if !(strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://")) { continue }
+		if !strings.HasPrefix(line, "http://") && !strings.HasPrefix(line, "https://") { continue }
 		if !strings.Contains(line, "/"+basePath+"/") { continue }
 		u, err := url.Parse(line)
 		if err != nil { continue }

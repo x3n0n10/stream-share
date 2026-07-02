@@ -63,12 +63,39 @@ type ProxyConfig struct {
 	HTTPS                bool
 	User, Password       CredentialString
 	// LDAP authentication fields
-	LDAPEnabled          bool
-	LDAPServer           string
-	LDAPBaseDN           string
-	LDAPBindDN           string
-	LDAPBindPassword     string
-	LDAPUserAttribute    string
-	LDAPGroupAttribute   string
-	LDAPRequiredGroup    string
+	LDAPEnabled        bool
+	LDAPServer         string
+	LDAPBaseDN         string
+	LDAPBindDN         string
+	LDAPBindPassword   string
+	LDAPUserAttribute  string
+	LDAPGroupAttribute string
+	LDAPRequiredGroup  string
+
+	// Reverse proxy / public URL configuration
+	ReverseProxyEnabled bool
+	PublicBaseURL       string
+
+	// VOD caching configuration
+	VODCacheEnabled    bool
+	VODCacheStaleHours int
+	VODExtOrder        string
+	VODExtProbeEnabled bool
+
+	// Catchup configuration
+	CatchupEnabled           bool
+	CatchupDurationHours     int
+	CatchupPauseGraceMinutes int
+
+	// Session / stream timeout configuration
+	SessionTimeoutMinutes        int
+	StreamTimeoutMinutes         int
+	TempLinkHours                int
+	MultiplexStallTimeoutSeconds int
+
+	// Internal API / Discord configuration
+	InternalAPIKey     string
+	DiscordBotToken    string
+	DiscordAdminRoleID string
+	DiscordAPIURL      string
 }

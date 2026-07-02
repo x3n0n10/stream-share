@@ -19,6 +19,8 @@
 package database
 
 import (
+    "context"
+    "database/sql"
     "fmt"
     "time"
 
@@ -32,13 +34,18 @@ func (m *DBManager) AddStreamHistory(username, streamID, streamType, streamTitle
         return 0, fmt.Errorf("database not initialized")
     }
 
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+
     var discordID string
-    _ = m.db.QueryRow(`SELECT discord_id FROM discord_ldap_mapping WHERE ldap_username = $1`, username).Scan(&discordID)
+    if err := m.db.QueryRowContext(ctx, `SELECT discord_id FROM discord_ldap_mapping WHERE ldap_username = $1`, username).Scan(&discordID); err != nil && err != sql.ErrNoRows {
+        utils.WarnLog("Failed to look up discord_id for stream history: %v", err)
+    }
 
     var id int64
-    err := m.db.QueryRow(`
-        INSERT INTO stream_history 
-          (username, discord_id, stream_id, stream_type, stream_title, ip_address, user_agent) 
+    err := m.db.QueryRowContext(ctx, `
+        INSERT INTO stream_history
+          (username, discord_id, stream_id, stream_type, stream_title, ip_address, user_agent)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING id
     `, username, discordID, streamID, streamType, streamTitle, ipAddress, userAgent).Scan(&id)
@@ -55,7 +62,9 @@ func (m *DBManager) CloseStreamHistory(historyID int64) error {
     if m == nil || m.db == nil {
         return fmt.Errorf("database not initialized")
     }
-    _, err := m.db.Exec(`UPDATE stream_history SET end_time = CURRENT_TIMESTAMP WHERE id = $1`, historyID)
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    _, err := m.db.ExecContext(ctx, `UPDATE stream_history SET end_time = CURRENT_TIMESTAMP WHERE id = $1`, historyID)
     if err != nil {
         utils.ErrorLog("Database error closing stream history: %v", err)
         return err
@@ -70,16 +79,19 @@ func (m *DBManager) GetStreamHistoryStats() (map[string]interface{}, error) {
         return nil, fmt.Errorf("database not initialized")
     }
 
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+
     stats := make(map[string]interface{})
     var totalStreams int
-    if err := m.db.QueryRow("SELECT COUNT(*) FROM stream_history").Scan(&totalStreams); err != nil {
+    if err := m.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM stream_history").Scan(&totalStreams); err != nil {
         utils.ErrorLog("Database error counting streams: %v", err)
         return nil, err
     }
     stats["total_streams"] = totalStreams
 
     var activeUsers int
-    if err := m.db.QueryRow(`
+    if err := m.db.QueryRowContext(ctx, `
         SELECT COUNT(DISTINCT username) FROM stream_history WHERE start_time > $1
     `, time.Now().Add(-24*time.Hour)).Scan(&activeUsers); err != nil {
         utils.ErrorLog("Database error counting active users: %v", err)

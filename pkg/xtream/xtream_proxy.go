@@ -27,6 +27,7 @@ import (
     "io"
     "net/http"
     "net/url"
+    "os"
     "strings"
     "time"
 
@@ -50,11 +51,12 @@ const (
 
 // Client represents an Xtream API client
 type Client struct {
-    Username  string
-    Password  string
-    BaseURL   string
-    UserAgent string
-    Client    *http.Client
+    Username     string
+    Password     string
+    BaseURL      string
+    UserAgent    string
+    Client       *http.Client
+    InsecureTLS  bool
 }
 
 // New creates a new Xtream client instance
@@ -63,19 +65,26 @@ func New(user, password, baseURL, userAgent string) (*Client, error) {
     if err != nil {
         return nil, utils.PrintErrorAndReturn(fmt.Errorf("invalid base URL: %w", err))
     }
+    insecureTLS := os.Getenv("XTREAM_INSECURE_TLS_ENABLED") == "true"
+    transport := http.DefaultTransport
+    if insecureTLS {
+        transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+    }
     httpClient := &http.Client{
-        Timeout: 10 * time.Second,
+        Timeout:   10 * time.Second,
+        Transport: transport,
         CheckRedirect: func(req *http.Request, via []*http.Request) error {
             if len(via) >= 10 { return http.ErrUseLastResponse }
             return nil
         },
     }
     return &Client{
-        Username:  user,
-        Password:  password,
-        BaseURL:   baseURL,
-        UserAgent: utils.GetIPTVUserAgent(),
-        Client:    httpClient,
+        Username:    user,
+        Password:    password,
+        BaseURL:     baseURL,
+        UserAgent:   utils.GetIPTVUserAgent(),
+        Client:      httpClient,
+        InsecureTLS: insecureTLS,
     }, nil
 }
 
@@ -99,7 +108,7 @@ func (c *Client) Action(cfg *config.ProxyConfig, action string, q url.Values) (r
     u.RawQuery = params.Encode()
     utils.DebugLog("Xtream raw request: %s", u.String())
 
-    client := &http.Client{ Timeout: 10 * time.Second, Transport: &http.Transport{ TLSClientConfig: &tls.Config{InsecureSkipVerify: true} } }
+    client := c.Client
 
     var lastErr error
     var resp *http.Response
@@ -112,14 +121,15 @@ func (c *Client) Action(cfg *config.ProxyConfig, action string, q url.Values) (r
         req.Header.Set("Accept", "application/json, text/plain, */*")
         resp, err = client.Do(req)
         if err != nil { lastErr = err; continue }
-        defer resp.Body.Close()
         if resp.StatusCode == http.StatusOK {
-            b, err = io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+            b, err = io.ReadAll(io.LimitReader(resp.Body, 100*1024*1024))
+            _ = resp.Body.Close()
             if err != nil { lastErr = err; continue }
             break
-        } else {
-            lastErr = fmt.Errorf("HTTP status %d", resp.StatusCode)
         }
+        _, _ = io.Copy(io.Discard, resp.Body)
+        _ = resp.Body.Close()
+        lastErr = fmt.Errorf("HTTP status %d", resp.StatusCode)
     }
 
     if resp == nil || resp.StatusCode != http.StatusOK || len(b) == 0 {
@@ -162,9 +172,9 @@ func (c *Client) GetXMLTV() ([]byte, error) {
     req.Header.Set("Accept", "application/xml, text/xml")
     resp, err := c.Client.Do(req)
     if err != nil { return nil, utils.PrintErrorAndReturn(err) }
-    defer resp.Body.Close()
+    defer func() { _ = resp.Body.Close() }()
     if resp.StatusCode != http.StatusOK { return nil, utils.PrintErrorAndReturn(fmt.Errorf("unexpected status code: %d", resp.StatusCode)) }
-    limitedReader := &io.LimitedReader{R: resp.Body, N: 50 * 1024 * 1024}
+    limitedReader := &io.LimitedReader{R: resp.Body, N: 100 * 1024 * 1024}
     xmlData, err := io.ReadAll(limitedReader)
     if err != nil { return nil, utils.PrintErrorAndReturn(fmt.Errorf("failed to read XMLTV data: %w", err)) }
     return xmlData, nil

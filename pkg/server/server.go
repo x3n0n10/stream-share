@@ -28,13 +28,13 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/jamesnetherton/m3u"
+	"github.com/lucasduport/stream-share/pkg/catchup"
 	"github.com/lucasduport/stream-share/pkg/config"
 	"github.com/lucasduport/stream-share/pkg/database"
 	"github.com/lucasduport/stream-share/pkg/discord"
@@ -63,6 +63,7 @@ type Config struct {
 
 	// New components
 	sessionManager *session.SessionManager
+	catchupManager *catchup.Manager
 	db             *database.DBManager
 	discordBot     *discord.Bot
 
@@ -92,7 +93,10 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	}
 
 	// Initialize debug logging from environment variable
-	utils.Config.DebugLoggingEnabled = os.Getenv("DEBUG_LOGGING") == "true"
+	utils.Config.DebugLoggingEnabled = os.Getenv("LOG_DEBUG_ENABLED") == "true"
+
+	// Pin the internal API key from configuration if provided
+	SetAPIKey(config.InternalAPIKey)
 
 	// Create server configuration
 	serverConfig := &Config{
@@ -114,6 +118,7 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	}
 	serverConfig.db = db
 	serverConfig.sessionManager = session.NewSessionManager(db)
+	serverConfig.sessionManager.SetNameResolver(serverConfig.resolveStreamName)
 	utils.InfoLog("Session manager initialized with database connection")
 
 	// After session manager init
@@ -123,47 +128,83 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		utils.InfoLog("Bootstrap: sessionManager initialized OK")
 	}
 
-	// Configure session parameters from environment variables
+	// Initialize local catchup buffering from configuration
+	catchupEnabled := config.CatchupEnabled
+	catchupDir := utils.CatchupBufferDir()
+	catchupDur := 4
+	if config.CatchupDurationHours > 0 {
+		catchupDur = config.CatchupDurationHours
+	}
+	serverConfig.catchupManager = catchup.New(catchupEnabled, catchupDir, catchupDur)
+	if catchupEnabled {
+		serverConfig.catchupManager.CleanupOldFiles()
+		tz := os.Getenv("TZ")
+		if tz == "" {
+			utils.WarnLog("Bootstrap: catchup is ENABLED but TZ env var is not set — timeshift timestamps from clients will be parsed as UTC and rewinds will land at the wrong position. Set TZ to your clients' timezone (e.g. TZ=Europe/Amsterdam).")
+		} else {
+			utils.InfoLog("Bootstrap: local catchup buffering ENABLED (dir=%s, duration=%dh, TZ=%s)", catchupDir, catchupDur, tz)
+		}
+	} else {
+		utils.InfoLog("Bootstrap: local catchup buffering DISABLED (set CATCHUP_ENABLED=true to enable)")
+	}
 	if serverConfig.sessionManager != nil {
-		if v := os.Getenv("SESSION_TIMEOUT_MINUTES"); v != "" {
-			if mins, err := strconv.Atoi(v); err == nil && mins > 0 {
-				serverConfig.sessionManager.SetSessionTimeout(time.Duration(mins) * time.Minute)
-				utils.InfoLog("Session timeout set to %d minutes", mins)
-			} else {
-				utils.WarnLog("Invalid SESSION_TIMEOUT_MINUTES: %s", v)
-			}
+		serverConfig.sessionManager.SetCatchupManager(serverConfig.catchupManager)
+	}
+
+	// Pause grace: how long a catchup-enabled live stream stays alive (upstream
+	// connection open, disk recording continuing) after its last viewer
+	// disconnects, so a TiviMate "pause" followed by a timeshift-based resume
+	// has continuous buffered content with no gap. Channel switches are detected
+	// separately and bypass this grace period (see SessionManager.RequestStream).
+	catchupPauseGrace := 5
+	if config.CatchupPauseGraceMinutes >= 0 {
+		catchupPauseGrace = config.CatchupPauseGraceMinutes
+	}
+	if serverConfig.sessionManager != nil {
+		serverConfig.sessionManager.SetPauseGrace(time.Duration(catchupPauseGrace) * time.Minute)
+		if catchupEnabled && catchupPauseGrace > 0 {
+			utils.InfoLog("Bootstrap: catchup pause grace set to %d minute(s) — paused live streams keep recording for seamless resume", catchupPauseGrace)
 		}
-		if v := os.Getenv("STREAM_TIMEOUT_MINUTES"); v != "" {
-			if mins, err := strconv.Atoi(v); err == nil && mins > 0 {
-				serverConfig.sessionManager.SetStreamTimeout(time.Duration(mins) * time.Minute)
-				utils.InfoLog("Stream timeout set to %d minutes", mins)
-			} else {
-				utils.WarnLog("Invalid STREAM_TIMEOUT_MINUTES: %s", v)
-			}
+	}
+
+	// Configure session parameters from configuration. Each setter is only
+	// applied when the value is > 0, leaving the manager defaults otherwise.
+	if serverConfig.sessionManager != nil {
+		if mins := config.SessionTimeoutMinutes; mins > 0 {
+			serverConfig.sessionManager.SetSessionTimeout(time.Duration(mins) * time.Minute)
+			utils.InfoLog("Session timeout set to %d minutes", mins)
 		}
-		if v := os.Getenv("TEMP_LINK_HOURS"); v != "" {
-			if hours, err := strconv.Atoi(v); err == nil && hours > 0 {
-				serverConfig.sessionManager.SetTempLinkTimeout(time.Duration(hours) * time.Hour)
-				utils.InfoLog("Temporary link timeout set to %d hours", hours)
-			} else {
-				utils.WarnLog("Invalid TEMP_LINK_HOURS: %s", v)
-			}
+		if mins := config.StreamTimeoutMinutes; mins > 0 {
+			serverConfig.sessionManager.SetStreamTimeout(time.Duration(mins) * time.Minute)
+			utils.InfoLog("Stream timeout set to %d minutes", mins)
+		}
+		if hours := config.TempLinkHours; hours > 0 {
+			serverConfig.sessionManager.SetTempLinkTimeout(time.Duration(hours) * time.Hour)
+			utils.InfoLog("Temporary link timeout set to %d hours", hours)
+		}
+		if hours := config.VODCacheStaleHours; hours > 0 {
+			serverConfig.sessionManager.SetVODCacheStaleAge(time.Duration(hours) * time.Hour)
+			utils.InfoLog("VOD cache stale age set to %d hours", hours)
+		}
+		if secs := config.MultiplexStallTimeoutSeconds; secs > 0 {
+			serverConfig.sessionManager.SetClientStallTimeout(time.Duration(secs) * time.Second)
+			utils.InfoLog("Multiplex client stall timeout set to %d seconds", secs)
 		}
 	}
 
 	// Initialize Discord bot if token is provided
-	discordToken := os.Getenv("DISCORD_BOT_TOKEN")
+	discordToken := config.DiscordBotToken
 	if discordToken != "" {
 		utils.InfoLog("Initializing Discord bot")
-		discordAdminRole := os.Getenv("DISCORD_ADMIN_ROLE_ID")
+		discordAdminRole := config.DiscordAdminRoleID
 
-		// Get API URL from config, defaulting to host/port, but honor REVERSE_PROXY
-		apiURL := os.Getenv("DISCORD_API_URL")
+		// Get API URL from config, defaulting to host/port, but honor reverse proxy
+		apiURL := config.DiscordAPIURL
 		if apiURL == "" {
 			protocol := "http"
 			if config.HTTPS { protocol = "https" }
 			hostPart := fmt.Sprintf("%s:%d", config.HostConfig.Hostname, config.HostConfig.Port)
-			if rev := strings.ToLower(strings.TrimSpace(os.Getenv("REVERSE_PROXY"))); rev == "1" || rev == "true" || rev == "yes" {
+			if config.ReverseProxyEnabled {
 				// Behind reverse proxy: use hostname without port by default
 				hostPart = config.HostConfig.Hostname
 			}
@@ -182,7 +223,37 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		utils.InfoLog("Bootstrap: DISCORD_BOT_TOKEN not set - Discord bot is DISABLED")
 	}
 
+	// Remove debug API JSON dumps left over from previous runs when debug logging
+	// is off. These files accumulate whenever CACHE_FOLDER is set and are only
+	// useful in debug mode.
+	if !utils.IsDebugLogEnabled() {
+		if cacheDir := strings.TrimSpace(os.Getenv("CACHE_FOLDER")); cacheDir != "" {
+			cleanDebugAPIFiles(cacheDir)
+		}
+	}
+
 	return serverConfig, nil
+}
+
+// cleanDebugAPIFiles removes timestamped JSON debug dumps written by the
+// player_api handler from the cache directory. VOD media files are unaffected.
+func cleanDebugAPIFiles(cacheDir string) {
+	patterns := []string{
+		"login_????????_??????.json",
+		"get_*_????????_??????.json",
+	}
+	removed := 0
+	for _, pattern := range patterns {
+		matches, _ := filepath.Glob(filepath.Join(cacheDir, pattern))
+		for _, f := range matches {
+			if err := os.Remove(f); err == nil {
+				removed++
+			}
+		}
+	}
+	if removed > 0 {
+		utils.InfoLog("Cleaned %d debug API JSON file(s) from cache folder", removed)
+	}
 }
 
 // Serve the stream-share api
@@ -209,6 +280,17 @@ func (c *Config) Serve() error {
 	if err := c.playlistInitialization(); err != nil {
 		utils.ErrorLog("Playlist initialization failed: %v", err)
 		return err
+	}
+
+	// Warm the channel-name index from get_live_streams so /status and logs can
+	// resolve names immediately, without waiting for a player to request the list.
+	go c.warmChannelNameIndex()
+
+	if c.sessionManager != nil {
+		defer c.sessionManager.Stop()
+	}
+	if c.catchupManager != nil {
+		defer c.catchupManager.Cleanup()
 	}
 
 	// Start Discord bot if configured
@@ -260,20 +342,8 @@ func (c *Config) addProxyCredentialRoutes(router *gin.Engine) {
 	// Series
 	router.GET("/series/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsSeriesStreamHandler)
 
-	// Timeshift
-	router.GET("/timeshift/:username/:password/:duration/:start/:id", c.authWithPathCredentials(), func(ctx *gin.Context) {
-		duration := ctx.Param("duration")
-		start := ctx.Param("start")
-		id := ctx.Param("id")
-		utils.DebugLog("Timeshift request with proxy credentials: duration=%s, start=%s, id=%s", duration, start, id)
-		rpURL, err := url.Parse(fmt.Sprintf("%s/timeshift/%s/%s/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, duration, start, id))
-		if err != nil {
-			utils.ErrorLog("Failed to parse upstream URL: %v", err)
-			ctx.AbortWithStatus(http.StatusInternalServerError)
-			return
-		}
-		c.multiplexedStream(ctx, rpURL)
-	})
+	// Timeshift — routed through xtreamStreamTimeshift which handles local catchup
+	router.GET("/timeshift/:username/:password/:duration/:start/:id", c.authWithPathCredentials(), c.xtreamStreamTimeshift)
 
 	utils.InfoLog("[stream-share] Routes initialized with direct stream URL support")
 }
@@ -292,15 +362,15 @@ func (c *Config) authWithPathCredentials() gin.HandlerFunc {
 		utils.DebugLog("Path credentials auth check: username=%s, IP=%s", username, ip)
 
 		// If LDAP is enabled, authenticate against LDAP
-		if c.ProxyConfig.LDAPEnabled {
+		if c.LDAPEnabled {
 			ok := ldapAuthenticate(
-				c.ProxyConfig.LDAPServer,
-				c.ProxyConfig.LDAPBaseDN,
-				c.ProxyConfig.LDAPBindDN,
-				c.ProxyConfig.LDAPBindPassword,
-				c.ProxyConfig.LDAPUserAttribute,
-				c.ProxyConfig.LDAPGroupAttribute,
-				c.ProxyConfig.LDAPRequiredGroup,
+				c.LDAPServer,
+				c.LDAPBaseDN,
+				c.LDAPBindDN,
+				c.LDAPBindPassword,
+				c.LDAPUserAttribute,
+				c.LDAPGroupAttribute,
+				c.LDAPRequiredGroup,
 				username,
 				password,
 			)
@@ -310,7 +380,7 @@ func (c *Config) authWithPathCredentials() gin.HandlerFunc {
 				return
 			}
 			utils.DebugLog("LDAP authentication succeeded for user in path: %s", username)
-		} else if c.ProxyConfig.User.String() != username || c.ProxyConfig.Password.String() != password {
+		} else if c.User.String() != username || c.Password.String() != password {
 			utils.DebugLog("Local authentication failed for user in path: %s", username)
 			ctx.AbortWithStatus(http.StatusUnauthorized)
 			return
@@ -347,12 +417,12 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 	if c.db != nil && tempLink.StreamID != "" {
 		idRaw := strings.TrimSuffix(tempLink.StreamID, path.Ext(tempLink.StreamID))
 		if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil && entry.Status == "ready" {
-			utils.InfoLog("Download via cache for stream %s -> %s", tempLink.StreamID, entry.FilePath)
+			utils.InfoLog("Download via cache for %s -> %s", c.vodLabel(tempLink.StreamID), entry.FilePath)
 			ext := strings.ToLower(path.Ext(entry.FilePath)); if ext == "" { ext = ".mp4" }
 			_ = c.db.TouchVODCache(idRaw)
 			var ct string
 			switch ext { case ".ts": ct = "video/mp2t"; case ".mkv": ct = "video/x-matroska"; case ".mp4": ct = "video/mp4"; default: ct = "application/octet-stream" }
-			serveLocalFileRange(ctx, entry.FilePath, ct, tempLink.Title+ext, true)
+			serveLocalFileRange(ctx, entry.FilePath, ct, sanitiseFilename(tempLink.Title)+ext, true)
 			return
 		}
 	}
@@ -361,24 +431,35 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 	targetURL, err := url.Parse(tempLink.URL)
 	if err != nil { utils.ErrorLog("Invalid URL in temporary link: %v", err); ctx.AbortWithStatus(http.StatusInternalServerError); return }
 	ext := strings.ToLower(path.Ext(targetURL.Path)); if ext == "" { ext = ".mp4" }
-	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, tempLink.Title, ext))
+	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, sanitiseFilename(tempLink.Title), ext))
 	c.stream(ctx, targetURL)
+}
+
+// resolveRequestUsername derives the viewer identity for session tracking. It
+// prefers the authenticated username set by middleware, then path/query params,
+// and finally falls back to the client IP. The fallback matters for the direct
+// Xtream-credentials routes (e.g. /movie/<user>/<pass>/:id), which have no auth
+// middleware and therefore no username in context — without it, VOD views would
+// never be registered and /status would miss them.
+func (c *Config) resolveRequestUsername(ctx *gin.Context) string {
+	username := ctx.GetString("username")
+	if username == "" {
+		username = ctx.Param("username")
+	}
+	if username == "" {
+		username = ctx.Query("username")
+	}
+	if username == "" {
+		username = ctx.ClientIP()
+	}
+	return username
 }
 
 // multiplexedStream handles streaming with connection multiplexing
 // multiplexedStream proxies a stream while sharing a single upstream connection
 // across multiple clients for the same content using the SessionManager.
 func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
-	username := ctx.GetString("username")
-	if username == "" {
-		// Try to get from path parameters
-		username = ctx.Param("username")
-	}
-
-	// If username is still empty, use a temporary random ID
-	if username == "" {
-		username = fmt.Sprintf("temp-%s", uuid.NewV4().String())
-	}
+	username := c.resolveRequestUsername(ctx)
 
 	// Extract stream ID and type
 	streamID := path.Base(targetURL.Path)
@@ -410,10 +491,13 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 		}
 	}
 
-	// Title from query parameter, M3U index lookup, or fallback to stream ID
+	// Title from query parameter, name resolution (live index or lazy VOD
+	// get_vod_info), or fallback to stream ID. Resolving here — before
+	// RequestStream takes streamLock — both stores the title on the session and
+	// warms the VOD cache so later locked log lookups resolve without network I/O.
 	streamTitle := targetURL.Query().Get("title")
 	if streamTitle == "" {
-		if name, ok := c.getChannelNameByID(streamIDRaw); ok && strings.TrimSpace(name) != "" {
+		if name, ok := c.resolveTitleAtStart(streamIDRaw, streamType); ok && strings.TrimSpace(name) != "" {
 			streamTitle = name
 		} else {
 			streamTitle = streamID
@@ -427,7 +511,7 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	if c.db != nil && (streamType == "movie" || streamType == "series") {
 		if entry, err := c.db.GetVODCache(streamIDRaw); err == nil && entry != nil && entry.Status == "ready" {
 			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
-				utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, streamIDRaw, entry.FilePath)
+				utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, c.streamLabel(streamIDRaw), entry.FilePath)
 				// Content-Type based on file extension
 				var ct string
 				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" { ct = "video/mp2t" } else if ext == ".mkv" { ct = "video/x-matroska" } else { ct = "video/mp4" }
@@ -435,7 +519,7 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 				serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
 				return
 			}
-			utils.WarnLog("Multiplex: cached %s missing on disk for stream %s at %s; falling back to upstream", streamType, streamIDRaw, entry.FilePath)
+			utils.WarnLog("Multiplex: cached %s missing on disk for %s at %s; falling back to upstream", streamType, c.streamLabel(streamIDRaw), entry.FilePath)
 		}
 	}
 
@@ -446,57 +530,63 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	}
 
 	// Request the stream through the session manager for multiplexing
+	label := c.streamLabel(streamID)
 	buffer, err := c.sessionManager.RequestStream(username, streamID, streamType, streamTitle, targetURL)
 	if err != nil {
-		utils.ErrorLog("Multiplex: RequestStream failed for user=%s streamID=%s err=%v", username, streamID, err)
+		utils.ErrorLog("Multiplex: RequestStream failed for user=%s %s err=%v", username, label, err)
 		ctx.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
 	if buffer == nil {
-		utils.WarnLog("Multiplex: buffer returned is NIL for streamID=%s (user=%s)", streamID, username)
+		utils.WarnLog("Multiplex: buffer returned is NIL for %s (user=%s)", label, username)
 	}
 
-	// Get the channel for this client
+	// Get the data channel and termination signal for this client
 	dataChan, exists := c.sessionManager.GetClientChannel(streamID, username)
 	if !exists {
-		utils.ErrorLog("Failed to get client channel for user=%s, streamID=%s", username, streamID)
+		utils.ErrorLog("Failed to get client channel for user=%s, %s", username, label)
 		ctx.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
+	doneChan, _ := c.sessionManager.GetClientDone(streamID, username)
+	clientGone := ctx.Request.Context().Done()
 
 	// Set content-type and disable intermediary buffering
 	setNoBufferingHeaders(ctx, contentTypeForPath(targetURL.Path))
 
 	// Stream data to the client
-	utils.InfoLog("Starting multiplexed stream for user %s (stream %s)", username, streamID)
+	utils.DebugLog("Starting multiplexed stream for user %s (%s)", username, label)
 
 	ctx.Stream(func(w io.Writer) bool {
-		// Wait for data from channel
-		data, ok := <-dataChan
-		if !ok {
-			// Channel closed, end streaming
-			utils.DebugLog("Stream channel closed for user %s (stream %s)", username, streamID)
+		select {
+		case data, ok := <-dataChan:
+			if !ok {
+				utils.DebugLog("Stream channel closed for user %s (%s)", username, label)
+				return false
+			}
+			if _, err := w.Write(data); err != nil {
+				// Client disconnected
+				utils.DebugLog("Client write error for user %s (%s): %v", username, label, err)
+				return false
+			}
+			// Force immediate delivery to client to avoid periodic buffering
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			return true
+		case <-doneChan:
+			// Pump dropped this client (slow viewer) or the stream stopped
+			utils.DebugLog("Stream done signal for user %s (%s)", username, label)
+			return false
+		case <-clientGone:
+			// Client closed the connection while we were waiting for data
+			utils.DebugLog("Client disconnected (idle) for user %s (%s)", username, label)
 			return false
 		}
-
-		// Write data to client
-		if _, err := w.Write(data); err != nil {
-			// Client disconnected
-			utils.DebugLog("Client write error for user %s (stream %s): %v", username, streamID, err)
-			c.sessionManager.RemoveClient(streamID, username)
-			return false
-		}
-
-		// Force immediate delivery to client to avoid periodic buffering
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-
-		return true
 	})
 
 	// Clean up after streaming is done
-	utils.InfoLog("Stream ended for user %s (stream %s)", username, streamID)
+	utils.DebugLog("Stream ended for user %s (%s)", username, label)
 	c.sessionManager.RemoveClient(streamID, username)
 }
 
@@ -510,7 +600,7 @@ func (c *Config) playlistInitialization() error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	return c.marshallInto(f, false)
 }
@@ -527,13 +617,13 @@ func (c *Config) marshallInto(into *os.File, xtream bool) error {
 		var buffer bytes.Buffer
 
 		buffer.WriteString("#EXTINF:")                       // nolint: errcheck
-		buffer.WriteString(fmt.Sprintf("%d ", track.Length)) // nolint: errcheck
+		fmt.Fprintf(&buffer, "%d ", track.Length)
 		for i := range track.Tags {
 			if i == len(track.Tags)-1 {
-				buffer.WriteString(fmt.Sprintf("%s=%q", track.Tags[i].Name, track.Tags[i].Value)) // nolint: errcheck
+				fmt.Fprintf(&buffer, "%s=%q", track.Tags[i].Name, track.Tags[i].Value)
 				continue
 			}
-			buffer.WriteString(fmt.Sprintf("%s=%q ", track.Tags[i].Name, track.Tags[i].Value)) // nolint: errcheck
+			fmt.Fprintf(&buffer, "%s=%q ", track.Tags[i].Name, track.Tags[i].Value)
 		}
 
 		uri, err := c.replaceURL(track.URI, i-ret, xtream)
@@ -543,7 +633,7 @@ func (c *Config) marshallInto(into *os.File, xtream bool) error {
 			continue
 		}
 
-		into.WriteString(fmt.Sprintf("%s, %s\n%s\n", buffer.String(), track.Name, uri)) // nolint: errcheck
+		_, _ = fmt.Fprintf(into, "%s, %s\n%s\n", buffer.String(), track.Name, uri)
 
 		filteredTrack = append(filteredTrack, track)
 	}
@@ -608,4 +698,15 @@ func (c *Config) replaceURL(uri string, trackIndex int, xtream bool) (string, er
 	}
 
 	return newURL.String(), nil
+}
+
+// sanitiseFilename strips characters that are unsafe inside a quoted
+// Content-Disposition filename value, preventing header injection.
+func sanitiseFilename(name string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '"' || r == '\r' || r == '\n' || r == '\\' {
+			return '_'
+		}
+		return r
+	}, name)
 }

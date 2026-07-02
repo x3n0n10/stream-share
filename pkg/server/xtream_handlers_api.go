@@ -34,7 +34,6 @@ import (
     "github.com/lucasduport/stream-share/pkg/config"
     "github.com/lucasduport/stream-share/pkg/utils"
     xtreamapi "github.com/lucasduport/stream-share/pkg/xtream"
-    xproc "github.com/lucasduport/stream-share/pkg/xtream"
 )
 
 // xtreamGetAuto forwards get.php with non-credential query params preserved.
@@ -53,16 +52,20 @@ func (c *Config) xtreamGetAuto(ctx *gin.Context) {
 
 // xtreamGet proxies get.php, caching the M3U on disk and guarding empty results.
 func (c *Config) xtreamGet(ctx *gin.Context) {
-    utils.DebugLog("Xtream backend request using Xtream credentials: user=%s, password=%s, baseURL=%s", c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL)
-    rawURL := fmt.Sprintf("%s/get.php?username=%s&password=%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword)
+    utils.DebugLog("Xtream backend request: user=%s, baseURL=%s", c.XtreamUser.String(), c.XtreamBaseURL)
 
-    q := ctx.Request.URL.Query()
-    for k, v := range q {
+    upstreamQ := url.Values{}
+    upstreamQ.Set("username", c.XtreamUser.String())
+    upstreamQ.Set("password", c.XtreamPassword.String())
+    for k, vals := range ctx.Request.URL.Query() {
         if k == "username" || k == "password" {
             continue
         }
-        rawURL = fmt.Sprintf("%s&%s=%s", rawURL, k, strings.Join(v, ","))
+        for _, v := range vals {
+            upstreamQ.Add(k, v)
+        }
     }
+    rawURL := c.XtreamBaseURL + "/get.php?" + upstreamQ.Encode()
 
     m3uURL, err := url.Parse(rawURL)
     if err != nil {
@@ -82,7 +85,7 @@ func (c *Config) xtreamGet(ctx *gin.Context) {
             return
         }
         if len(playlist.Tracks) == 0 {
-            _ = ctx.AbortWithError(http.StatusBadGateway, utils.PrintErrorAndReturn(fmt.Errorf("Xtream backend returned empty playlist")))
+            _ = ctx.AbortWithError(http.StatusBadGateway, utils.PrintErrorAndReturn(fmt.Errorf("empty playlist returned by Xtream backend")))
             return
         }
         if err := c.cacheXtreamM3u(&playlist, m3uURL.String()); err != nil {
@@ -110,7 +113,7 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 
     if strings.TrimSpace(action) == "" {
         protocol := "http"
-        if c.ProxyConfig.HTTPS {
+        if c.HTTPS {
             protocol = "https"
         }
         now := time.Now()
@@ -144,7 +147,7 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
         }
 
         utils.InfoLog("Action\tlogin (local) requested by %s", ctx.ClientIP())
-        if config.CacheFolder != "" {
+        if config.CacheFolder != "" && utils.IsDebugLogEnabled() {
             readableJSON, _ := json.Marshal(loginResp)
             filename := fmt.Sprintf("login_%s.json", time.Now().Format("20060102_150405"))
             utils.WriteResponseToFile(filename, readableJSON, "application/json")
@@ -167,19 +170,25 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 
     if contentType == "application/json" {
         if s, ok := resp.(string); ok && strings.TrimSpace(s) == "" {
-            _ = ctx.AbortWithError(http.StatusBadGateway, utils.PrintErrorAndReturn(fmt.Errorf("Xtream backend returned empty JSON response for action: %s", action)))
+            _ = ctx.AbortWithError(http.StatusBadGateway, utils.PrintErrorAndReturn(fmt.Errorf("empty JSON response from Xtream backend for action: %s", action)))
             return
         }
         if b, ok := resp.([]byte); ok && len(bytes.TrimSpace(b)) == 0 {
-            _ = ctx.AbortWithError(http.StatusBadGateway, utils.PrintErrorAndReturn(fmt.Errorf("Xtream backend returned empty JSON response for action: %s", action)))
+            _ = ctx.AbortWithError(http.StatusBadGateway, utils.PrintErrorAndReturn(fmt.Errorf("empty JSON response from Xtream backend for action: %s", action)))
             return
         }
     }
 
     utils.InfoLog("Action\t%s requested by %s", action, ctx.ClientIP())
-    processedResp := xproc.ProcessResponse(resp)
+    processedResp := xtreamapi.ProcessResponse(resp)
+    if action == "get_live_streams" {
+        harvestChannelNames(processedResp)
+        if c.catchupManager != nil && c.catchupManager.IsEnabled() {
+            processedResp = c.injectCatchupFlags(processedResp)
+        }
+    }
 
-    if config.CacheFolder != "" {
+    if config.CacheFolder != "" && utils.IsDebugLogEnabled() {
         readableJSON, _ := json.Marshal(processedResp)
         filename := fmt.Sprintf("%s_%s.json", action, time.Now().Format("20060102_150405"))
         utils.WriteResponseToFile(filename, readableJSON, contentType)
@@ -189,6 +198,81 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 }
 
 func (c *Config) xtreamPlayerAPIGET(ctx *gin.Context) { c.xtreamPlayerAPI(ctx, ctx.Request.URL.Query()) }
+
+// harvestChannelNames extracts stream_id → name pairs from a get_live_streams
+// response and refreshes the API channel name index used by /status and logs.
+// It returns the number of channel names indexed.
+func harvestChannelNames(resp interface{}) int {
+    streams, ok := resp.([]interface{})
+    if !ok {
+        return 0
+    }
+    names := make(map[string]string, len(streams))
+    for _, item := range streams {
+        m, ok := item.(map[string]interface{})
+        if !ok {
+            continue
+        }
+        id := normalizeStreamID(fmt.Sprintf("%v", m["stream_id"]))
+        name, _ := m["name"].(string)
+        name = strings.TrimSpace(name)
+        if id != "" && name != "" {
+            names[id] = name
+        }
+    }
+    updateAPIChannelIndex(names)
+    return len(names)
+}
+
+// warmChannelNameIndex fetches get_live_streams once so channel names can be
+// resolved even before a player requests the list through the proxy — e.g. right
+// after a container restart, when a player (TiviMate in Xtream API mode) serves
+// the channel list from its own cache and never re-fetches it.
+func (c *Config) warmChannelNameIndex() {
+    client, err := xtreamapi.New(c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL, "")
+    if err != nil {
+        utils.WarnLog("Channel name warm-up: failed to create Xtream client: %v", err)
+        return
+    }
+    resp, _, _, err := client.Action(c.ProxyConfig, "get_live_streams", nil)
+    if err != nil {
+        utils.WarnLog("Channel name warm-up: get_live_streams failed: %v", err)
+        return
+    }
+    if n := harvestChannelNames(xtreamapi.ProcessResponse(resp)); n > 0 {
+        utils.InfoLog("Channel name warm-up: indexed %d channel names from get_live_streams", n)
+    } else {
+        utils.WarnLog("Channel name warm-up: get_live_streams returned no usable channel names")
+    }
+}
+
+func (c *Config) injectCatchupFlags(resp interface{}) interface{} {
+    streams, ok := resp.([]interface{})
+    if !ok {
+        return resp
+    }
+    upstreamCatchup := make(map[string]bool, len(streams))
+    for _, item := range streams {
+        m, ok := item.(map[string]interface{})
+        if !ok {
+            continue
+        }
+        streamID := fmt.Sprintf("%v", m["stream_id"])
+        if v, exists := m["tv_archive"]; exists {
+            switch vv := v.(type) {
+            case json.Number:
+                n, _ := vv.Int64()
+                upstreamCatchup[streamID] = n == 1
+            case float64:
+                upstreamCatchup[streamID] = vv == 1
+            }
+        }
+        m["tv_archive"] = 1
+        m["tv_archive_duration"] = c.catchupManager.AdvertisedHours()
+    }
+    c.catchupManager.SetUpstreamCatchup(upstreamCatchup)
+    return streams
+}
 
 func (c *Config) xtreamPlayerAPIPOST(ctx *gin.Context) {
     contents, err := io.ReadAll(ctx.Request.Body)

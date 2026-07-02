@@ -1,12 +1,42 @@
-FROM golang:1.17-alpine
+# Build stage
+FROM golang:1.23-alpine AS builder
 
-RUN apk add ca-certificates
+# Install CA certificates for HTTPS requests during build (if needed)
+RUN apk add --no-cache ca-certificates
 
-WORKDIR /go/src/github.com/lucasduport/stream-share
+# Set working directory
+WORKDIR /app
+
+# Copy dependency files and vendor directory first for better caching
+COPY go.mod go.sum vendor/ ./
+RUN go mod download  # Validates dependencies
+
+# Copy source code
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o stream-share .
 
-FROM alpine:3
-COPY --from=0  /go/src/github.com/lucasduport/stream-share/stream-share /
+# Build static binary
+RUN CGO_ENABLED=0 GOOS=linux go build -o stream-share .
 
+# Runtime stage
+FROM alpine:3.19
+
+# Install CA certificates for runtime HTTPS
+RUN apk add --no-cache ca-certificates
+
+# Create non-root user for security
+RUN adduser -D appuser
+
+# Copy binary from builder stage
+COPY --from=builder /app/stream-share /stream-share
+
+# Ensure executable permissions
+RUN chmod +x /stream-share
+
+# Switch to non-root user
+USER appuser
+
+# Expose port (adjust if your app uses a specific port; based on code, it might be 8080 or similar)
+EXPOSE 8080
+
+# Set entrypoint
 ENTRYPOINT ["/stream-share"]

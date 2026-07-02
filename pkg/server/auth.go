@@ -20,6 +20,7 @@ package server
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"log"
@@ -46,12 +47,21 @@ func init() {
 		utils.InfoLog("Using API key from environment")
 	} else {
 		internalAPIKey = uuid.New().String()
-		utils.InfoLog("Generated new internal API key: %s", internalAPIKey)
+		utils.InfoLog("Generated new internal API key (set INTERNAL_API_KEY env var to pin it)")
 	}
 }
 
 func GetAPIKey() string {
 	return internalAPIKey
+}
+
+// SetAPIKey pins the internal API key to the provided value (e.g. from
+// configuration). An empty value leaves the existing (generated or env) key.
+func SetAPIKey(key string) {
+	if key != "" {
+		internalAPIKey = key
+		utils.InfoLog("Using internal API key from configuration")
+	}
 }
 
 // apiKeyAuth middleware validates the internal API key
@@ -60,7 +70,7 @@ func (c *Config) apiKeyAuth() gin.HandlerFunc {
 		key := ctx.GetHeader("X-API-Key")
 		utils.DebugLog("API Key auth check - received key: %s...", utils.MaskString(key))
 
-		if key != internalAPIKey {
+		if subtle.ConstantTimeCompare([]byte(key), []byte(internalAPIKey)) != 1 {
 			utils.DebugLog("API authentication failed - invalid key: %s", utils.MaskString(key))
 			ctx.AbortWithStatusJSON(401, types.APIResponse{
 				Success: false,
@@ -92,16 +102,16 @@ func (c *Config) authenticate(ctx *gin.Context) {
     }
 
     // Only use LDAP authentication to validate client access
-    if c.ProxyConfig.LDAPEnabled {
+    if c.LDAPEnabled {
         utils.DebugLog("LDAP authentication enabled for user: %s", authReq.Username)
         ok := ldapAuthenticate(
-            c.ProxyConfig.LDAPServer,
-            c.ProxyConfig.LDAPBaseDN,
-            c.ProxyConfig.LDAPBindDN,
-            c.ProxyConfig.LDAPBindPassword,
-            c.ProxyConfig.LDAPUserAttribute,
-            c.ProxyConfig.LDAPGroupAttribute,
-            c.ProxyConfig.LDAPRequiredGroup,
+            c.LDAPServer,
+            c.LDAPBaseDN,
+            c.LDAPBindDN,
+            c.LDAPBindPassword,
+            c.LDAPUserAttribute,
+            c.LDAPGroupAttribute,
+            c.LDAPRequiredGroup,
             authReq.Username,
             authReq.Password,
         )
@@ -116,7 +126,9 @@ func (c *Config) authenticate(ctx *gin.Context) {
 
     // If LDAP is not enabled, fallback to local credentials
     utils.DebugLog("Local authentication for user: %s", authReq.Username)
-    if c.ProxyConfig.User.String() != authReq.Username || c.ProxyConfig.Password.String() != authReq.Password {
+    userMatch := subtle.ConstantTimeCompare([]byte(c.User.String()), []byte(authReq.Username))
+    passMatch := subtle.ConstantTimeCompare([]byte(c.Password.String()), []byte(authReq.Password))
+    if userMatch&passMatch != 1 {
         utils.DebugLog("Local authentication failed for user: %s", authReq.Username)
         ctx.AbortWithStatus(http.StatusUnauthorized)
     }
@@ -145,16 +157,16 @@ func (c *Config) appAuthenticate(ctx *gin.Context) {
     log.Printf("[stream-share] %v | %s |App Auth\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP())
 
     // Use LDAP authentication if enabled
-    if c.ProxyConfig.LDAPEnabled {
+    if c.LDAPEnabled {
         utils.DebugLog("LDAP app authentication for user: %s", q["username"][0])
         ok := ldapAuthenticate(
-            c.ProxyConfig.LDAPServer,
-            c.ProxyConfig.LDAPBaseDN,
-            c.ProxyConfig.LDAPBindDN,
-            c.ProxyConfig.LDAPBindPassword,
-            c.ProxyConfig.LDAPUserAttribute,
-            c.ProxyConfig.LDAPGroupAttribute,
-            c.ProxyConfig.LDAPRequiredGroup,
+            c.LDAPServer,
+            c.LDAPBaseDN,
+            c.LDAPBindDN,
+            c.LDAPBindPassword,
+            c.LDAPUserAttribute,
+            c.LDAPGroupAttribute,
+            c.LDAPRequiredGroup,
             q["username"][0],
             q["password"][0],
         )
@@ -164,10 +176,14 @@ func (c *Config) appAuthenticate(ctx *gin.Context) {
             return
         }
         utils.DebugLog("LDAP app authentication succeeded for user: %s", q["username"][0])
-    } else if c.ProxyConfig.User.String() != q["username"][0] || c.ProxyConfig.Password.String() != q["password"][0] {
-        utils.DebugLog("Local app authentication failed for user: %s", q["username"][0])
-        ctx.AbortWithStatus(http.StatusUnauthorized)
-        return
+    } else {
+        userMatch := subtle.ConstantTimeCompare([]byte(c.User.String()), []byte(q["username"][0]))
+        passMatch := subtle.ConstantTimeCompare([]byte(c.Password.String()), []byte(q["password"][0]))
+        if userMatch&passMatch != 1 {
+            utils.DebugLog("Local app authentication failed for user: %s", q["username"][0])
+            ctx.AbortWithStatus(http.StatusUnauthorized)
+            return
+        }
     }
 
     ctx.Request.Body = io.NopCloser(bytes.NewReader(contents))
@@ -222,7 +238,7 @@ func ldapAuthenticate(server, baseDN, bindDN, bindPassword, userAttr, groupAttr,
         for _, entry := range sr.Entries {
             for _, groupValue := range entry.GetAttributeValues(groupAttr) {
                 utils.DebugLog("LDAP user group: %s", groupValue)
-                if strings.Contains(strings.ToLower(groupValue), strings.ToLower(requiredGroup)) {
+                if ldapGroupMatches(groupValue, requiredGroup) {
                     hasGroup = true
                     break
                 }
@@ -243,4 +259,20 @@ func ldapAuthenticate(server, baseDN, bindDN, bindPassword, userAttr, groupAttr,
     }
     utils.DebugLog("LDAP user bind succeeded for user: %s", username)
     return true
+}
+
+// ldapGroupMatches reports whether groupValue (which may be a DN like
+// "cn=iptv,ou=groups,dc=example,dc=com" or a plain name) matches requiredGroup.
+// For DN values it extracts the CN and compares; for plain values it compares exactly
+// (case-insensitive). This replaces a substring match that would accept "notiptv"
+// when requiredGroup is "iptv".
+func ldapGroupMatches(groupValue, requiredGroup string) bool {
+    lower := strings.ToLower(groupValue)
+    prefix := "cn=" + strings.ToLower(requiredGroup)
+    // DN form: must start with "cn=<group>," or equal "cn=<group>"
+    if strings.HasPrefix(lower, "cn=") {
+        return strings.HasPrefix(lower, prefix+",") || lower == prefix
+    }
+    // Plain name: exact case-insensitive equality
+    return lower == strings.ToLower(requiredGroup)
 }

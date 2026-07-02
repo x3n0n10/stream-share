@@ -33,7 +33,7 @@ var (
 
 // IsDebugLogEnabled returns whether debug logging is enabled
 func IsDebugLogEnabled() bool {
-	return os.Getenv("DEBUG_LOGGING") == "true"
+	return os.Getenv("LOG_DEBUG_ENABLED") == "true"
 }
 
 // HexDump creates a hex dump of the given data for debugging purposes

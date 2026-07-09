@@ -122,20 +122,10 @@ func (m *DBManager) GetUserHistory(username string, since time.Time, limit int) 
     return entries, rows.Err()
 }
 
-// UserHistorySummary aggregates one user's activity in the window.
-type UserHistorySummary struct {
-    Username    string
-    TotalCount  int
-    LiveCount   int
-    VODCount    int
-    TotalSec    int64 // total watch seconds across all rows
-    LastWatched time.Time
-}
-
-// GetHistorySummary returns per-user aggregates for rows newer than `since`, ordered by TotalSec desc.
-// If since is the zero Time, no lower bound is applied.
-func (m *DBManager) GetHistorySummary(since time.Time) ([]UserHistorySummary, error) {
-    utils.DebugLog("Database: Getting history summary (since %v)", since)
+// GetRecentHistory returns the most recent watch events across ALL users, newest
+// first, capped at limit. If since is the zero Time, no lower bound is applied.
+func (m *DBManager) GetRecentHistory(since time.Time, limit int) ([]HistoryEntry, error) {
+    utils.DebugLog("Database: Getting recent history feed (since %v, limit %d)", since, limit)
     if m == nil || m.db == nil {
         return nil, fmt.Errorf("database not initialized")
     }
@@ -146,37 +136,29 @@ func (m *DBManager) GetHistorySummary(since time.Time) ([]UserHistorySummary, er
     sinceParam := sql.NullTime{Time: since, Valid: !since.IsZero()}
 
     rows, err := m.db.QueryContext(ctx, `
-        SELECT username,
-               COUNT(*)::int,
-               COUNT(*) FILTER (WHERE stream_type = 'live')::int,
-               COUNT(*) FILTER (WHERE stream_type != 'live')::int,
-               COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(end_time, NOW()) - start_time))::bigint), 0),
-               MAX(start_time)
+        SELECT username, stream_id, stream_type, COALESCE(stream_title, ''), start_time, end_time,
+               EXTRACT(EPOCH FROM (COALESCE(end_time, NOW()) - start_time))::bigint
         FROM stream_history
         WHERE ($1::timestamp IS NULL OR start_time >= $1)
-        GROUP BY username
-        ORDER BY COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(end_time, NOW()) - start_time))::bigint), 0) DESC
-    `, sinceParam)
+        ORDER BY start_time DESC
+        LIMIT $2
+    `, sinceParam, limit)
     if err != nil {
-        utils.ErrorLog("Database error getting history summary: %v", err)
+        utils.ErrorLog("Database error getting recent history: %v", err)
         return nil, err
     }
     defer func() { _ = rows.Close() }()
 
-    summaries := make([]UserHistorySummary, 0)
+    entries := make([]HistoryEntry, 0)
     for rows.Next() {
-        var s UserHistorySummary
-        var last sql.NullTime
-        if err := rows.Scan(&s.Username, &s.TotalCount, &s.LiveCount, &s.VODCount, &s.TotalSec, &last); err != nil {
-            utils.WarnLog("Database error scanning history summary row: %v", err)
+        var e HistoryEntry
+        if err := rows.Scan(&e.Username, &e.StreamID, &e.StreamType, &e.StreamTitle, &e.StartTime, &e.EndTime, &e.DurationSec); err != nil {
+            utils.WarnLog("Database error scanning history row: %v", err)
             continue
         }
-        if last.Valid {
-            s.LastWatched = last.Time
-        }
-        summaries = append(summaries, s)
+        entries = append(entries, e)
     }
-    return summaries, rows.Err()
+    return entries, rows.Err()
 }
 
 // GetStreamHistoryStats gets statistics about stream usage

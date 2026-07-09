@@ -91,7 +91,7 @@ func (c *Config) setupInternalAPI(r *gin.Engine) {
 	api.GET("/status", c.statusSummary)
 
 	// Watch history endpoints (used by Discord)
-	api.GET("/history", c.getHistorySummary)
+	api.GET("/history", c.getHistoryFeed)
 	api.GET("/history/:username", c.getUserHistory)
 
 	// Debug endpoint to verify API is working

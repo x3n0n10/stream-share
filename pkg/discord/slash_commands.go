@@ -64,10 +64,10 @@ func (b *Bot) commandSpecs() []*discordgo.ApplicationCommand {
         },
         {
             Name:                     "history",
-            Description:              "Show watch history per client (live + VOD)",
+            Description:              "Watch history timeline (live + VOD)",
             DefaultMemberPermissions: int64Ptr(discordgo.PermissionManageGuild),
             Options: []*discordgo.ApplicationCommandOption{
-                {Type: discordgo.ApplicationCommandOptionString, Name: "username", Description: "LDAP username (omit for an all-clients overview)", Required: false},
+                {Type: discordgo.ApplicationCommandOptionString, Name: "username", Description: "Client to drill into (omit for a global timeline of all clients)", Required: false},
                 {Type: discordgo.ApplicationCommandOptionString, Name: "period", Description: "Time window", Required: false, Choices: []*discordgo.ApplicationCommandOptionChoice{
                     {Name: "Last 24 hours", Value: "24h"},
                     {Name: "Last 7 days", Value: "7d"},

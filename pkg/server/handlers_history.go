@@ -39,10 +39,12 @@ func sinceFromHours(hours int) time.Time {
 	return time.Time{}
 }
 
-// getHistorySummary GET /api/internal/history?hours=N — per-user aggregates.
-func (c *Config) getHistorySummary(ctx *gin.Context) {
+// getHistoryFeed GET /api/internal/history?hours=N — a chronological timeline of
+// the most recent watch events across ALL clients (newest first), each annotated
+// with who watched, the channel/VOD name, type and duration.
+func (c *Config) getHistoryFeed(ctx *gin.Context) {
 	if c.db == nil {
-		utils.ErrorLog("Database is nil in getHistorySummary")
+		utils.ErrorLog("Database is nil in getHistoryFeed")
 		ctx.JSON(http.StatusInternalServerError, types.APIResponse{
 			Success: false,
 			Error:   "Database not initialized",
@@ -53,48 +55,45 @@ func (c *Config) getHistorySummary(ctx *gin.Context) {
 	hours, _ := strconv.Atoi(ctx.Query("hours"))
 	since := sinceFromHours(hours)
 
-	summaries, err := c.db.GetHistorySummary(since)
+	const limit = 40
+	entries, err := c.db.GetRecentHistory(since, limit)
 	if err != nil {
-		utils.ErrorLog("Failed to get history summary: %v", err)
+		utils.ErrorLog("Failed to get history feed: %v", err)
 		ctx.JSON(http.StatusInternalServerError, types.APIResponse{
 			Success: false,
-			Error:   fmt.Sprintf("Failed to get history summary: %v", err),
+			Error:   fmt.Sprintf("Failed to get history feed: %v", err),
 		})
 		return
 	}
 
 	type item struct {
 		Username    string    `json:"username"`
-		TotalCount  int       `json:"total_count"`
-		LiveCount   int       `json:"live_count"`
-		VODCount    int       `json:"vod_count"`
-		TotalSec    int64     `json:"total_sec"`
-		LastWatched time.Time `json:"last_watched"`
+		StreamID    string    `json:"stream_id"`
+		StreamType  string    `json:"stream_type"`
+		StreamTitle string    `json:"stream_title"`
+		StartTime   time.Time `json:"start_time"`
+		DurationSec int64     `json:"duration_sec"`
 	}
-	summaryItems := make([]item, 0, len(summaries))
-	for _, s := range summaries {
-		summaryItems = append(summaryItems, item{
-			Username:    s.Username,
-			TotalCount:  s.TotalCount,
-			LiveCount:   s.LiveCount,
-			VODCount:    s.VODCount,
-			TotalSec:    s.TotalSec,
-			LastWatched: s.LastWatched,
+	feedItems := make([]item, 0, len(entries))
+	for _, e := range entries {
+		feedItems = append(feedItems, item{
+			Username:    e.Username,
+			StreamID:    e.StreamID,
+			StreamType:  e.StreamType,
+			StreamTitle: c.historyLabel(e.StreamTitle, e.StreamID),
+			StartTime:   e.StartTime,
+			DurationSec: e.DurationSec,
 		})
 	}
 
 	var b strings.Builder
-	if len(summaryItems) == 0 {
+	if len(feedItems) == 0 {
 		b.WriteString("No watch history in this period.")
 	} else {
-		for _, it := range summaryItems {
-			watched := utils.HumanDuration(time.Duration(it.TotalSec) * time.Second)
-			last := "never"
-			if !it.LastWatched.IsZero() {
-				last = utils.HumanDuration(time.Since(it.LastWatched)) + " ago"
-			}
-			fmt.Fprintf(&b, "- %s: %d stream(s) (%d live, %d VOD) — %s watched, last %s\n",
-				it.Username, it.TotalCount, it.LiveCount, it.VODCount, watched, last,
+		for _, it := range feedItems {
+			dur := utils.HumanDuration(time.Duration(it.DurationSec) * time.Second)
+			fmt.Fprintf(&b, "- %s · %s · %s [%s] (%s)\n",
+				it.StartTime.Format("01-02 15:04"), it.Username, it.StreamTitle, it.StreamType, dur,
 			)
 		}
 	}
@@ -102,12 +101,25 @@ func (c *Config) getHistorySummary(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, types.APIResponse{
 		Success: true,
 		Data: map[string]interface{}{
-			"summary":    summaryItems,
-			"text":       b.String(),
-			"hours":      hours,
-			"user_count": len(summaryItems),
+			"feed":  feedItems,
+			"text":  b.String(),
+			"hours": hours,
+			"count": len(feedItems),
 		},
 	})
+}
+
+// historyLabel resolves the best display name for a history row: the stored title
+// when present, otherwise the cached channel/VOD name index (no network I/O),
+// falling back to the raw stream id.
+func (c *Config) historyLabel(storedTitle, streamID string) string {
+	if t := strings.TrimSpace(storedTitle); t != "" {
+		return t
+	}
+	if name, ok := c.resolveStreamName(streamID); ok && strings.TrimSpace(name) != "" {
+		return strings.TrimSpace(name)
+	}
+	return streamID
 }
 
 // getUserHistory GET /api/internal/history/:username?hours=N — one user's rows.
@@ -156,7 +168,7 @@ func (c *Config) getUserHistory(ctx *gin.Context) {
 		entryItems = append(entryItems, item{
 			StreamID:    e.StreamID,
 			StreamType:  e.StreamType,
-			StreamTitle: e.StreamTitle,
+			StreamTitle: c.historyLabel(e.StreamTitle, e.StreamID),
 			StartTime:   e.StartTime,
 			DurationSec: e.DurationSec,
 		})
@@ -167,13 +179,9 @@ func (c *Config) getUserHistory(ctx *gin.Context) {
 		fmt.Fprintf(&b, "No watch history for %s in this period.", username)
 	} else {
 		for _, it := range entryItems {
-			label := strings.TrimSpace(it.StreamTitle)
-			if label == "" {
-				label = it.StreamID
-			}
 			dur := utils.HumanDuration(time.Duration(it.DurationSec) * time.Second)
-			fmt.Fprintf(&b, "- %s [%s] — %s (%s)\n",
-				label, it.StreamType, dur, it.StartTime.Format("2006-01-02 15:04"),
+			fmt.Fprintf(&b, "- %s · %s [%s] (%s)\n",
+				it.StartTime.Format("01-02 15:04"), it.StreamTitle, it.StreamType, dur,
 			)
 		}
 	}

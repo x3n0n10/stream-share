@@ -42,11 +42,12 @@ func periodToHours(period string) int {
     }
 }
 
-// handleHistory shows watch history. With no username: a per-client overview.
-// With a username: that client's recent watch timeline. `hours`=0 means all-time.
+// handleHistory shows watch history. With no username: a global timeline feed of
+// recent watch events across all clients. With a username: that client's recent
+// watch timeline. `hours`=0 means all-time.
 func (b *Bot) handleHistory(s *discordgo.Session, m *discordgo.MessageCreate, username string, hours int) {
     endpoint := "/history"
-    title := "📜 Watch History"
+    title := "📜 Watch History — Recent Activity"
     if username != "" {
         endpoint = "/history/" + url.PathEscape(username)
         title = "📜 Watch History — " + username

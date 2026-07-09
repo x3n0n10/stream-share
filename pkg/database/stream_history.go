@@ -72,6 +72,113 @@ func (m *DBManager) CloseStreamHistory(historyID int64) error {
     return nil
 }
 
+// HistoryEntry is one watch-history row.
+type HistoryEntry struct {
+    Username    string
+    StreamID    string
+    StreamType  string
+    StreamTitle string
+    StartTime   time.Time
+    EndTime     sql.NullTime
+    DurationSec int64 // COALESCE(end_time, now) - start_time, in seconds
+}
+
+// GetUserHistory returns a user's history rows newer than `since`, newest first, capped at limit.
+// If since is the zero Time, no lower bound is applied.
+func (m *DBManager) GetUserHistory(username string, since time.Time, limit int) ([]HistoryEntry, error) {
+    utils.DebugLog("Database: Getting history for user %s (since %v, limit %d)", username, since, limit)
+    if m == nil || m.db == nil {
+        return nil, fmt.Errorf("database not initialized")
+    }
+
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+
+    sinceParam := sql.NullTime{Time: since, Valid: !since.IsZero()}
+
+    rows, err := m.db.QueryContext(ctx, `
+        SELECT stream_id, stream_type, COALESCE(stream_title, ''), start_time, end_time,
+               EXTRACT(EPOCH FROM (COALESCE(end_time, NOW()) - start_time))::bigint
+        FROM stream_history
+        WHERE username = $1 AND ($2::timestamp IS NULL OR start_time >= $2)
+        ORDER BY start_time DESC
+        LIMIT $3
+    `, username, sinceParam, limit)
+    if err != nil {
+        utils.ErrorLog("Database error getting user history: %v", err)
+        return nil, err
+    }
+    defer func() { _ = rows.Close() }()
+
+    entries := make([]HistoryEntry, 0)
+    for rows.Next() {
+        e := HistoryEntry{Username: username}
+        if err := rows.Scan(&e.StreamID, &e.StreamType, &e.StreamTitle, &e.StartTime, &e.EndTime, &e.DurationSec); err != nil {
+            utils.WarnLog("Database error scanning history row: %v", err)
+            continue
+        }
+        entries = append(entries, e)
+    }
+    return entries, rows.Err()
+}
+
+// UserHistorySummary aggregates one user's activity in the window.
+type UserHistorySummary struct {
+    Username    string
+    TotalCount  int
+    LiveCount   int
+    VODCount    int
+    TotalSec    int64 // total watch seconds across all rows
+    LastWatched time.Time
+}
+
+// GetHistorySummary returns per-user aggregates for rows newer than `since`, ordered by TotalSec desc.
+// If since is the zero Time, no lower bound is applied.
+func (m *DBManager) GetHistorySummary(since time.Time) ([]UserHistorySummary, error) {
+    utils.DebugLog("Database: Getting history summary (since %v)", since)
+    if m == nil || m.db == nil {
+        return nil, fmt.Errorf("database not initialized")
+    }
+
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+
+    sinceParam := sql.NullTime{Time: since, Valid: !since.IsZero()}
+
+    rows, err := m.db.QueryContext(ctx, `
+        SELECT username,
+               COUNT(*)::int,
+               COUNT(*) FILTER (WHERE stream_type = 'live')::int,
+               COUNT(*) FILTER (WHERE stream_type != 'live')::int,
+               COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(end_time, NOW()) - start_time))::bigint), 0),
+               MAX(start_time)
+        FROM stream_history
+        WHERE ($1::timestamp IS NULL OR start_time >= $1)
+        GROUP BY username
+        ORDER BY COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(end_time, NOW()) - start_time))::bigint), 0) DESC
+    `, sinceParam)
+    if err != nil {
+        utils.ErrorLog("Database error getting history summary: %v", err)
+        return nil, err
+    }
+    defer func() { _ = rows.Close() }()
+
+    summaries := make([]UserHistorySummary, 0)
+    for rows.Next() {
+        var s UserHistorySummary
+        var last sql.NullTime
+        if err := rows.Scan(&s.Username, &s.TotalCount, &s.LiveCount, &s.VODCount, &s.TotalSec, &last); err != nil {
+            utils.WarnLog("Database error scanning history summary row: %v", err)
+            continue
+        }
+        if last.Valid {
+            s.LastWatched = last.Time
+        }
+        summaries = append(summaries, s)
+    }
+    return summaries, rows.Err()
+}
+
 // GetStreamHistoryStats gets statistics about stream usage
 func (m *DBManager) GetStreamHistoryStats() (map[string]interface{}, error) {
     utils.DebugLog("Database: Getting stream history statistics")

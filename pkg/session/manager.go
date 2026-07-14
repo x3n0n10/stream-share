@@ -78,6 +78,11 @@ type SessionManager struct {
 	// streamID + "\x00" + username. Guarded by its own mutex.
 	vodViewTimersMu sync.Mutex
 	vodViewTimers   map[string]*time.Timer
+	// vodHistoryIDs maps an active VOD view (streamID + "\x00" + username) to its
+	// open stream_history row id, so the row is written once per viewing session
+	// (not once per Range request) and closed when the view ends. Guarded by
+	// vodViewTimersMu.
+	vodHistoryIDs map[string]int64
 }
 
 // Stream multiplexing tuning.
@@ -144,6 +149,7 @@ func NewSessionManager(db *database.DBManager) *SessionManager {
 		clientStallTimeout: defaultClientStallTimeout,
 		pendingStops:       make(map[string]chan struct{}),
 		vodViewTimers:      make(map[string]*time.Timer),
+		vodHistoryIDs:      make(map[string]int64),
 		stopChan:           make(chan struct{}),
 		httpClient: &http.Client{
 			// No global Timeout: long-running streams must not be cut after 60s
@@ -918,6 +924,11 @@ func vodViewKey(streamID, username string) string { return streamID + "\x00" + u
 func (sm *SessionManager) RegisterVODView(username, streamID, streamType, title string) {
 	sm.cancelVODViewTimer(streamID, username)
 
+	// Record a stream_history row once per viewing session. RegisterVODView is
+	// called on every Range request; recordVODHistory de-duplicates so only the
+	// first request for a (user, stream) view inserts a row.
+	sm.recordVODHistory(username, streamID, streamType, title)
+
 	sm.userLock.Lock()
 	if sess, exists := sm.userSessions[username]; exists {
 		sess.StreamID = streamID
@@ -963,6 +974,60 @@ func (sm *SessionManager) UnregisterVODView(username, streamID string) {
 	sm.vodViewTimersMu.Unlock()
 }
 
+// recordVODHistory inserts a stream_history row for a VOD view the first time it
+// is seen, keyed by (stream, user). Repeat calls (subsequent Range requests) are
+// no-ops while the view is active. The row is closed in removeVODView.
+func (sm *SessionManager) recordVODHistory(username, streamID, streamType, title string) {
+	if sm.db == nil {
+		return
+	}
+	key := vodViewKey(streamID, username)
+
+	sm.vodViewTimersMu.Lock()
+	if _, exists := sm.vodHistoryIDs[key]; exists {
+		sm.vodViewTimersMu.Unlock()
+		return
+	}
+	// Reserve the slot so a concurrent Range request cannot insert a duplicate row.
+	sm.vodHistoryIDs[key] = 0
+	sm.vodViewTimersMu.Unlock()
+
+	ip, ua := "", ""
+	sm.userLock.RLock()
+	if sess, ok := sm.userSessions[username]; ok {
+		ip, ua = sess.IPAddress, sess.UserAgent
+	}
+	sm.userLock.RUnlock()
+
+	id, err := sm.db.AddStreamHistory(username, streamID, streamType, title, ip, ua)
+	if err != nil {
+		utils.ErrorLog("Failed to record VOD stream history: %v", err)
+		sm.vodViewTimersMu.Lock()
+		delete(sm.vodHistoryIDs, key)
+		sm.vodViewTimersMu.Unlock()
+		return
+	}
+	sm.vodViewTimersMu.Lock()
+	sm.vodHistoryIDs[key] = id
+	sm.vodViewTimersMu.Unlock()
+}
+
+// closeVODHistory marks a VOD view's stream_history row as ended, if one is open.
+func (sm *SessionManager) closeVODHistory(username, streamID string) {
+	key := vodViewKey(streamID, username)
+	sm.vodViewTimersMu.Lock()
+	id, ok := sm.vodHistoryIDs[key]
+	if ok {
+		delete(sm.vodHistoryIDs, key)
+	}
+	sm.vodViewTimersMu.Unlock()
+	if ok && id > 0 && sm.db != nil {
+		if err := sm.db.CloseStreamHistory(id); err != nil {
+			utils.WarnLog("Failed to close VOD stream history %d: %v", id, err)
+		}
+	}
+}
+
 // cancelVODViewTimer stops any pending grace-period removal for a VOD view.
 func (sm *SessionManager) cancelVODViewTimer(streamID, username string) {
 	key := vodViewKey(streamID, username)
@@ -977,6 +1042,8 @@ func (sm *SessionManager) cancelVODViewTimer(streamID, username string) {
 // removeVODView detaches a user from a synthetic VOD viewing session once the
 // grace period has elapsed without further range requests.
 func (sm *SessionManager) removeVODView(username, streamID string) {
+	sm.closeVODHistory(username, streamID)
+
 	sm.userLock.Lock()
 	if sess, exists := sm.userSessions[username]; exists && sess.StreamID == streamID {
 		sess.StreamID = ""

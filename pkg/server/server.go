@@ -262,16 +262,16 @@ func cleanDebugAPIFiles(cacheDir string) {
 	}
 }
 
-// Serve the stream-share api
 // Serve boots the HTTP server, internal API, routes, and optional Discord bot.
 func (c *Config) Serve() error {
 	utils.InfoLog("[stream-share] Server is starting...")
 
-	if c.db != nil && c.db.IsInitialized() {
+	switch {
+	case c.db != nil && c.db.IsInitialized():
 		utils.InfoLog("Bootstrap: Database is initialized and connected")
-	} else if c.db != nil {
+	case c.db != nil:
 		utils.WarnLog("Bootstrap: Database manager present but not initialized")
-	} else {
+	default:
 		utils.WarnLog("Bootstrap: Database is DISABLED (no persistence)")
 	}
 
@@ -488,6 +488,24 @@ func (c *Config) resolveRequestUsername(ctx *gin.Context) string {
 // multiplexedStream handles streaming with connection multiplexing
 // multiplexedStream proxies a stream while sharing a single upstream connection
 // across multiple clients for the same content using the SessionManager.
+// classifyStreamType infers the Xtream stream type ("movie", "series", "live",
+// "timeshift") from the segments of a URL path, returning fallback when none of
+// the known segments are present.
+func classifyStreamType(p, fallback string) string {
+	switch {
+	case strings.Contains(p, "/movie/"):
+		return "movie"
+	case strings.Contains(p, "/series/"):
+		return "series"
+	case strings.Contains(p, "/live/"):
+		return "live"
+	case strings.Contains(p, "/timeshift/"):
+		return "timeshift"
+	default:
+		return fallback
+	}
+}
+
 func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	username := c.resolveRequestUsername(ctx)
 
@@ -495,30 +513,11 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	streamID := path.Base(targetURL.Path)
 	// Normalize stream id for cache lookup (strip extension if present)
 	streamIDRaw := strings.TrimSuffix(streamID, path.Ext(streamID))
-	streamType := "unknown"
-	p := targetURL.Path
-	if strings.Contains(p, "/movie/") {
-		streamType = "movie"
-	} else if strings.Contains(p, "/series/") {
-		streamType = "series"
-	} else if strings.Contains(p, "/live/") {
-		streamType = "live"
-	} else if strings.Contains(p, "/timeshift/") {
-		streamType = "timeshift"
-	}
-	// Fallback: check incoming request path for type hints.
-	// The generic /:user/:pass/:id route maps to live streams in Xtream protocol.
+	streamType := classifyStreamType(targetURL.Path, "unknown")
+	// Fallback: check the incoming request path for type hints. The generic
+	// /:user/:pass/:id route maps to live streams in the Xtream protocol.
 	if streamType == "unknown" {
-		reqPath := ctx.Request.URL.Path
-		if strings.Contains(reqPath, "/movie/") {
-			streamType = "movie"
-		} else if strings.Contains(reqPath, "/series/") {
-			streamType = "series"
-		} else if strings.Contains(reqPath, "/live/") {
-			streamType = "live"
-		} else {
-			streamType = "live"
-		}
+		streamType = classifyStreamType(ctx.Request.URL.Path, "live")
 	}
 
 	// Title from query parameter, name resolution (live index or lazy VOD

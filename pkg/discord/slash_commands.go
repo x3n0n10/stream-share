@@ -313,13 +313,13 @@ func optInt(i *discordgo.InteractionCreate, name string) int64 {
 // toMessageCreateFromInteraction builds a minimal MessageCreate to reuse legacy handlers
 func toMessageCreateFromInteraction(i *discordgo.InteractionCreate, content string) *discordgo.MessageCreate {
 	mc := &discordgo.MessageCreate{Message: &discordgo.Message{ID: "", Content: content, Timestamp: time.Now(), ChannelID: channelIDFromInteraction(i)}}
-	if i.Member != nil && i.Member.User != nil {
+	switch {
+	case i.Member != nil && i.Member.User != nil:
 		mc.Author = i.Member.User
 		mc.GuildID = i.GuildID
-	} else if i.User != nil {
+	case i.User != nil:
 		mc.Author = i.User
-		mc.GuildID = ""
-	} else {
+	default:
 		// Fallback: empty user prevents nil dereference; handlers will fail gracefully
 		// (e.g. LDAP lookup returns no user → "Link your account" reply)
 		mc.Author = &discordgo.User{}

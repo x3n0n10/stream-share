@@ -100,11 +100,12 @@ func renderBar(done, total int64) string {
 	}
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
 	var size string
-	if total > 0 {
+	switch {
+	case total > 0:
 		size = fmt.Sprintf("%s/%s", utils.HumanBytes(done), utils.HumanBytes(total))
-	} else if done > 0 {
+	case done > 0:
 		size = utils.HumanBytes(done)
-	} else {
+	default:
 		size = "starting…"
 	}
 	return fmt.Sprintf("`[%s]` %d%% — %s", bar, pct, size)

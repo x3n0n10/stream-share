@@ -83,6 +83,14 @@ type SessionManager struct {
 	// (not once per Range request) and closed when the view ends. Guarded by
 	// vodViewTimersMu.
 	vodHistoryIDs map[string]int64
+
+	// liveHistoryIDs maps an active live viewer (streamID + "\x00" + username) to
+	// its open stream_history row id. A row is opened when a user starts watching
+	// a live stream (including multiplexed co-viewers) and closed when that user
+	// leaves, so durations reflect actual watch time. Guarded by liveHistoryMu.
+	// A sentinel value of 0 means "insert in flight" (see recordLiveHistory).
+	liveHistoryMu  sync.Mutex
+	liveHistoryIDs map[string]int64
 }
 
 // Stream multiplexing tuning.
@@ -150,6 +158,7 @@ func NewSessionManager(db *database.DBManager) *SessionManager {
 		pendingStops:       make(map[string]chan struct{}),
 		vodViewTimers:      make(map[string]*time.Timer),
 		vodHistoryIDs:      make(map[string]int64),
+		liveHistoryIDs:     make(map[string]int64),
 		stopChan:           make(chan struct{}),
 		httpClient: &http.Client{
 			// No global Timeout: long-running streams must not be cut after 60s
@@ -248,9 +257,12 @@ func (sm *SessionManager) cleanupRoutine() {
 func (sm *SessionManager) cleanupExpiredSessions() {
 	threshold := time.Now().Add(-sm.sessionTimeout)
 
-	sm.userLock.Lock()
-	defer sm.userLock.Unlock()
+	// Collect (username, streamID) pairs to close after releasing the locks, so
+	// the history DB round-trips don't run while holding userLock.
+	type departed struct{ username, streamID string }
+	var toClose []departed
 
+	sm.userLock.Lock()
 	for username, session := range sm.userSessions {
 		if session.LastActive.Before(threshold) {
 			utils.InfoLog("Session expired for user %s (inactive for %s)",
@@ -258,18 +270,27 @@ func (sm *SessionManager) cleanupExpiredSessions() {
 
 			// If user was watching a stream, remove from viewers
 			if session.StreamID != "" {
+				streamID := session.StreamID
 				sm.streamLock.Lock()
-				if streamSession, exists := sm.streamSessions[session.StreamID]; exists {
+				if streamSession, exists := sm.streamSessions[streamID]; exists {
 					if !streamSession.RemoveViewer(username) && streamSession.Active {
 						// No more viewers, stop the stream
-						sm.stopStream(session.StreamID)
+						sm.stopStream(streamID)
 					}
 				}
 				sm.streamLock.Unlock()
+				toClose = append(toClose, departed{username, streamID})
 			}
 
 			delete(sm.userSessions, username)
 		}
+	}
+	sm.userLock.Unlock()
+
+	// Close each departed viewer's live history row (no-op for VOD, which is
+	// closed via its own grace path).
+	for _, d := range toClose {
+		sm.closeLiveHistory(d.username, d.streamID)
 	}
 }
 
@@ -379,6 +400,8 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 			}
 		}
 		sm.streamLock.Unlock()
+		// Close the departing viewer's history row for the previous stream.
+		sm.closeLiveHistory(username, prevStreamID)
 	}
 
 	// Check if this stream is already active
@@ -397,10 +420,15 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 			utils.DebugLog("%s resumed before pause grace expired; continuing uninterrupted", sm.streamLabel(streamID))
 		}
 
+		joinTitle := streamType
 		if streamSession, exists := sm.streamSessions[streamID]; exists {
 			streamSession.AddViewer(username)
 			streamSession.LastRequested = time.Now()
+			joinTitle = streamSession.StreamTitle
 		}
+		// Record this co-viewer's own history row (multiplexed joiners were
+		// previously never recorded).
+		sm.recordLiveHistory(username, streamID, streamType, joinTitle, userSession.IPAddress, userSession.UserAgent)
 
 		existingBuffer.clientsLock.Lock()
 		// If the user already has a client attached (reconnect), drop the old one so
@@ -450,16 +478,8 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 	// Start the single upstream pump that fans out to all clients
 	go sm.streamToClients(streamBuffer, upstreamURL)
 
-	// Record in database
-	if sm.db != nil {
-		_, err := sm.db.AddStreamHistory(
-			username, streamID, streamType, streamTitle,
-			userSession.IPAddress, userSession.UserAgent,
-		)
-		if err != nil {
-			utils.ErrorLog("Failed to record stream history: %v", err)
-		}
-	}
+	// Record this viewer's history row (opened now, closed when they leave).
+	sm.recordLiveHistory(username, streamID, streamType, streamTitle, userSession.IPAddress, userSession.UserAgent)
 
 	utils.InfoLog("Started new %s for user %s", sm.streamLabel(streamID), username)
 	return streamBuffer, nil
@@ -692,6 +712,10 @@ func (sm *SessionManager) RemoveClient(streamID, username string) {
 	}
 	buffer.clientsLock.Unlock()
 
+	// This viewer is leaving the stream — close their live history row. A later
+	// resume (e.g. after a catchup pause) opens a fresh row via RequestStream.
+	sm.closeLiveHistory(username, streamID)
+
 	// Remove from stream session and stop the stream if last viewer
 	streamSession, exists := sm.streamSessions[streamID]
 	if !exists {
@@ -914,8 +938,9 @@ func (sm *SessionManager) DisconnectUser(username string) {
 	utils.InfoLog("User %s forcibly disconnected", username)
 }
 
-// vodViewKey identifies a synthetic VOD view by stream and user.
-func vodViewKey(streamID, username string) string { return streamID + "\x00" + username }
+// streamUserKey identifies a (stream, user) pair for the per-view history and
+// grace-timer maps.
+func streamUserKey(streamID, username string) string { return streamID + "\x00" + username }
 
 // RegisterVODView creates a synthetic stream session so status commands see users
 // watching local files. Cached VOD is served as many short Range requests, so any
@@ -960,7 +985,7 @@ func (sm *SessionManager) RegisterVODView(username, streamID, streamType, title 
 // grace window keeps the session in /status across those gaps. A subsequent
 // RegisterVODView (i.e. the next range request) cancels the pending removal.
 func (sm *SessionManager) UnregisterVODView(username, streamID string) {
-	key := vodViewKey(streamID, username)
+	key := streamUserKey(streamID, username)
 	sm.vodViewTimersMu.Lock()
 	if t, ok := sm.vodViewTimers[key]; ok {
 		t.Stop()
@@ -981,7 +1006,7 @@ func (sm *SessionManager) recordVODHistory(username, streamID, streamType, title
 	if sm.db == nil {
 		return
 	}
-	key := vodViewKey(streamID, username)
+	key := streamUserKey(streamID, username)
 
 	sm.vodViewTimersMu.Lock()
 	if _, exists := sm.vodHistoryIDs[key]; exists {
@@ -1014,7 +1039,7 @@ func (sm *SessionManager) recordVODHistory(username, streamID, streamType, title
 
 // closeVODHistory marks a VOD view's stream_history row as ended, if one is open.
 func (sm *SessionManager) closeVODHistory(username, streamID string) {
-	key := vodViewKey(streamID, username)
+	key := streamUserKey(streamID, username)
 	sm.vodViewTimersMu.Lock()
 	id, ok := sm.vodHistoryIDs[key]
 	if ok {
@@ -1028,9 +1053,75 @@ func (sm *SessionManager) closeVODHistory(username, streamID string) {
 	}
 }
 
+// recordLiveHistory opens a stream_history row for a live viewer the first time
+// they are seen on a stream, keyed by (stream, user). The DB insert runs off the
+// caller's goroutine (callers hold streamLock) so the streaming hot path is not
+// blocked on database latency. If the viewer leaves before the insert completes,
+// the row is closed immediately when the id lands.
+func (sm *SessionManager) recordLiveHistory(username, streamID, streamType, title, ip, ua string) {
+	if sm.db == nil {
+		return
+	}
+	key := streamUserKey(streamID, username)
+
+	sm.liveHistoryMu.Lock()
+	if _, exists := sm.liveHistoryIDs[key]; exists {
+		sm.liveHistoryMu.Unlock()
+		return
+	}
+	// Reserve the slot (sentinel 0 = insert in flight) so a concurrent join for the
+	// same viewer cannot open a duplicate row.
+	sm.liveHistoryIDs[key] = 0
+	sm.liveHistoryMu.Unlock()
+
+	go func() {
+		id, err := sm.db.AddStreamHistory(username, streamID, streamType, title, ip, ua)
+		if err != nil {
+			utils.ErrorLog("Failed to record live stream history: %v", err)
+			sm.liveHistoryMu.Lock()
+			if v, ok := sm.liveHistoryIDs[key]; ok && v == 0 {
+				delete(sm.liveHistoryIDs, key)
+			}
+			sm.liveHistoryMu.Unlock()
+			return
+		}
+		sm.liveHistoryMu.Lock()
+		if v, ok := sm.liveHistoryIDs[key]; ok && v == 0 {
+			sm.liveHistoryIDs[key] = id
+			sm.liveHistoryMu.Unlock()
+			return
+		}
+		// The viewer already left before the insert completed (slot was deleted):
+		// close the freshly-created row so it does not stay open forever.
+		sm.liveHistoryMu.Unlock()
+		if err := sm.db.CloseStreamHistory(id); err != nil {
+			utils.WarnLog("Failed to close orphaned live stream history %d: %v", id, err)
+		}
+	}()
+}
+
+// closeLiveHistory marks a live viewer's stream_history row as ended, if one is
+// open. Safe to call for non-live streams and unknown viewers (no-op). Deleting a
+// still-reserved slot (id 0) signals recordLiveHistory's goroutine to close the
+// row as soon as its insert completes.
+func (sm *SessionManager) closeLiveHistory(username, streamID string) {
+	key := streamUserKey(streamID, username)
+	sm.liveHistoryMu.Lock()
+	id, ok := sm.liveHistoryIDs[key]
+	if ok {
+		delete(sm.liveHistoryIDs, key)
+	}
+	sm.liveHistoryMu.Unlock()
+	if ok && id > 0 && sm.db != nil {
+		if err := sm.db.CloseStreamHistory(id); err != nil {
+			utils.WarnLog("Failed to close live stream history %d: %v", id, err)
+		}
+	}
+}
+
 // cancelVODViewTimer stops any pending grace-period removal for a VOD view.
 func (sm *SessionManager) cancelVODViewTimer(streamID, username string) {
-	key := vodViewKey(streamID, username)
+	key := streamUserKey(streamID, username)
 	sm.vodViewTimersMu.Lock()
 	if t, ok := sm.vodViewTimers[key]; ok {
 		t.Stop()

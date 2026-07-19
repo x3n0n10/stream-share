@@ -206,7 +206,9 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		apiURL := config.DiscordAPIURL
 		if apiURL == "" {
 			protocol := "http"
-			if config.HTTPS { protocol = "https" }
+			if config.HTTPS {
+				protocol = "https"
+			}
 			hostPart := fmt.Sprintf("%s:%d", config.HostConfig.Hostname, config.HostConfig.Port)
 			if config.ReverseProxyEnabled {
 				// Behind reverse proxy: use hostname without port by default
@@ -427,10 +429,22 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 		idRaw := strings.TrimSuffix(tempLink.StreamID, path.Ext(tempLink.StreamID))
 		if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil && entry.Status == "ready" {
 			utils.InfoLog("Download via cache for %s -> %s", c.vodLabel(tempLink.StreamID), entry.FilePath)
-			ext := strings.ToLower(path.Ext(entry.FilePath)); if ext == "" { ext = ".mp4" }
+			ext := strings.ToLower(path.Ext(entry.FilePath))
+			if ext == "" {
+				ext = ".mp4"
+			}
 			_ = c.db.TouchVODCache(idRaw)
 			var ct string
-			switch ext { case ".ts": ct = "video/mp2t"; case ".mkv": ct = "video/x-matroska"; case ".mp4": ct = "video/mp4"; default: ct = "application/octet-stream" }
+			switch ext {
+			case ".ts":
+				ct = "video/mp2t"
+			case ".mkv":
+				ct = "video/x-matroska"
+			case ".mp4":
+				ct = "video/mp4"
+			default:
+				ct = "application/octet-stream"
+			}
 			serveLocalFileRange(ctx, entry.FilePath, ct, sanitiseFilename(tempLink.Title)+ext, true)
 			return
 		}
@@ -438,8 +452,15 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 
 	// Fallback: proxy upstream URL
 	targetURL, err := url.Parse(tempLink.URL)
-	if err != nil { utils.ErrorLog("Invalid URL in temporary link: %v", err); ctx.AbortWithStatus(http.StatusInternalServerError); return }
-	ext := strings.ToLower(path.Ext(targetURL.Path)); if ext == "" { ext = ".mp4" }
+	if err != nil {
+		utils.ErrorLog("Invalid URL in temporary link: %v", err)
+		ctx.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	ext := strings.ToLower(path.Ext(targetURL.Path))
+	if ext == "" {
+		ext = ".mp4"
+	}
 	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, sanitiseFilename(tempLink.Title), ext))
 	c.stream(ctx, targetURL)
 }
@@ -523,7 +544,13 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 				utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, c.streamLabel(streamIDRaw), entry.FilePath)
 				// Content-Type based on file extension
 				var ct string
-				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" { ct = "video/mp2t" } else if ext == ".mkv" { ct = "video/x-matroska" } else { ct = "video/mp4" }
+				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" {
+					ct = "video/mp2t"
+				} else if ext == ".mkv" {
+					ct = "video/x-matroska"
+				} else {
+					ct = "video/mp4"
+				}
 				_ = c.db.TouchVODCache(streamIDRaw)
 				serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
 				return
@@ -625,7 +652,7 @@ func (c *Config) marshallInto(into *os.File, xtream bool) error {
 	for i, track := range c.playlist.Tracks {
 		var buffer bytes.Buffer
 
-		buffer.WriteString("#EXTINF:")                       // nolint: errcheck
+		buffer.WriteString("#EXTINF:") // nolint: errcheck
 		fmt.Fprintf(&buffer, "%d ", track.Length)
 		for i := range track.Tags {
 			if i == len(track.Tags)-1 {

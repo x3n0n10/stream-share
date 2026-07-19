@@ -20,7 +20,6 @@ package discord
 
 import (
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -95,28 +94,7 @@ func (b *Bot) handleCache(s *discordgo.Session, m *discordgo.MessageCreate, args
 	}
 
 	// Stable sort identical to /vod
-	sort.SliceStable(results, func(i, j int) bool {
-		a, b := results[i], results[j]
-		if a.StreamType != b.StreamType {
-			return a.StreamType < b.StreamType // series before movies
-		}
-		if a.StreamType == "series" && b.StreamType == "series" {
-			if a.SeriesTitle != b.SeriesTitle {
-				return strings.ToLower(a.SeriesTitle) < strings.ToLower(b.SeriesTitle)
-			}
-			if a.Season != b.Season {
-				return a.Season < b.Season
-			}
-			if a.Episode != b.Episode {
-				return a.Episode < b.Episode
-			}
-			return strings.ToLower(a.Title) < strings.ToLower(b.Title)
-		}
-		if a.Title != b.Title {
-			return strings.ToLower(a.Title) < strings.ToLower(b.Title)
-		}
-		return a.Year < b.Year
-	})
+	sortVODResults(results)
 
 	// Single dropdown of 25 per page; enrich first page like /vod
 	total := len(results)

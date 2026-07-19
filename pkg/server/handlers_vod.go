@@ -345,11 +345,11 @@ func (c *Config) createVODDownload(ctx *gin.Context) {
 		// Try to resolve extension from cached M3U (movie/series), then fall back
 		if ext := c.findVODExtensionInCache(basePath, finalID); ext != "" {
 			utils.DebugLog("VOD extension resolved from cache: %s%s", finalID, ext)
-			finalID = finalID + ext
+			finalID += ext
 		} else if basePath == "series" {
 			// Some providers predominantly use .mkv for series
 			utils.DebugLog("VOD extension not found in cache for series id=%s; defaulting to .mkv", finalID)
-			finalID = finalID + ".mkv"
+			finalID += ".mkv"
 		}
 	}
 	vodURL := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)

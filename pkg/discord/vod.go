@@ -197,10 +197,8 @@ func (b *Bot) handleCachedList(s *discordgo.Session, m *discordgo.MessageCreate)
 				if season > 0 || episode > 0 {
 					title = fmt.Sprintf("%s S%02dE%02d", title, season, episode)
 				}
-			} else {
-				if title == "" {
-					title = "Unknown title"
-				}
+			} else if title == "" {
+				title = "Unknown title"
 			}
 			by := strings.TrimSpace(getString(mapp, "requested_by"))
 			leftSecs := int(getInt64(mapp, "time_left_seconds"))

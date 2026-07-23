@@ -170,11 +170,30 @@ StreamShare exposes an internal API (used by the Discord bot and admin tools) un
 
 Everything above is machine-readable JSON (`{success, data, error}`) and is enough to build an external dashboard, including one that combines several stream-share instances:
 
-- **Active streams**: `/api/internal/streams` or `/api/internal/status` for live sessions and viewers.
+- **Active streams**: `/api/internal/streams` or `/api/internal/status` for live sessions and viewers. Each stream item includes a display-resolved `stream_title` (never blank — falls back through the channel/VOD name index to the raw stream ID) and, for live channels, an optional `tech` object with audio/video technical info (see below).
 - **Watch history**: `/api/internal/history` (global) or `/api/internal/history/:username`, both paginated with `limit`/`offset` and filterable with `hours`.
 - **VOD search**: `/api/internal/vod/search` — the same live provider search used by the `/vod` Discord command.
 - **Overview stats**: `/api/internal/stats` for counts and leaderboards to show on a summary page.
 - **Multi-instance**: this API has no built-in concept of "instance" or "tenant" — each deployment is independent, with its own database and API key. Call `/api/internal/instance` on each one to fetch a stable display name (set via `INSTANCE_NAME`, see below) and combine results client-side by polling each instance's base URL with its own API key.
+
+#### Technical stream info (`tech`)
+
+When `STREAM_TECH_PROBE_ENABLED=true`, active **live** stream items (from `/api/internal/streams`, `/streams/:streamid`, and `/status`) include a `tech` object with best-effort audio/video characteristics detected by `ffprobe`:
+
+```json
+"tech": {
+  "container_format": "mpegts",
+  "video_codec": "h264", "width": 1920, "height": 1080, "frame_rate": 25, "video_bitrate_kbps": 4500,
+  "audio_codec": "aac", "audio_channels": 2, "audio_sample_rate_hz": 48000, "audio_language": "eng", "audio_bitrate_kbps": 128,
+  "probed_at": "2026-01-01T12:00:00Z"
+}
+```
+
+Notes:
+- **No extra provider connection**: the probe samples bytes already flowing through that channel's existing shared upstream connection (the same one serving its viewers) — it never opens an additional connection to your provider, so it's safe even on strict concurrent-connection limits.
+- Requires `ffprobe` in the runtime image (bundled in the official Docker image; if you build your own, install `ffmpeg`).
+- Off by default. A channel is only probed once it has at least one real viewer (there's nothing to sample otherwise), results are cached for a few minutes per channel, and refreshed lazily on the next request after the cache goes stale — list endpoints never block waiting on a probe, but `/streams/:streamid` (a single-item lookup) will wait briefly for a fresh result if nothing is cached yet.
+- VOD/series aren't covered: they're served per-request rather than through a persistent shared connection, so there's no ongoing byte stream to sample without opening a dedicated one.
 
 ### Authentication
 
@@ -189,6 +208,8 @@ The API key is automatically generated on first run and stored in the database.
 To override, set `INTERNAL_API_KEY` in the environment so the bot and integrations can authenticate reliably.
 
 Set `INSTANCE_NAME` to give this deployment a stable display name (defaults to the machine hostname), returned by `/api/internal/instance` — useful when a dashboard combines data from multiple stream-share instances.
+
+Set `STREAM_TECH_PROBE_ENABLED=true` to enable the `tech` (audio/video technical info) field on active live streams — see [Technical stream info](#technical-stream-info-tech) above.
 
 ---
 

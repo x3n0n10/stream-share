@@ -20,11 +20,79 @@ package server
 
 import (
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
+
+// activeStreamItem is the API view of one active stream: display-resolved
+// title/EPG id, current viewers, and (for live streams, when enabled) best-
+// effort technical audio/video info from stream_probe.go.
+type activeStreamItem struct {
+	StreamID     string          `json:"stream_id"`
+	StreamType   string          `json:"stream_type"`
+	StreamTitle  string          `json:"stream_title"`
+	EPGChannelID string          `json:"epg_channel_id,omitempty"`
+	ViewerCount  int             `json:"viewer_count"`
+	Viewers      []string        `json:"viewers"`
+	StartedAt    time.Time       `json:"started_at"`
+	Duration     string          `json:"duration"`
+	Tech         *StreamTechInfo `json:"tech,omitempty"`
+}
+
+// buildActiveStreamItem resolves a stream session into its API view. Title
+// resolution mirrors resolveTitleAtStart's fallback: the stored title is used
+// when present and meaningful, otherwise a live channel-index/VOD lookup is
+// attempted, falling back to the raw stream ID as a last resort so the field
+// is never blank.
+//
+// For live streams (only stream type with a persistent shared upstream
+// connection to sample from) this also attaches any cached technical info and
+// kicks off a background refresh if the cache is stale/missing — never blocks
+// the caller.
+func (c *Config) buildActiveStreamItem(s *types.StreamSession) activeStreamItem {
+	viewers := s.GetViewers()
+	names := make([]string, 0, len(viewers))
+	for u := range viewers {
+		names = append(names, u)
+	}
+
+	title := strings.TrimSpace(s.StreamTitle)
+	if title == "" || title == s.StreamID {
+		if name, ok := c.resolveTitleAtStart(s.StreamID, s.StreamType); ok && strings.TrimSpace(name) != "" {
+			title = name
+		}
+	}
+	if title == "" {
+		title = s.StreamID
+	}
+
+	epgID, _ := lookupEPGChannelID(normalizeStreamID(s.StreamID))
+	dur := time.Since(s.StartTime).Truncate(time.Second)
+
+	item := activeStreamItem{
+		StreamID:     s.StreamID,
+		StreamType:   s.StreamType,
+		StreamTitle:  title,
+		EPGChannelID: epgID,
+		ViewerCount:  len(names),
+		Viewers:      names,
+		StartedAt:    s.StartTime,
+		Duration:     dur.String(),
+	}
+
+	if s.StreamType == "live" {
+		if info, ok := getCachedTechInfo(s.StreamID); ok {
+			item.Tech = info
+		}
+		c.warmTechInfo(s.StreamID)
+	}
+
+	return item
+}
 
 // getAllStreams returns information about all active streams
 func (c *Config) getAllStreams(ctx *gin.Context) {
@@ -42,9 +110,14 @@ func (c *Config) getAllStreams(ctx *gin.Context) {
 	streams := c.sessionManager.GetAllStreams()
 	utils.DebugLog("API: Found %d active streams", len(streams))
 
+	items := make([]activeStreamItem, 0, len(streams))
+	for _, s := range streams {
+		items = append(items, c.buildActiveStreamItem(s))
+	}
+
 	ctx.JSON(http.StatusOK, types.APIResponse{
 		Success: true,
-		Data:    streams,
+		Data:    items,
 	})
 }
 
@@ -73,8 +146,18 @@ func (c *Config) getStreamInfo(ctx *gin.Context) {
 	}
 
 	utils.DebugLog("API: Found active %s with %d viewers", c.streamLabel(streamID), len(stream.GetViewers()))
+
+	item := c.buildActiveStreamItem(stream)
+	// This is a single-item lookup, so it's worth the extra latency of a
+	// synchronous probe when there's nothing usable cached yet.
+	if stream.StreamType == "live" && item.Tech == nil {
+		if info := c.forceProbeTechInfo(stream.StreamID); info != nil {
+			item.Tech = info
+		}
+	}
+
 	ctx.JSON(http.StatusOK, types.APIResponse{
 		Success: true,
-		Data:    stream,
+		Data:    item,
 	})
 }

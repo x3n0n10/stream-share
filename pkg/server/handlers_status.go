@@ -79,6 +79,9 @@ func (c *Config) statusSummary(ctx *gin.Context) {
 			fmt.Fprintf(&b, "- %s%s [%s] — %d viewer(s): %s (since %s)\n",
 				title, epgSuffix, it.StreamType, it.ViewerCount, strings.Join(it.Viewers, ", "), it.Duration,
 			)
+			if tech := formatTechSummary(it.Tech); tech != "" {
+				fmt.Fprintf(&b, "  %s\n", tech)
+			}
 		}
 	}
 

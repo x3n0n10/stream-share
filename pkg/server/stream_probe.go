@@ -32,10 +32,16 @@ import (
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
 
-// Technical stream info is derived from a small sample of bytes already
-// flowing through an active live stream's shared upstream connection (see
-// SessionManager.CaptureStreamSample) — probing never opens an extra
-// connection to the provider. The sample is analyzed locally with ffprobe.
+// Technical stream info never costs an extra connection to the provider:
+//   - Live streams are probed from a small sample of bytes already flowing
+//     through the channel's existing shared upstream connection (see
+//     SessionManager.CaptureStreamSample).
+//   - Cached VOD/series (once fully downloaded) are probed straight off the
+//     local file — no network involved at all, and since the whole file is
+//     available, every audio track can be listed (not just whichever one a
+//     live sample happened to catch).
+//
+// Either way the sample/file is analyzed locally with ffprobe.
 const (
 	techProbeSampleBytes    = 2 * 1024 * 1024 // ~2MB, enough for ffprobe to see a keyframe + audio frames on typical bitrates
 	techProbeCaptureTimeout = 6 * time.Second
@@ -44,22 +50,96 @@ const (
 	techProbeFailureTTL     = time.Minute // retry failed probes sooner than successful ones
 )
 
-// StreamTechInfo describes the audio/video technical characteristics of an
-// active live stream, as last observed by ffprobe.
+// AudioTrackInfo describes one audio stream found by ffprobe. A live sample
+// only ever sees whichever track(s) happen to be multiplexed into the sample;
+// a fully-downloaded VOD/series file reports every track it contains.
+type AudioTrackInfo struct {
+	Index        int    `json:"index"`
+	Codec        string `json:"codec,omitempty"`
+	Channels     int    `json:"channels,omitempty"`
+	SampleRateHz int    `json:"sample_rate_hz,omitempty"`
+	Language     string `json:"language,omitempty"`
+	BitrateKbps  int    `json:"bitrate_kbps,omitempty"`
+}
+
+// SubtitleTrackInfo describes one embedded subtitle stream found by ffprobe
+// (e.g. SRT/ASS/PGS muxed into the container, or DVB subtitles in a TS). Like
+// audio tracks, a live sample only sees whichever ones happen to be
+// multiplexed into the sample; a fully-downloaded VOD/series file reports all
+// of them.
+type SubtitleTrackInfo struct {
+	Index    int    `json:"index"`
+	Codec    string `json:"codec,omitempty"`
+	Language string `json:"language,omitempty"`
+}
+
+// StreamTechInfo describes the audio/video/subtitle technical characteristics
+// of an active stream, as last observed by ffprobe.
 type StreamTechInfo struct {
-	ContainerFormat  string    `json:"container_format,omitempty"`
-	VideoCodec       string    `json:"video_codec,omitempty"`
-	Width            int       `json:"width,omitempty"`
-	Height           int       `json:"height,omitempty"`
-	FrameRate        float64   `json:"frame_rate,omitempty"`
-	VideoBitrateKbps int       `json:"video_bitrate_kbps,omitempty"`
-	AudioCodec       string    `json:"audio_codec,omitempty"`
-	AudioChannels    int       `json:"audio_channels,omitempty"`
-	AudioSampleRate  int       `json:"audio_sample_rate_hz,omitempty"`
-	AudioLanguage    string    `json:"audio_language,omitempty"`
-	AudioBitrateKbps int       `json:"audio_bitrate_kbps,omitempty"`
-	ProbedAt         time.Time `json:"probed_at,omitempty"`
-	Error            string    `json:"error,omitempty"`
+	ContainerFormat  string              `json:"container_format,omitempty"`
+	VideoCodec       string              `json:"video_codec,omitempty"`
+	Width            int                 `json:"width,omitempty"`
+	Height           int                 `json:"height,omitempty"`
+	FrameRate        float64             `json:"frame_rate,omitempty"`
+	VideoBitrateKbps int                 `json:"video_bitrate_kbps,omitempty"`
+	AudioTracks      []AudioTrackInfo    `json:"audio_tracks,omitempty"`
+	SubtitleTracks   []SubtitleTrackInfo `json:"subtitle_tracks,omitempty"`
+	DurationSec      float64             `json:"duration_sec,omitempty"` // VOD/series only; live streams have no fixed duration
+	ProbedAt         time.Time           `json:"probed_at,omitempty"`
+	Error            string              `json:"error,omitempty"`
+}
+
+// formatTechSummary renders tech as a compact one-line string for human-
+// readable output (e.g. the Discord /status text), or "" if there's nothing
+// usable to show (no probe yet, or the last probe failed).
+func formatTechSummary(t *StreamTechInfo) string {
+	if t == nil || t.Error != "" {
+		return ""
+	}
+
+	var parts []string
+	if t.VideoCodec != "" {
+		video := t.VideoCodec
+		if t.Width > 0 && t.Height > 0 {
+			video += fmt.Sprintf(" %dx%d", t.Width, t.Height)
+		}
+		if t.FrameRate > 0 {
+			video += fmt.Sprintf("@%gfps", t.FrameRate)
+		}
+		if t.VideoBitrateKbps > 0 {
+			video += fmt.Sprintf(" %dkbps", t.VideoBitrateKbps)
+		}
+		parts = append(parts, video)
+	}
+	if len(t.AudioTracks) > 0 {
+		audioParts := make([]string, 0, len(t.AudioTracks))
+		for _, a := range t.AudioTracks {
+			seg := a.Codec
+			if a.Channels > 0 {
+				seg += fmt.Sprintf(" %dch", a.Channels)
+			}
+			if a.Language != "" {
+				seg += " " + a.Language
+			}
+			audioParts = append(audioParts, strings.TrimSpace(seg))
+		}
+		parts = append(parts, "audio: "+strings.Join(audioParts, ", "))
+	}
+	if len(t.SubtitleTracks) > 0 {
+		langs := make([]string, 0, len(t.SubtitleTracks))
+		for _, sub := range t.SubtitleTracks {
+			if sub.Language != "" {
+				langs = append(langs, sub.Language)
+			}
+		}
+		if len(langs) > 0 {
+			parts = append(parts, "subs: "+strings.Join(langs, ", "))
+		} else {
+			parts = append(parts, fmt.Sprintf("subs: %d", len(t.SubtitleTracks)))
+		}
+	}
+
+	return strings.Join(parts, " · ")
 }
 
 type techCacheEntry struct {
@@ -91,7 +171,7 @@ func ffprobeAvailable() bool {
 }
 
 // getCachedTechInfo returns a previously probed result without triggering any
-// work. staleness is not considered here — callers decide whether to also warm.
+// work. Staleness is not considered here — callers decide whether to also warm.
 func getCachedTechInfo(streamID string) (*StreamTechInfo, bool) {
 	techCacheMu.Lock()
 	defer techCacheMu.Unlock()
@@ -102,14 +182,17 @@ func getCachedTechInfo(streamID string) (*StreamTechInfo, bool) {
 	return entry.info, true
 }
 
-// warmTechInfo kicks off a background probe for streamID if the feature is
-// enabled, ffprobe is available, and there isn't already a fresh cache entry
-// or an in-flight probe for it. Never blocks the caller.
-func (c *Config) warmTechInfo(streamID string) {
-	if !c.StreamTechProbeEnabled || !ffprobeAvailable() {
-		return
-	}
+func cacheTechInfo(streamID string, info *StreamTechInfo, ttl time.Duration) {
+	techCacheMu.Lock()
+	techCache[streamID] = &techCacheEntry{info: info, expiresAt: time.Now().Add(ttl)}
+	techCacheMu.Unlock()
+}
 
+// warmTechInfo kicks off a background probe for streamID via prober if there
+// isn't already a fresh cache entry or an in-flight probe for it. Never
+// blocks the caller. Assumes the feature is enabled and ffprobe is available
+// (callers check that first, since the reason differs by source).
+func warmTechInfo(streamID string, prober func() (*StreamTechInfo, error)) {
 	techCacheMu.Lock()
 	if techProbing[streamID] {
 		techCacheMu.Unlock()
@@ -128,19 +211,15 @@ func (c *Config) warmTechInfo(streamID string) {
 			delete(techProbing, streamID)
 			techCacheMu.Unlock()
 		}()
-		c.probeAndCacheTechInfo(streamID)
+		runProbe(streamID, prober)
 	}()
 }
 
-// forceProbeTechInfo runs a probe synchronously (used for single-stream
-// lookups, where a caller can afford to wait a couple of seconds for a fresh
-// result) and returns whatever ends up cached, including the last-good result
-// if this attempt fails.
-func (c *Config) forceProbeTechInfo(streamID string) *StreamTechInfo {
-	if !c.StreamTechProbeEnabled || !ffprobeAvailable() {
-		return nil
-	}
-
+// forceProbeTechInfo runs a probe synchronously via prober (used for single-
+// stream lookups, where a caller can afford to wait a couple of seconds for a
+// fresh result) and returns whatever ends up cached, including the last-good
+// result if this attempt fails.
+func forceProbeTechInfo(streamID string, prober func() (*StreamTechInfo, error)) *StreamTechInfo {
 	techCacheMu.Lock()
 	alreadyProbing := techProbing[streamID]
 	if !alreadyProbing {
@@ -154,27 +233,19 @@ func (c *Config) forceProbeTechInfo(streamID string) *StreamTechInfo {
 			delete(techProbing, streamID)
 			techCacheMu.Unlock()
 		}()
-		c.probeAndCacheTechInfo(streamID)
+		runProbe(streamID, prober)
 	}
 
 	info, _ := getCachedTechInfo(streamID)
 	return info
 }
 
-// probeAndCacheTechInfo samples the stream's already-flowing upstream bytes,
-// analyzes them with ffprobe, and stores the result (success or failure) in
-// the cache. Caller is responsible for the techProbing in-flight guard.
-func (c *Config) probeAndCacheTechInfo(streamID string) {
-	sample, err := c.sessionManager.CaptureStreamSample(streamID, techProbeSampleBytes, techProbeCaptureTimeout)
+// runProbe executes prober and stores the outcome (success or failure) in the
+// cache. Callers are responsible for the techProbing in-flight guard.
+func runProbe(streamID string, prober func() (*StreamTechInfo, error)) {
+	info, err := prober()
 	if err != nil {
-		utils.DebugLog("Stream tech probe: sample capture failed for %s: %v", streamID, err)
-		cacheTechInfo(streamID, &StreamTechInfo{Error: err.Error()}, techProbeFailureTTL)
-		return
-	}
-
-	info, err := runFFprobeOnSample(sample)
-	if err != nil {
-		utils.DebugLog("Stream tech probe: ffprobe failed for %s: %v", streamID, err)
+		utils.DebugLog("Stream tech probe: failed for %s: %v", streamID, err)
 		cacheTechInfo(streamID, &StreamTechInfo{Error: err.Error()}, techProbeFailureTTL)
 		return
 	}
@@ -182,14 +253,75 @@ func (c *Config) probeAndCacheTechInfo(streamID string) {
 	cacheTechInfo(streamID, info, techProbeCacheTTL)
 }
 
-func cacheTechInfo(streamID string, info *StreamTechInfo, ttl time.Duration) {
-	techCacheMu.Lock()
-	techCache[streamID] = &techCacheEntry{info: info, expiresAt: time.Now().Add(ttl)}
-	techCacheMu.Unlock()
+// warmLiveTechInfo probes an active live stream by sampling bytes already
+// flowing through its shared upstream connection.
+func (c *Config) warmLiveTechInfo(streamID string) {
+	if !c.StreamTechProbeEnabled || !ffprobeAvailable() {
+		return
+	}
+	warmTechInfo(streamID, func() (*StreamTechInfo, error) { return c.probeLiveSample(streamID) })
+}
+
+// forceProbeLiveTechInfo is the blocking counterpart of warmLiveTechInfo.
+func (c *Config) forceProbeLiveTechInfo(streamID string) *StreamTechInfo {
+	if !c.StreamTechProbeEnabled || !ffprobeAvailable() {
+		return nil
+	}
+	return forceProbeTechInfo(streamID, func() (*StreamTechInfo, error) { return c.probeLiveSample(streamID) })
+}
+
+func (c *Config) probeLiveSample(streamID string) (*StreamTechInfo, error) {
+	sample, err := c.sessionManager.CaptureStreamSample(streamID, techProbeSampleBytes, techProbeCaptureTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return runFFprobe(techProbeFFprobeTimeout, func(ctx context.Context) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, "ffprobe",
+			"-v", "error",
+			"-print_format", "json",
+			"-show_streams",
+			"-show_format",
+			"-analyzeduration", "3000000",
+			"-probesize", strconv.Itoa(len(sample)),
+			"-i", "pipe:0",
+		)
+		cmd.Stdin = bytes.NewReader(sample)
+		return cmd
+	})
+}
+
+// warmVODTechInfo probes a fully-downloaded cached VOD/series file directly —
+// no sampling needed and no network involved at all.
+func (c *Config) warmVODTechInfo(streamID, filePath string) {
+	if !c.StreamTechProbeEnabled || !ffprobeAvailable() {
+		return
+	}
+	warmTechInfo(streamID, func() (*StreamTechInfo, error) { return probeLocalFile(filePath) })
+}
+
+// forceProbeVODTechInfo is the blocking counterpart of warmVODTechInfo.
+func (c *Config) forceProbeVODTechInfo(streamID, filePath string) *StreamTechInfo {
+	if !c.StreamTechProbeEnabled || !ffprobeAvailable() {
+		return nil
+	}
+	return forceProbeTechInfo(streamID, func() (*StreamTechInfo, error) { return probeLocalFile(filePath) })
+}
+
+func probeLocalFile(filePath string) (*StreamTechInfo, error) {
+	return runFFprobe(techProbeFFprobeTimeout, func(ctx context.Context) *exec.Cmd {
+		return exec.CommandContext(ctx, "ffprobe",
+			"-v", "error",
+			"-print_format", "json",
+			"-show_streams",
+			"-show_format",
+			"-i", filePath,
+		)
+	})
 }
 
 // ffprobeStream is the subset of ffprobe's per-stream JSON output we care about.
 type ffprobeStream struct {
+	Index        int    `json:"index"`
 	CodecType    string `json:"codec_type"`
 	CodecName    string `json:"codec_name"`
 	Width        int    `json:"width"`
@@ -207,6 +339,7 @@ type ffprobeStream struct {
 type ffprobeFormat struct {
 	FormatName string `json:"format_name"`
 	BitRate    string `json:"bit_rate"`
+	Duration   string `json:"duration"`
 }
 
 type ffprobeOutput struct {
@@ -214,23 +347,13 @@ type ffprobeOutput struct {
 	Format  ffprobeFormat   `json:"format"`
 }
 
-// runFFprobeOnSample feeds sample to ffprobe over stdin (no network access
-// needed by ffprobe itself) and extracts the first video and audio stream's
-// technical characteristics.
-func runFFprobeOnSample(sample []byte) (*StreamTechInfo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), techProbeFFprobeTimeout)
+// runFFprobe runs the *exec.Cmd built by build (stdout/stderr wired up by this
+// function) under a bounded timeout and parses its JSON output.
+func runFFprobe(timeout time.Duration, build func(ctx context.Context) *exec.Cmd) (*StreamTechInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "ffprobe",
-		"-v", "error",
-		"-print_format", "json",
-		"-show_streams",
-		"-show_format",
-		"-analyzeduration", "3000000",
-		"-probesize", strconv.Itoa(len(sample)),
-		"-i", "pipe:0",
-	)
-	cmd.Stdin = bytes.NewReader(sample)
+	cmd := build(ctx)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -243,12 +366,22 @@ func runFFprobeOnSample(sample []byte) (*StreamTechInfo, error) {
 		return nil, fmt.Errorf("ffprobe: %s", msg)
 	}
 
+	return parseFFprobeJSON(stdout.Bytes())
+}
+
+// parseFFprobeJSON extracts the first video stream and every audio stream's
+// technical characteristics from ffprobe's JSON output.
+func parseFFprobeJSON(data []byte) (*StreamTechInfo, error) {
 	var out ffprobeOutput
-	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, fmt.Errorf("ffprobe: failed to parse output: %w", err)
 	}
 
 	info := &StreamTechInfo{ContainerFormat: out.Format.FormatName}
+	if d, err := strconv.ParseFloat(out.Format.Duration, 64); err == nil && d > 0 {
+		info.DurationSec = d
+	}
+
 	for _, s := range out.Streams {
 		switch s.CodecType {
 		case "video":
@@ -264,21 +397,28 @@ func runFFprobeOnSample(sample []byte) (*StreamTechInfo, error) {
 			}
 			info.VideoBitrateKbps = kbps(s.BitRate)
 		case "audio":
-			if info.AudioCodec != "" {
-				continue // keep the first audio stream only
+			track := AudioTrackInfo{
+				Index:       s.Index,
+				Codec:       s.CodecName,
+				Channels:    s.Channels,
+				Language:    s.Tags.Language,
+				BitrateKbps: kbps(s.BitRate),
 			}
-			info.AudioCodec = s.CodecName
-			info.AudioChannels = s.Channels
 			if sr, err := strconv.Atoi(s.SampleRate); err == nil {
-				info.AudioSampleRate = sr
+				track.SampleRateHz = sr
 			}
-			info.AudioLanguage = s.Tags.Language
-			info.AudioBitrateKbps = kbps(s.BitRate)
+			info.AudioTracks = append(info.AudioTracks, track)
+		case "subtitle":
+			info.SubtitleTracks = append(info.SubtitleTracks, SubtitleTrackInfo{
+				Index:    s.Index,
+				Codec:    s.CodecName,
+				Language: s.Tags.Language,
+			})
 		}
 	}
 
-	if info.VideoCodec == "" && info.AudioCodec == "" {
-		return nil, fmt.Errorf("ffprobe: no audio or video stream detected in sample")
+	if info.VideoCodec == "" && len(info.AudioTracks) == 0 {
+		return nil, fmt.Errorf("ffprobe: no audio or video stream detected")
 	}
 	return info, nil
 }

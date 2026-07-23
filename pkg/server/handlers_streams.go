@@ -49,10 +49,11 @@ type activeStreamItem struct {
 // attempted, falling back to the raw stream ID as a last resort so the field
 // is never blank.
 //
-// For live streams (only stream type with a persistent shared upstream
-// connection to sample from) this also attaches any cached technical info and
-// kicks off a background refresh if the cache is stale/missing — never blocks
-// the caller.
+// This also attaches any cached technical info and kicks off a background
+// refresh if the cache is stale/missing — never blocks the caller. Live
+// streams are probed by sampling their shared upstream connection; VOD/series
+// are probed straight off the local file once fully cached (see
+// vodCacheFilePath).
 func (c *Config) buildActiveStreamItem(s *types.StreamSession) activeStreamItem {
 	viewers := s.GetViewers()
 	names := make([]string, 0, len(viewers))
@@ -84,14 +85,37 @@ func (c *Config) buildActiveStreamItem(s *types.StreamSession) activeStreamItem 
 		Duration:     dur.String(),
 	}
 
-	if s.StreamType == "live" {
+	switch s.StreamType {
+	case "live":
 		if info, ok := getCachedTechInfo(s.StreamID); ok {
 			item.Tech = info
 		}
-		c.warmTechInfo(s.StreamID)
+		c.warmLiveTechInfo(s.StreamID)
+	case "movie", "series":
+		if filePath, ok := c.vodCacheFilePath(s.StreamID); ok {
+			if info, ok := getCachedTechInfo(s.StreamID); ok {
+				item.Tech = info
+			}
+			c.warmVODTechInfo(s.StreamID, filePath)
+		}
 	}
 
 	return item
+}
+
+// vodCacheFilePath returns the local file path for a stream's cache entry if
+// it is fully downloaded and ready to probe. Cheap no-op (single map lookup
+// via the DB layer, no ffprobe work) when the feature is disabled or the item
+// isn't cached yet/at all.
+func (c *Config) vodCacheFilePath(streamID string) (string, bool) {
+	if !c.StreamTechProbeEnabled || c.db == nil {
+		return "", false
+	}
+	entry, err := c.db.GetVODCache(streamID)
+	if err != nil || entry == nil || strings.ToLower(entry.Status) != "ready" {
+		return "", false
+	}
+	return entry.FilePath, true
 }
 
 // getAllStreams returns information about all active streams
@@ -150,9 +174,18 @@ func (c *Config) getStreamInfo(ctx *gin.Context) {
 	item := c.buildActiveStreamItem(stream)
 	// This is a single-item lookup, so it's worth the extra latency of a
 	// synchronous probe when there's nothing usable cached yet.
-	if stream.StreamType == "live" && item.Tech == nil {
-		if info := c.forceProbeTechInfo(stream.StreamID); info != nil {
-			item.Tech = info
+	if item.Tech == nil {
+		switch stream.StreamType {
+		case "live":
+			if info := c.forceProbeLiveTechInfo(stream.StreamID); info != nil {
+				item.Tech = info
+			}
+		case "movie", "series":
+			if filePath, ok := c.vodCacheFilePath(stream.StreamID); ok {
+				if info := c.forceProbeVODTechInfo(stream.StreamID, filePath); info != nil {
+					item.Tech = info
+				}
+			}
 		}
 	}
 

@@ -178,22 +178,29 @@ Everything above is machine-readable JSON (`{success, data, error}`) and is enou
 
 #### Technical stream info (`tech`)
 
-When `STREAM_TECH_PROBE_ENABLED=true`, active **live** stream items (from `/api/internal/streams`, `/streams/:streamid`, and `/status`) include a `tech` object with best-effort audio/video characteristics detected by `ffprobe`:
+When `STREAM_TECH_PROBE_ENABLED=true`, active stream items (from `/api/internal/streams`, `/streams/:streamid`, `/status`, and the Discord `/status` command's text output) include a `tech` object with best-effort audio/video/subtitle characteristics detected by `ffprobe`:
 
 ```json
 "tech": {
   "container_format": "mpegts",
   "video_codec": "h264", "width": 1920, "height": 1080, "frame_rate": 25, "video_bitrate_kbps": 4500,
-  "audio_codec": "aac", "audio_channels": 2, "audio_sample_rate_hz": 48000, "audio_language": "eng", "audio_bitrate_kbps": 128,
+  "audio_tracks": [
+    {"index": 1, "codec": "aac", "channels": 2, "sample_rate_hz": 48000, "language": "eng", "bitrate_kbps": 128},
+    {"index": 2, "codec": "aac", "channels": 2, "sample_rate_hz": 48000, "language": "spa", "bitrate_kbps": 128}
+  ],
+  "subtitle_tracks": [
+    {"index": 3, "codec": "dvb_subtitle", "language": "eng"}
+  ],
   "probed_at": "2026-01-01T12:00:00Z"
 }
 ```
 
 Notes:
-- **No extra provider connection**: the probe samples bytes already flowing through that channel's existing shared upstream connection (the same one serving its viewers) — it never opens an additional connection to your provider, so it's safe even on strict concurrent-connection limits.
+- **No extra provider connection either way**:
+  - **Live channels** are probed from a small sample of bytes already flowing through that channel's existing shared upstream connection (the same one serving its viewers) — never an additional connection to your provider, so it's safe even on strict concurrent-connection limits. A channel is only probed once it has at least one real viewer (there's nothing to sample otherwise).
+  - **Cached VOD/series** (once fully downloaded — see [VOD Caching](#vod-caching)) are probed directly off the local file, no network involved at all. Because the whole file is available (unlike a short live sample), this reliably lists every audio and subtitle track the file contains, not just whichever one happened to be in the sample; `duration_sec` is also included. VOD/series that aren't cached (or aren't fully downloaded yet) have no `tech`.
 - Requires `ffprobe` in the runtime image (bundled in the official Docker image; if you build your own, install `ffmpeg`).
-- Off by default. A channel is only probed once it has at least one real viewer (there's nothing to sample otherwise), results are cached for a few minutes per channel, and refreshed lazily on the next request after the cache goes stale — list endpoints never block waiting on a probe, but `/streams/:streamid` (a single-item lookup) will wait briefly for a fresh result if nothing is cached yet.
-- VOD/series aren't covered: they're served per-request rather than through a persistent shared connection, so there's no ongoing byte stream to sample without opening a dedicated one.
+- Off by default. Results are cached for a few minutes per stream and refreshed lazily on the next request after the cache goes stale — list endpoints never block waiting on a probe, but `/streams/:streamid` (a single-item lookup) will wait briefly for a fresh result if nothing is cached yet.
 
 ### Authentication
 

@@ -33,6 +33,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
@@ -254,19 +256,36 @@ func joinHeadline(code, meaning string) string {
 	}
 }
 
+// safePunct are ASCII punctuation characters that carry no meaning to ffmpeg's
+// filter parser. Deliberately absent: ':' (option separator), '\” (string
+// delimiter), '\\' (escape), '%' (expansion), and '[' / ']' (filter pad labels).
+const safePunct = " .,()-_/?!&+#@"
+
+// safeSymbols are decorative characters common in IPTV channel names that DejaVu
+// Sans is known to contain. Symbols outside this set are dropped rather than
+// passed through, because a glyph the font lacks renders as a placeholder box
+// (most emoji, e.g. the football and clapperboard, do exactly that) which looks
+// broken on screen.
+const safeSymbols = "★☆●○◆◇■□▲▼▶◀•·|"
+
 // sanitize reduces text to characters that are safe inside an ffmpeg filter
-// string. drawtext treats ':', '\”, '\\' and '%' as syntax, so rather than
-// escaping them (which varies by ffmpeg version) they are dropped entirely.
-// This applies to operator-authored catalog text as much as to provider strings.
+// string and that the font can actually draw. Unsafe characters are dropped
+// rather than escaped, since escaping rules vary between ffmpeg versions. This
+// applies to operator-authored catalog text as much as to provider strings.
+//
+// Letters, digits and combining marks from any script are kept: channel names
+// are routinely non-ASCII ("Télé Monte Carlo", "Спорт 1"), and DejaVu Sans
+// covers Latin, Cyrillic and Greek, so stripping them would mangle real names.
 func sanitize(s string) string {
 	var b strings.Builder
 	lastSpace := false
 	for _, r := range s {
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case unicode.IsLetter(r), unicode.IsDigit(r), unicode.IsMark(r),
+			strings.ContainsRune(safeSymbols, r):
 			b.WriteRune(r)
 			lastSpace = false
-		case strings.ContainsRune(" .,()-/?!", r):
+		case strings.ContainsRune(safePunct, r):
 			if r == ' ' {
 				if lastSpace || b.Len() == 0 {
 					continue
@@ -277,8 +296,8 @@ func sanitize(s string) string {
 			}
 			b.WriteRune(r)
 		default:
-			// Anything else (including ':', quotes, '%', emoji and other
-			// non-ASCII) becomes a space so words do not run together.
+			// Filter syntax, control characters, and glyphs the font lacks all
+			// collapse to a space so words do not run together.
 			if !lastSpace && b.Len() > 0 {
 				b.WriteRune(' ')
 				lastSpace = true
@@ -286,15 +305,24 @@ func sanitize(s string) string {
 		}
 	}
 
-	out := strings.TrimSpace(b.String())
-	if len(out) > maxFieldChars {
-		out = strings.TrimSpace(out[:maxFieldChars])
+	// Truncate by runes, not bytes: slicing a multi-byte character in half would
+	// emit invalid UTF-8 into the filter string.
+	return truncateRunes(strings.TrimSpace(b.String()), maxFieldChars)
+}
+
+// truncateRunes limits s to n characters, counting runes rather than bytes.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
 	}
-	return out
+	return strings.TrimSpace(string(r[:n]))
 }
 
 // wrap splits text into at most maxLines lines of at most width characters,
-// breaking on spaces. The final line is ellipsised if text remains.
+// breaking on spaces. The final line is ellipsised if text remains. Widths are
+// measured in runes so accented and Cyrillic names wrap at the right place
+// instead of far too early.
 func wrap(text string, width, maxLines int) []string {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -310,7 +338,7 @@ func wrap(text string, width, maxLines int) []string {
 		if current != "" {
 			candidate = current + " " + w
 		}
-		if len(candidate) <= width {
+		if utf8.RuneCountInString(candidate) <= width {
 			current = candidate
 			continue
 		}
@@ -323,10 +351,7 @@ func wrap(text string, width, maxLines int) []string {
 			return ellipsise(lines, width)
 		}
 		// A single word longer than the width would loop forever otherwise.
-		if len(w) > width {
-			w = w[:width]
-		}
-		current = w
+		current = truncateRunes(w, width)
 	}
 
 	if current != "" && len(lines) < maxLines {
@@ -337,17 +362,15 @@ func wrap(text string, width, maxLines int) []string {
 	return lines
 }
 
-// ellipsise marks the last line as truncated.
+// ellipsise marks the last line as truncated, making room for the ellipsis so
+// the line still fits. Measured in runes, like wrap.
 func ellipsise(lines []string, width int) []string {
 	if len(lines) == 0 {
 		return lines
 	}
 	last := lines[len(lines)-1]
-	if len(last)+3 > width {
-		trim := len(last) + 3 - width
-		if trim < len(last) {
-			last = strings.TrimSpace(last[:len(last)-trim])
-		}
+	if utf8.RuneCountInString(last)+3 > width && width > 3 {
+		last = truncateRunes(last, width-3)
 	}
 	lines[len(lines)-1] = last + "..."
 	return lines

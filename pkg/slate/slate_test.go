@@ -21,6 +21,7 @@ package slate
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // TestSanitizeStripsFilterSyntax is the security-relevant case: characters that
@@ -68,8 +69,72 @@ func TestSanitize(t *testing.T) {
 
 func TestSanitizeTruncatesLongInput(t *testing.T) {
 	got := sanitize(strings.Repeat("a", maxFieldChars*2))
-	if len(got) > maxFieldChars {
-		t.Fatalf("sanitize returned %d chars, want <= %d", len(got), maxFieldChars)
+	if utf8.RuneCountInString(got) > maxFieldChars {
+		t.Fatalf("sanitize returned %d chars, want <= %d", utf8.RuneCountInString(got), maxFieldChars)
+	}
+}
+
+// TestSanitizeKeepsInternationalNames guards against mangling real channel
+// names. DejaVu Sans covers Latin, Cyrillic and Greek, so stripping non-ASCII
+// letters would turn "Télé Monte Carlo" into "T l Monte Carlo".
+func TestSanitizeKeepsInternationalNames(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"accented latin", "Télé Monte Carlo", "Télé Monte Carlo"},
+		{"cyrillic", "Спорт 1", "Спорт 1"},
+		{"greek", "ΕΡΤ 1", "ΕΡΤ 1"},
+		{"turkish dotted i", "Kanal İstanbul", "Kanal İstanbul"},
+		{"decorative star", "NL ★ Sport 1", "NL ★ Sport 1"},
+		{"plus sign", "Canal+ Sport", "Canal+ Sport"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitize(tc.in); got != tc.want {
+				t.Fatalf("sanitize(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSanitizeDropsUnrenderableEmoji: the font has no glyph for these, and
+// drawtext would draw a placeholder box, which looks broken on screen.
+func TestSanitizeDropsUnrenderableEmoji(t *testing.T) {
+	for _, in := range []string{"🎬 Movies HD", "⚽ Sports", "📺 Channel 4"} {
+		got := sanitize(in)
+		for _, r := range got {
+			if r > 0xFFFF {
+				t.Fatalf("sanitize(%q) = %q, kept astral rune %U", in, got, r)
+			}
+		}
+		if got == "" {
+			t.Fatalf("sanitize(%q) stripped the whole name", in)
+		}
+	}
+}
+
+// TestSanitizeProducesValidUTF8 guards the rune-vs-byte truncation bug that
+// allowing non-ASCII would otherwise introduce.
+func TestSanitizeProducesValidUTF8(t *testing.T) {
+	// Multi-byte runes that straddle the truncation boundary.
+	if got := sanitize(strings.Repeat("é", maxFieldChars*2)); !utf8.ValidString(got) {
+		t.Fatalf("sanitize produced invalid UTF-8: %q", got)
+	}
+	if got := sanitize(strings.Repeat("Ы", maxFieldChars+3)); !utf8.ValidString(got) {
+		t.Fatalf("sanitize produced invalid UTF-8: %q", got)
+	}
+}
+
+// TestWrapCountsRunesNotBytes: a Cyrillic line is twice as many bytes as runes,
+// so byte-based wrapping would break it at half the intended width.
+func TestWrapCountsRunesNotBytes(t *testing.T) {
+	line := "Спорт Спорт" // 11 runes, 20 bytes
+	got := wrap(line, 12, 2)
+	if len(got) != 1 {
+		t.Fatalf("wrap(%q, 12) = %#v, want a single line (11 runes fits)", line, got)
+	}
+	for _, l := range got {
+		if !utf8.ValidString(l) {
+			t.Fatalf("wrap produced invalid UTF-8: %q", l)
+		}
 	}
 }
 

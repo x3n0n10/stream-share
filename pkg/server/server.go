@@ -470,7 +470,7 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 			if ext == "" {
 				ext = ".mp4"
 			}
-			_ = c.db.TouchVODCache(idRaw)
+			c.touchVODCache(idRaw)
 			var ct string
 			switch ext {
 			case ".ts":
@@ -587,7 +587,7 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 				} else {
 					ct = "video/mp4"
 				}
-				_ = c.db.TouchVODCache(streamIDRaw)
+				c.touchVODCache(streamIDRaw)
 				serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
 				return
 			}

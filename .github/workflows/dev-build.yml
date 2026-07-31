@@ -43,6 +43,7 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             --file .Dockerfile.goreleaser \
+            --label org.opencontainers.image.source=https://github.com/x3n0n10/stream-share \
             --tag ghcr.io/x3n0n10/stream-share:dev-${{ env.SHORT_SHA }}-amd64 \
             ${{ inputs.push_image && '--push' || '--load' }} \
             .
@@ -53,6 +54,7 @@ jobs:
           docker buildx build \
             --platform linux/arm64 \
             --file .Dockerfile.goreleaser \
+            --label org.opencontainers.image.source=https://github.com/x3n0n10/stream-share \
             --tag ghcr.io/x3n0n10/stream-share:dev-${{ env.SHORT_SHA }}-arm64 \
             ${{ inputs.push_image && '--push' || '--load' }} \
             .

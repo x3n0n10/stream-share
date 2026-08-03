@@ -38,6 +38,10 @@ GLUETUN_API_KEY="${GLUETUN_API_KEY:-}"
 GLUETUN_STATUS_PATH="${GLUETUN_STATUS_PATH:-/v1/vpn/status}"
 
 # --- behaviour ---------------------------------------------------------------
+# CHECK_TIMES is the single schedule for hitting the provider: each run forces a
+# fresh probe (which also refreshes stream-share's /healthz). When this watchdog
+# is running, leave stream-share's own HEALTHCHECK_TIMES empty so the provider
+# isn't probed twice on two schedules for the same information.
 CHECK_TIMES="${CHECK_TIMES:-04:00,16:00}"       # local times to run, comma-separated HH:MM
 MAX_RECONNECTS="${MAX_RECONNECTS:-5}"           # give up after this many server switches
 RECONNECT_TIMEOUT="${RECONNECT_TIMEOUT:-45}"    # per-cycle budget (seconds) to reach a usable IP

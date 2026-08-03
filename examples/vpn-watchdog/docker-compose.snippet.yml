@@ -39,7 +39,13 @@ services:
       # ... your usual stream-share settings (see the main docker-compose.yml) ...
       HEALTHCHECK_ENABLED: "true"
       HEALTHCHECK_STREAM_ID: "12345"       # a real live channel id from your provider
-      HEALTHCHECK_TIMES: "04:00,16:00"     # keeps docker health meaningful on its own
+      # Leave HEALTHCHECK_TIMES EMPTY when running the watchdog below: the watchdog
+      # forces a fresh probe on its own schedule (CHECK_TIMES) via the internal API,
+      # and that probe also refreshes /healthz — so a second self-probe schedule
+      # here would just hit the provider twice for the same information. Set it only
+      # if you want docker/monitoring health refreshed more often than the watchdog
+      # runs, or if you run WITHOUT a watchdog.
+      HEALTHCHECK_TIMES: ""
       INTERNAL_API_KEY: "change-me"        # the watchdog authenticates with this
     restart: unless-stopped
 

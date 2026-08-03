@@ -73,10 +73,12 @@ services:
     volumes:
       - ./examples/vpn-watchdog/watchdog.sh:/watchdog.sh:ro
     entrypoint: ["sh", "/watchdog.sh"]
+    # Optionally wait for stream-share to be up before starting probes:
+    depends_on:
+      stream-share:
+        condition: service_healthy
     restart: unless-stopped
 
-# Alternative signal source: instead of calling /api/internal/health, a watchdog
-# can read the container's Docker health status (set by the image's HEALTHCHECK)
-# via `docker inspect --format '{{.State.Health.Status}}' <container>`. That needs
-# the Docker socket mounted into the watchdog and is coarser (healthy/unhealthy
-# with no 456-vs-other distinction), so the HTTP endpoint above is preferred.
+# Note: the watchdog uses /api/internal/health (provider/VPN health). Do NOT use
+# the container's Docker health status as the block signal — that reflects
+# readiness (is stream-share up?), not whether the provider is blocking the IP.

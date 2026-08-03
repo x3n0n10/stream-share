@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -103,16 +104,6 @@ func (h *healthState) snapshotLocked() healthSnapshot {
 	return snap
 }
 
-// cachedHealth returns the last known result without probing.
-func (c *Config) cachedHealth() healthSnapshot {
-	if c.health == nil {
-		return healthSnapshot{Status: healthStatusDisabled}
-	}
-	c.health.mu.Lock()
-	defer c.health.mu.Unlock()
-	return c.health.snapshotLocked()
-}
-
 // probeHealth runs one real provider probe and updates the cache, returning the
 // resulting snapshot. It respects HealthCheckMinIntervalSeconds: when called
 // again within that window (or while a probe is already running) it skips the
@@ -188,12 +179,18 @@ func (c *Config) healthProbeURL() (*url.URL, error) {
 	return url.Parse(raw)
 }
 
-// healthz is the cache-only endpoint the Docker HEALTHCHECK polls. It never
-// contacts the provider, so it is safe to call frequently. When the feature is
-// disabled it always reports healthy, so the image's HEALTHCHECK is a no-op for
-// deployments that do not use it.
+// healthz is the container readiness endpoint the Docker HEALTHCHECK polls. It
+// returns 200 once startup has completed (the ready flag set at the end of
+// Serve) and 503 before then. It reflects only whether THIS service is up —
+// never provider/VPN state — so it is safe to gate compose startup ordering on
+// (`depends_on: condition: service_healthy`). Provider/VPN health lives on the
+// authenticated /api/internal/health endpoint instead.
 func (c *Config) healthz(ctx *gin.Context) {
-	c.writeHealth(ctx, c.cachedHealth())
+	if atomic.LoadInt32(&c.ready) == 1 {
+		ctx.JSON(http.StatusOK, gin.H{"status": "ready"})
+		return
+	}
+	ctx.JSON(http.StatusServiceUnavailable, gin.H{"status": "starting"})
 }
 
 // healthProbe forces a fresh provider probe (rate-limited) and returns the

@@ -19,11 +19,36 @@
 package server
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/lucasduport/stream-share/pkg/config"
 )
+
+func TestHealthzReportsReadiness(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c := &Config{ProxyConfig: &config.ProxyConfig{}}
+
+	call := func() int {
+		w := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(w)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		c.healthz(ctx)
+		return w.Code
+	}
+
+	if got := call(); got != http.StatusServiceUnavailable {
+		t.Errorf("before ready: got %d, want 503", got)
+	}
+	atomic.StoreInt32(&c.ready, 1)
+	if got := call(); got != http.StatusOK {
+		t.Errorf("after ready: got %d, want 200", got)
+	}
+}
 
 func TestIsBlockedStatus(t *testing.T) {
 	cases := []struct {

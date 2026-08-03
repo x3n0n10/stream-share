@@ -170,6 +170,9 @@ StreamShare exposes an internal API (used by the Discord bot and admin tools) un
 | `/api/internal/history/:username?hours=N&limit=N&offset=N` | GET | Watch history for one user, paginated | X-API-Key |
 | `/api/internal/instance` | GET | Identify this deployment (name, uptime, enabled features) — for labeling data in a multi-instance dashboard | X-API-Key |
 | `/api/internal/stats?hours=N` | GET | Aggregate dashboard stats: live activity plus historical totals and top titles/users over the window (default 24h, `hours=0` for all-time) | X-API-Key |
+| `/api/internal/health` | GET | Force a fresh provider health probe (rate-limited) and return the verdict — see [Provider Health Check](#provider-health-check) | X-API-Key |
+
+There is also an unauthenticated **`GET /healthz`** at the server root (not under `/api/internal`) that reports the last cached health verdict without contacting the provider. It drives the Docker `HEALTHCHECK`; see [Provider Health Check](#provider-health-check).
 
 ### Building a dashboard
 
@@ -403,6 +406,52 @@ Notes:
 - A missing or malformed file logs a warning and falls back to the built-in messages. Bad JSON never stops streams from being served.
 - Text is sanitised before rendering, so characters that are meaningful to ffmpeg (`:`, quotes, `\`, `%`) are dropped from the picture. Keep messages plain.
 - Long messages wrap to two lines and are then truncated — aim for something short enough to read at a glance from the sofa.
+
+---
+
+## Provider Health Check
+
+VPN egress IPs get blocked. If you run stream-share behind a VPN (e.g. gluetun), the provider will periodically ban whatever server you're on and answer live streams with **HTTP 456** until you reconnect onto a fresh IP — sometimes after a few tries. This feature lets stream-share *detect* that state so an external service can reconnect the VPN automatically.
+
+**stream-share only reports health. It never touches the VPN.** Reconnecting is deliberately left to a separate service, so this app has no dependency on gluetun or any particular VPN. That separation is the whole design:
+
+- **stream-share** probes one configured live channel and classifies the result — `healthy` (provider served video), `blocked` (the `456` you care about), or `error` (outage, bad probe channel, transport failure). It's the right place to do this: it already holds the provider credentials and, when it shares the VPN's network namespace, its probe egresses through the exact IP a real viewer would use.
+- **The Docker `HEALTHCHECK`** turns that into a first-class container signal, so `docker ps` shows `unhealthy` when you're blocked and any autoheal/monitoring tooling can see it.
+- **Your watchdog** (a separate container) reads the signal and, only on `blocked`, cycles the VPN onto a new server and re-checks in a loop. A complete example — including a gluetun control-API script — is in [`examples/vpn-watchdog/`](examples/vpn-watchdog/).
+
+### How it works
+
+1. On a schedule (`HEALTHCHECK_TIMES`, e.g. `04:00,16:00` in the container's `TZ`) and once at startup, stream-share dials the probe channel with the same headers a real player uses and records the verdict. It reuses the provider-error classification from the error-slate feature, so a `456` is surfaced as `blocked` even though a live viewer would normally see a slate instead.
+2. `GET /healthz` (unauthenticated, at the server root) returns that **cached** verdict — it never contacts the provider — so the frequent Docker `HEALTHCHECK` stays cheap and can't itself get your IP blocked. It returns HTTP `200` when healthy (or the feature is off) and `503` when blocked, errored, or stale.
+3. `GET /api/internal/health` (authenticated) **forces** a fresh probe and returns the new verdict. A watchdog calls this right after reconnecting the VPN, to test whether the new IP is accepted. It's rate-limited by `HEALTHCHECK_MIN_INTERVAL_SECONDS` so it can't be used to hammer the provider.
+
+Probing is intentionally sparing — twice a day plus a handful of checks during an actual reconnect — because aggressive probing is exactly what gets an IP blocked faster.
+
+The JSON body of both endpoints looks like:
+
+```json
+{ "status": "blocked", "code": "456", "detail": "provider returned 456: egress IP is blocked",
+  "checked_at": "2026-08-03T04:00:07Z", "age_seconds": 12, "stale": false }
+```
+
+`status` is one of `healthy`, `blocked`, `error`, `unknown` (no probe yet), or `disabled`.
+
+### Configuration
+
+| Env var | Default | Description |
+|---|---|---|
+| `HEALTHCHECK_ENABLED` | `false` | Turn the provider health probe on |
+| `HEALTHCHECK_STREAM_ID` | — | Live channel id to probe, as it appears in a stream URL (e.g. `12345` or `12345.ts`). Pick a stable, always-on channel |
+| `HEALTHCHECK_TIMES` | — | Comma-separated local `HH:MM` times to self-probe, e.g. `04:00,16:00`. Empty = probe only at startup and on demand, leaving all scheduling to the watchdog |
+| `HEALTHCHECK_TIMEOUT_SECONDS` | `15` | Per-probe timeout |
+| `HEALTHCHECK_MIN_INTERVAL_SECONDS` | `60` | Minimum spacing between real probes; caps how often the force-probe endpoint hits the provider |
+| `HEALTHCHECK_STALE_MINUTES` | `0` | If > 0, `/healthz` reports unhealthy when the last probe is older than this (catches a stalled probe loop) |
+
+The image ships a `HEALTHCHECK` that polls `/healthz`. When `HEALTHCHECK_ENABLED` is unset the endpoint always reports healthy, so the check is a harmless no-op for deployments that don't use this feature.
+
+### Closing the loop (external watchdog)
+
+See [`examples/vpn-watchdog/`](examples/vpn-watchdog/) for a ready-to-adapt script and compose snippet. The recommended topology runs stream-share with `network_mode: "service:gluetun"` so its provider traffic egresses through the VPN, and runs the watchdog in the same namespace so it can reach gluetun's control server on `http://localhost:8000`. The watchdog reads `/api/internal/health`, and on `blocked` issues gluetun's `PUT /v1/openvpn/status` stop/start to rotate onto a new server, repeating until the provider accepts the new IP or an attempt budget is exhausted. stream-share and gluetun never reference each other — the watchdog is the only piece that knows about both.
 
 ---
 

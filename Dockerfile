@@ -42,5 +42,16 @@ USER appuser
 # Expose port (adjust if your app uses a specific port; based on code, it might be 8080 or similar)
 EXPOSE 8080
 
+# Container health reflects whether the IPTV provider is reachable and not
+# blocking our egress IP (HTTP 456, typical after the VPN server's IP is banned).
+# /healthz is cache-only — it reports the last probe result and never contacts
+# the provider itself — so this frequent check stays cheap and cannot get our IP
+# blocked. When HEALTHCHECK_ENABLED is unset the endpoint always reports healthy,
+# making this a no-op for deployments that don't use the feature. Acting on an
+# unhealthy result (reconnecting the VPN) is intentionally left to an external
+# service; see docker-compose.yml.
+HEALTHCHECK --interval=1m --timeout=10s --start-period=30s --retries=3 \
+  CMD wget -q -O /dev/null "http://127.0.0.1:${PORT:-8080}/healthz" || exit 1
+
 # Set entrypoint
 ENTRYPOINT ["/stream-share"]

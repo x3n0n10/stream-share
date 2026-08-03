@@ -153,6 +153,14 @@ It supports:
 			// Dashboard
 			InstanceName:           viper.GetString("instance-name"),
 			StreamTechProbeEnabled: viper.GetBool("stream-tech-probe-enabled"),
+
+			// Provider health check (reporting only; VPN reconnect is external)
+			HealthCheckEnabled:            viper.GetBool("healthcheck-enabled"),
+			HealthCheckStreamID:           viper.GetString("healthcheck-stream-id"),
+			HealthCheckTimes:              viper.GetString("healthcheck-times"),
+			HealthCheckTimeoutSeconds:     viper.GetInt("healthcheck-timeout-seconds"),
+			HealthCheckMinIntervalSeconds: viper.GetInt("healthcheck-min-interval-seconds"),
+			HealthCheckStaleMinutes:       viper.GetInt("healthcheck-stale-minutes"),
 		}
 
 		// Use port if advertised port is not specified

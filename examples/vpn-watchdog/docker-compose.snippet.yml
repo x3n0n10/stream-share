@@ -1,0 +1,67 @@
+# Example: wiring stream-share behind gluetun with an external VPN watchdog.
+#
+# This is a SNIPPET to fold into your own stack, not a standalone file. It shows
+# the recommended topology:
+#
+#   gluetun          -> holds the VPN tunnel and a control server on :8000
+#   stream-share     -> shares gluetun's network namespace, reports provider health
+#   vpn-watchdog     -> reads that health and reconnects gluetun when we're blocked
+#
+# stream-share never references gluetun; only the watchdog knows about the VPN.
+
+services:
+  gluetun:
+    image: qmcgaw/gluetun
+    cap_add:
+      - NET_ADMIN
+    environment:
+      # ... your VPN provider settings ...
+      # Enable the control server the watchdog talks to:
+      HTTP_CONTROL_SERVER_ADDRESS: ":8000"
+      # If you protect the control server with an API key, set the same value as
+      # GLUETUN_APIKEY on the watchdog below.
+    ports:
+      - "8080:8080"   # publish stream-share's port HERE (it shares this netns)
+    restart: unless-stopped
+
+  stream-share:
+    image: ghcr.io/x3n0n10/stream-share:latest
+    # Share gluetun's network stack so all provider traffic egresses via the VPN.
+    # Note: with network_mode you cannot also set `ports:` here — publish them on
+    # the gluetun service (above) instead.
+    network_mode: "service:gluetun"
+    depends_on:
+      - gluetun
+    environment:
+      # ... your usual stream-share settings (see the main docker-compose.yml) ...
+      HEALTHCHECK_ENABLED: "true"
+      HEALTHCHECK_STREAM_ID: "12345"       # a real live channel id from your provider
+      HEALTHCHECK_TIMES: "04:00,16:00"     # keeps docker health meaningful on its own
+      INTERNAL_API_KEY: "change-me"        # the watchdog authenticates with this
+    restart: unless-stopped
+
+  vpn-watchdog:
+    image: alpine/curl
+    depends_on:
+      - stream-share
+    # Reach both stream-share and gluetun's control server on localhost by sharing
+    # the same network namespace.
+    network_mode: "service:gluetun"
+    environment:
+      STREAM_SHARE_URL: "http://localhost:8080"
+      INTERNAL_API_KEY: "change-me"        # must match stream-share's INTERNAL_API_KEY
+      GLUETUN_URL: "http://localhost:8000"
+      GLUETUN_APIKEY: ""                   # set if the control server requires auth
+      CHECK_TIMES: "04:00,16:00"
+      MAX_RECONNECTS: "5"
+      SETTLE_SECONDS: "20"
+    volumes:
+      - ./examples/vpn-watchdog/watchdog.sh:/watchdog.sh:ro
+    entrypoint: ["sh", "/watchdog.sh"]
+    restart: unless-stopped
+
+# Alternative signal source: instead of calling /api/internal/health, a watchdog
+# can read the container's Docker health status (set by the image's HEALTHCHECK)
+# via `docker inspect --format '{{.State.Health.Status}}' <container>`. That needs
+# the Docker socket mounted into the watchdog and is coarser (healthy/unhealthy
+# with no 456-vs-other distinction), so the HTTP endpoint above is preferred.

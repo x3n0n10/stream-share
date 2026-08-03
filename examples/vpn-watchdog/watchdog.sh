@@ -71,11 +71,19 @@ $1
 EOF
 }
 
-# provider_status forces a fresh probe and prints the stream-share verdict:
-# healthy | blocked | error | unknown | disabled.
-provider_status() {
-  body="$(curl -fsS -H "X-API-Key: $INTERNAL_API_KEY" "$STREAM_SHARE_URL/api/internal/health" 2>/dev/null)"
-  json_str "$body" status
+# fetch_health forces a fresh probe and sets HEALTH_STATUS / HEALTH_DETAIL from
+# the JSON body. Verdicts: healthy | blocked | error | unknown | disabled.
+#
+# IMPORTANT: /api/internal/health returns HTTP 503 when the provider is blocked
+# or errored — that 503 is the intended "unhealthy" signal for Docker's
+# HEALTHCHECK, and the real verdict is in the body. So read the body regardless
+# of status code: do NOT pass curl -f here, or it discards the body exactly when
+# it says "blocked". (A genuine connection failure yields an empty body, which we
+# treat as unreachable.)
+fetch_health() {
+  body="$(curl -sS -H "X-API-Key: $INTERNAL_API_KEY" "$STREAM_SHARE_URL/api/internal/health" 2>/dev/null)"
+  HEALTH_STATUS="$(json_str "$body" status)"
+  HEALTH_DETAIL="$(json_str "$body" detail)"
 }
 
 # vpn_status / public_ip read the gluetun control server.
@@ -136,15 +144,16 @@ cycle_vpn() {
 
 # heal probes once and, while blocked, cycles the VPN up to MAX_RECONNECTS times.
 heal() {
-  status="$(provider_status)"
-  log "Provider status: ${status:-<unreachable>}"
+  fetch_health
+  log "Provider status: ${HEALTH_STATUS:-<unreachable>}${HEALTH_DETAIL:+ ($HEALTH_DETAIL)}"
 
-  case "$status" in
+  case "$HEALTH_STATUS" in
     healthy|disabled) return 0 ;;
     blocked) ;;                         # the only case we act on
     *)
       # error / unknown / unreachable: reconnecting will not reliably help
-      # (provider outage, bad probe channel, stream-share still starting).
+      # (provider outage, bad probe channel, stream-share still starting). The
+      # detail above says which — e.g. an empty HEALTHCHECK_STREAM_ID.
       log "Not a block; leaving the VPN alone."
       return 0
       ;;
@@ -154,15 +163,15 @@ heal() {
   while [ "$i" -le "$MAX_RECONNECTS" ]; do
     log "Blocked — reconnect attempt $i/$MAX_RECONNECTS"
     cycle_vpn
-    status="$(provider_status)"
-    if [ "$status" = "healthy" ]; then
+    fetch_health
+    if [ "$HEALTH_STATUS" = "healthy" ]; then
       log "Recovered after $i reconnect(s)."
       return 0
     fi
-    log "Still ${status:-<unreachable>} after attempt $i."
+    log "Still ${HEALTH_STATUS:-<unreachable>} after attempt $i."
     i=$((i + 1))
   done
-  log "Gave up after $MAX_RECONNECTS reconnects; provider still ${status:-<unreachable>}."
+  log "Gave up after $MAX_RECONNECTS reconnects; provider still ${HEALTH_STATUS:-<unreachable>}."
   return 1
 }
 

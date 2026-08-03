@@ -8,40 +8,45 @@
 # attempt budget runs out.
 #
 # It lives OUTSIDE stream-share on purpose, so that app has no dependency on any
-# VPN. Everything VPN-specific is here. This example targets gluetun's control
+# VPN. Everything VPN-specific is here. This example targets the gluetun control
 # server, but gluetun is just one option — swap cycle_vpn()/provider-independent
 # bits for whatever VPN you run.
 #
-# The gluetun control sequence here mirrors the stream-share-dashboard project's
-# reconnect logic: stop, confirm stopped, confirm traffic actually stopped
-# routing, start, confirm running, then poll until a usable public IP comes back
-# (gluetun can report "running" before it has re-resolved its IP).
+# The gluetun control sequence here mirrors the stream-share-dashboard reconnect
+# logic: stop, confirm stopped, confirm traffic actually stopped routing, start,
+# confirm running, then poll until a usable public IP comes back (gluetun can
+# report "running" before it has re-resolved its IP).
 #
 # Requirements: a POSIX shell and `curl` (both in the alpine/curl image used by
-# docker-compose.snippet.yml). It must be able to reach stream-share's internal
-# API (STREAM_SHARE_URL) and the VPN's control server (GLUETUN_URL).
+# docker-compose.snippet.yml). It must be able to reach the stream-share internal
+# API (STREAM_SHARE_URL) and the VPN control server (GLUETUN_URL).
+#
+# NOTE: this file must use LF line endings. CRLF (Windows) endings make a POSIX
+# shell fail with errors like `: not found` on blank lines and `elif unexpected`.
+# The repo enforces LF via .gitattributes; if you edited it on Windows, run
+# `sed -i 's/\r$//' watchdog.sh` (or `dos2unix watchdog.sh`).
 
 # --- stream-share ------------------------------------------------------------
 STREAM_SHARE_URL="${STREAM_SHARE_URL:-http://localhost:8080}"
-INTERNAL_API_KEY="${INTERNAL_API_KEY:?set INTERNAL_API_KEY to stream-share's key}"
+INTERNAL_API_KEY="${INTERNAL_API_KEY:?set INTERNAL_API_KEY to the stream-share internal API key}"
 
 # --- VPN control (gluetun example) -------------------------------------------
 GLUETUN_URL="${GLUETUN_URL:-http://localhost:8000}"
-# Auth: gluetun's control server supports HTTP Basic Auth or an API key,
+# Auth: the gluetun control server supports HTTP Basic Auth or an API key,
 # depending on its roles config. Set whichever matches; if both are set, Basic
 # Auth wins (a client maps to exactly one auth method).
 GLUETUN_USER="${GLUETUN_USER:-}"
 GLUETUN_PASSWORD="${GLUETUN_PASSWORD:-}"
 GLUETUN_API_KEY="${GLUETUN_API_KEY:-}"
-# /v1/vpn/status is gluetun's current unified status/start/stop endpoint (both
+# /v1/vpn/status is the current unified gluetun status/start/stop endpoint (both
 # OpenVPN and WireGuard). Override to /v1/openvpn/status for older gluetun.
 GLUETUN_STATUS_PATH="${GLUETUN_STATUS_PATH:-/v1/vpn/status}"
 
 # --- behaviour ---------------------------------------------------------------
 # CHECK_TIMES is the single schedule for hitting the provider: each run forces a
-# fresh probe (which also refreshes stream-share's /healthz). When this watchdog
-# is running, leave stream-share's own HEALTHCHECK_TIMES empty so the provider
-# isn't probed twice on two schedules for the same information.
+# fresh probe (which also refreshes the stream-share /healthz). When this watchdog
+# is running, leave the stream-share HEALTHCHECK_TIMES empty so the provider is
+# not probed twice on two schedules for the same information.
 CHECK_TIMES="${CHECK_TIMES:-04:00,16:00}"       # local times to run, comma-separated HH:MM
 MAX_RECONNECTS="${MAX_RECONNECTS:-5}"           # give up after this many server switches
 RECONNECT_TIMEOUT="${RECONNECT_TIMEOUT:-45}"    # per-cycle budget (seconds) to reach a usable IP
@@ -66,14 +71,14 @@ $1
 EOF
 }
 
-# provider_status forces a fresh probe and prints stream-share's verdict:
+# provider_status forces a fresh probe and prints the stream-share verdict:
 # healthy | blocked | error | unknown | disabled.
 provider_status() {
   body="$(curl -fsS -H "X-API-Key: $INTERNAL_API_KEY" "$STREAM_SHARE_URL/api/internal/health" 2>/dev/null)"
   json_str "$body" status
 }
 
-# vpn_status / public_ip read gluetun's control server.
+# vpn_status / public_ip read the gluetun control server.
 vpn_status() { json_str "$(gluetun_curl "$GLUETUN_URL$GLUETUN_STATUS_PATH" 2>/dev/null)" status; }
 public_ip() {
   body="$(gluetun_curl "$GLUETUN_URL/v1/publicip/ip" 2>/dev/null)" || return 1
@@ -95,7 +100,7 @@ wait_status() { # $1=desired $2=deadline_epoch
 
 # wait_disconnected waits until the public-IP probe starts failing, i.e. traffic
 # genuinely stopped routing through the tunnel. Bounded on its own budget: some
-# setups don't firewall non-VPN traffic, so this signal may never come — proceed
+# setups do not firewall non-VPN traffic, so this signal may never come — proceed
 # anyway rather than blocking the whole reconnect on it.
 wait_disconnected() {
   sub_deadline=$(( $(date +%s) + DISCONNECT_TIMEOUT ))
@@ -107,17 +112,17 @@ wait_disconnected() {
 
 # cycle_vpn reconnects the VPN and blocks until a usable public IP returns (or
 # the per-cycle budget expires). Reselecting a *different* server depends on the
-# VPN's own config allowing more than one — e.g. gluetun's SERVER_*/VPN_* vars.
+# VPN config allowing more than one — e.g. the gluetun SERVER_*/VPN_* vars.
 cycle_vpn() {
   deadline=$(( $(date +%s) + RECONNECT_TIMEOUT ))
   log "Cycling VPN (old IP: $(public_ip 2>/dev/null || echo '?'))"
 
   set_vpn stopped || log "warning: stop request failed"
-  wait_status stopped "$deadline" || log "warning: never confirmed 'stopped'"
+  wait_status stopped "$deadline" || log "warning: never confirmed stopped"
   wait_disconnected
 
   set_vpn running || log "warning: start request failed"
-  wait_status running "$deadline" || log "warning: never confirmed 'running'"
+  wait_status running "$deadline" || log "warning: never confirmed running"
 
   while [ "$(date +%s)" -lt "$deadline" ]; do
     if new_ip="$(public_ip)"; then
@@ -138,7 +143,7 @@ heal() {
     healthy|disabled) return 0 ;;
     blocked) ;;                         # the only case we act on
     *)
-      # error / unknown / unreachable: reconnecting won't reliably help
+      # error / unknown / unreachable: reconnecting will not reliably help
       # (provider outage, bad probe channel, stream-share still starting).
       log "Not a block; leaving the VPN alone."
       return 0

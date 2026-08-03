@@ -12,10 +12,10 @@
 # server, but gluetun is just one option — swap cycle_vpn()/provider-independent
 # bits for whatever VPN you run.
 #
-# The gluetun control sequence here mirrors the stream-share-dashboard reconnect
-# logic: stop, confirm stopped, confirm traffic actually stopped routing, start,
-# confirm running, then poll until a usable public IP comes back (gluetun can
-# report "running" before it has re-resolved its IP).
+# The gluetun control sequence is: stop, confirm stopped, start, confirm running.
+# Once gluetun reports "running" we assume the tunnel is back and re-run the
+# health check to decide whether the new server is unblocked — rather than
+# polling gluetun's public-IP endpoint.
 #
 # Requirements: a POSIX shell and `curl` (both in the alpine/curl image used by
 # docker-compose.snippet.yml). It must be able to reach the stream-share internal
@@ -49,8 +49,7 @@ GLUETUN_STATUS_PATH="${GLUETUN_STATUS_PATH:-/v1/vpn/status}"
 # not probed twice on two schedules for the same information.
 CHECK_TIMES="${CHECK_TIMES:-04:00,16:00}"       # local times to run, comma-separated HH:MM
 MAX_RECONNECTS="${MAX_RECONNECTS:-5}"           # give up after this many server switches
-RECONNECT_TIMEOUT="${RECONNECT_TIMEOUT:-45}"    # per-cycle budget (seconds) to reach a usable IP
-DISCONNECT_TIMEOUT="${DISCONNECT_TIMEOUT:-10}"  # max seconds to confirm the old tunnel actually dropped
+RECONNECT_TIMEOUT="${RECONNECT_TIMEOUT:-45}"    # per-cycle budget (seconds) to confirm stopped then running
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -106,40 +105,26 @@ wait_status() { # $1=desired $2=deadline_epoch
   return 1
 }
 
-# wait_disconnected waits until the public-IP probe starts failing, i.e. traffic
-# genuinely stopped routing through the tunnel. Bounded on its own budget: some
-# setups do not firewall non-VPN traffic, so this signal may never come — proceed
-# anyway rather than blocking the whole reconnect on it.
-wait_disconnected() {
-  sub_deadline=$(( $(date +%s) + DISCONNECT_TIMEOUT ))
-  while [ "$(date +%s)" -lt "$sub_deadline" ]; do
-    public_ip >/dev/null 2>&1 || return 0
-    sleep 1
-  done
-}
-
-# cycle_vpn reconnects the VPN and blocks until a usable public IP returns (or
-# the per-cycle budget expires). Reselecting a *different* server depends on the
-# VPN config allowing more than one — e.g. the gluetun SERVER_*/VPN_* vars.
+# cycle_vpn reconnects the VPN: stop, confirm stopped, start, confirm running.
+# Once gluetun reports "running" we treat the tunnel as back and return — the
+# caller re-runs the health check to judge whether the new server is unblocked,
+# so we do not poll the public-IP endpoint. Reselecting a *different* server
+# depends on the VPN config allowing more than one — e.g. the gluetun
+# SERVER_*/VPN_* vars. The public IP is fetched once, best-effort, only to log
+# which exit we landed on.
 cycle_vpn() {
   deadline=$(( $(date +%s) + RECONNECT_TIMEOUT ))
-  log "Cycling VPN (old IP: $(public_ip 2>/dev/null || echo '?'))"
+  log "Cycling VPN..."
 
   set_vpn stopped || log "warning: stop request failed"
   wait_status stopped "$deadline" || log "warning: never confirmed stopped"
-  wait_disconnected
 
   set_vpn running || log "warning: start request failed"
-  wait_status running "$deadline" || log "warning: never confirmed running"
-
-  while [ "$(date +%s)" -lt "$deadline" ]; do
-    if new_ip="$(public_ip)"; then
-      log "VPN back up (new IP: $new_ip)"
-      return 0
-    fi
-    sleep 1
-  done
-  log "warning: no usable public IP within ${RECONNECT_TIMEOUT}s"
+  if wait_status running "$deadline"; then
+    log "VPN reports running (IP: $(public_ip 2>/dev/null || echo '?'))."
+  else
+    log "warning: never confirmed running within ${RECONNECT_TIMEOUT}s."
+  fi
 }
 
 # heal probes once and, while blocked, cycles the VPN up to MAX_RECONNECTS times.

@@ -1,15 +1,18 @@
-# Example: wiring stream-share behind gluetun with an external VPN watchdog.
+# Example: wiring stream-share behind a VPN with an external watchdog.
 #
 # This is a SNIPPET to fold into your own stack, not a standalone file. It shows
 # the recommended topology:
 #
-#   gluetun          -> holds the VPN tunnel and a control server on :8000
-#   stream-share     -> shares gluetun's network namespace, reports provider health
-#   vpn-watchdog     -> reads that health and reconnects gluetun when we're blocked
+#   vpn              -> holds the VPN tunnel and a control server on :8000
+#   stream-share     -> shares the VPN's network namespace, reports provider health
+#   vpn-watchdog     -> reads that health and reconnects the VPN when we're blocked
 #
-# stream-share never references gluetun; only the watchdog knows about the VPN.
+# stream-share never references the VPN; only the watchdog knows about it. gluetun
+# is used below purely as a concrete example — any VPN with a controllable
+# reconnect works; adapt the watchdog's cycle_vpn() accordingly.
 
 services:
+  # Example VPN container: gluetun. Substitute your own if you use a different one.
   gluetun:
     image: qmcgaw/gluetun
     cap_add:
@@ -18,8 +21,8 @@ services:
       # ... your VPN provider settings ...
       # Enable the control server the watchdog talks to:
       HTTP_CONTROL_SERVER_ADDRESS: ":8000"
-      # If you protect the control server with an API key, set the same value as
-      # GLUETUN_APIKEY on the watchdog below.
+      # Protect it with EITHER an API key OR HTTP Basic Auth (gluetun's roles
+      # config), and set the matching GLUETUN_* vars on the watchdog below.
     ports:
       - "8080:8080"   # publish stream-share's port HERE (it shares this netns)
     restart: unless-stopped
@@ -51,10 +54,16 @@ services:
       STREAM_SHARE_URL: "http://localhost:8080"
       INTERNAL_API_KEY: "change-me"        # must match stream-share's INTERNAL_API_KEY
       GLUETUN_URL: "http://localhost:8000"
-      GLUETUN_APIKEY: ""                   # set if the control server requires auth
+      # Auth for gluetun's control server — set EITHER these two (Basic Auth) ...
+      GLUETUN_USER: ""
+      GLUETUN_PASSWORD: ""
+      # ... OR this (API key). If both are set, Basic Auth is used.
+      GLUETUN_API_KEY: ""
+      # Override only for older gluetun that lacks the unified endpoint:
+      # GLUETUN_STATUS_PATH: "/v1/openvpn/status"
       CHECK_TIMES: "04:00,16:00"
       MAX_RECONNECTS: "5"
-      SETTLE_SECONDS: "20"
+      RECONNECT_TIMEOUT: "45"              # per-cycle budget to reach a usable IP
     volumes:
       - ./examples/vpn-watchdog/watchdog.sh:/watchdog.sh:ro
     entrypoint: ["sh", "/watchdog.sh"]

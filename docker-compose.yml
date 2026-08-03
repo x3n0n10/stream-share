@@ -66,15 +66,18 @@ services:
       INSTANCE_NAME: ""                # Friendly name for this instance, returned by /api/internal/instance (defaults to hostname); useful when a dashboard combines several instances
       STREAM_TECH_PROBE_ENABLED: "false"  # Add audio/video technical info (codec, resolution, bitrate) to active live streams in the dashboard API. Samples bytes already flowing through the existing viewer connection (no extra provider connection); requires ffmpeg (bundled in this image).
 
-      # Provider health check — periodically probe one live channel so an external
-      # watchdog can tell when the provider is blocking our VPN egress IP (it
-      # returns HTTP 456). stream-share only REPORTS health here; reconnecting the
-      # VPN is intentionally left to a separate service (see the commented
-      # "vpn-watchdog" example at the bottom of this file), so this app carries no
-      # dependency on gluetun. The result is exposed at /healthz (which drives the
-      # Docker HEALTHCHECK) and at the authenticated /api/internal/health.
+      # Provider health check — only relevant when stream-share runs behind a VPN.
+      # It periodically probes one live channel so an external watchdog can tell
+      # when the provider is blocking our VPN egress IP (many Xtream providers
+      # answer with HTTP 456, but that code is non-standard and configurable
+      # below). stream-share only REPORTS health here; reconnecting the VPN is
+      # intentionally left to a separate service (see the commented "vpn-watchdog"
+      # example at the bottom of this file), so this app carries no dependency on
+      # any VPN. The result is exposed at /healthz (which drives the Docker
+      # HEALTHCHECK) and at the authenticated /api/internal/health.
       HEALTHCHECK_ENABLED: "false"          # Enable the provider health probe
       HEALTHCHECK_STREAM_ID: ""             # Live channel id to probe (as in a stream URL, e.g. "12345" or "12345.ts")
+      HEALTHCHECK_BLOCKED_CODES: "456"      # Comma-separated upstream status code(s) that mean "IP blocked" (report as "blocked" vs generic "error"); default 456 is just what most providers use
       HEALTHCHECK_TIMES: "04:00,16:00"      # Local (TZ) times to self-probe, comma-separated HH:MM. Empty = only probe at startup and on demand (leave scheduling to the watchdog).
       HEALTHCHECK_TIMEOUT_SECONDS: "15"     # Per-probe timeout
       HEALTHCHECK_MIN_INTERVAL_SECONDS: "60" # Minimum spacing between real probes; caps how often the force-probe endpoint can hit the provider
@@ -134,15 +137,16 @@ services:
     #  - "5432:5432"
     
   # --- Optional: VPN watchdog -------------------------------------------------
-  # stream-share reports provider health but never reconnects the VPN itself, so
-  # it stays independent of gluetun. A separate service closes the loop: it reads
-  # the health signal and, when the provider is blocking our egress IP (HTTP 456),
-  # cycles gluetun onto a new server and re-checks. A complete, self-contained
-  # example lives at examples/vpn-watchdog/ (script + compose snippet). Typical
-  # setup: stream-share shares gluetun's network namespace
+  # Only relevant if you run stream-share behind a VPN. stream-share reports
+  # provider health but never reconnects the VPN itself, so it stays independent
+  # of any VPN. A separate service closes the loop: it reads the health signal
+  # and, when the provider is blocking our egress IP, reconnects the VPN onto a
+  # new server and re-checks. A complete, self-contained example (using gluetun,
+  # but adaptable to any VPN) lives at examples/vpn-watchdog/ (script + compose
+  # snippet). Typical setup: stream-share shares the VPN's network namespace
   #   network_mode: "service:gluetun"
-  # so provider traffic egresses through the VPN and the watchdog can reach
-  # gluetun's control server on http://localhost:8000.
+  # so provider traffic egresses through the VPN and the watchdog can reach the
+  # VPN's control server on http://localhost:8000.
   # ----------------------------------------------------------------------------
 
   # Adminer for database management (optional)

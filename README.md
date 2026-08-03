@@ -411,17 +411,21 @@ Notes:
 
 ## Provider Health Check
 
-VPN egress IPs get blocked. If you run stream-share behind a VPN (e.g. gluetun), the provider will periodically ban whatever server you're on and answer live streams with **HTTP 456** until you reconnect onto a fresh IP — sometimes after a few tries. This feature lets stream-share *detect* that state so an external service can reconnect the VPN automatically.
+> **This feature is only relevant if you run stream-share behind a VPN.** Without a VPN there is no egress IP to rotate, so there is nothing for it to do — leave `HEALTHCHECK_ENABLED` off.
 
-**stream-share only reports health. It never touches the VPN.** Reconnecting is deliberately left to a separate service, so this app has no dependency on gluetun or any particular VPN. That separation is the whole design:
+VPN egress IPs get blocked. If you run stream-share behind a VPN, the provider will periodically ban whatever server you're on and refuse live streams until you reconnect onto a fresh IP — sometimes after a few tries. This feature lets stream-share *detect* that state so an external service can reconnect the VPN automatically.
 
-- **stream-share** probes one configured live channel and classifies the result — `healthy` (provider served video), `blocked` (the `456` you care about), or `error` (outage, bad probe channel, transport failure). It's the right place to do this: it already holds the provider credentials and, when it shares the VPN's network namespace, its probe egresses through the exact IP a real viewer would use.
+**stream-share only reports health. It never touches the VPN.** Reconnecting is deliberately left to a separate service, so this app has no dependency on any particular VPN — gluetun, WireGuard, OpenVPN, or anything else you choose. That separation is the whole design:
+
+- **stream-share** probes one configured live channel and classifies the result — `healthy` (provider served video), `blocked` (the provider refused with a code that means "your IP is banned"), or `error` (outage, bad probe channel, transport failure). It's the right place to do this: it already holds the provider credentials and, when it shares the VPN's network namespace, its probe egresses through the exact IP a real viewer would use.
 - **The Docker `HEALTHCHECK`** turns that into a first-class container signal, so `docker ps` shows `unhealthy` when you're blocked and any autoheal/monitoring tooling can see it.
-- **Your watchdog** (a separate container) reads the signal and, only on `blocked`, cycles the VPN onto a new server and re-checks in a loop. A complete example — including a gluetun control-API script — is in [`examples/vpn-watchdog/`](examples/vpn-watchdog/).
+- **Your watchdog** (a separate container, for whatever VPN you run) reads the signal and, only on `blocked`, reconnects the VPN onto a new server and re-checks in a loop. A complete example — using gluetun's control API but adaptable to any VPN — is in [`examples/vpn-watchdog/`](examples/vpn-watchdog/).
+
+Which upstream code counts as "blocked" is configurable via `HEALTHCHECK_BLOCKED_CODES`. Many Xtream providers use **HTTP 456**, which is the default, but that code is outside the HTTP standard and providers may use others — so it is not hardcoded.
 
 ### How it works
 
-1. On a schedule (`HEALTHCHECK_TIMES`, e.g. `04:00,16:00` in the container's `TZ`) and once at startup, stream-share dials the probe channel with the same headers a real player uses and records the verdict. It reuses the provider-error classification from the error-slate feature, so a `456` is surfaced as `blocked` even though a live viewer would normally see a slate instead.
+1. On a schedule (`HEALTHCHECK_TIMES`, e.g. `04:00,16:00` in the container's `TZ`) and once at startup, stream-share dials the probe channel with the same headers a real player uses and records the verdict. It reuses the provider-error classification from the error-slate feature, so a block code is surfaced as `blocked` even though a live viewer would normally see a slate instead.
 2. `GET /healthz` (unauthenticated, at the server root) returns that **cached** verdict — it never contacts the provider — so the frequent Docker `HEALTHCHECK` stays cheap and can't itself get your IP blocked. It returns HTTP `200` when healthy (or the feature is off) and `503` when blocked, errored, or stale.
 3. `GET /api/internal/health` (authenticated) **forces** a fresh probe and returns the new verdict. A watchdog calls this right after reconnecting the VPN, to test whether the new IP is accepted. It's rate-limited by `HEALTHCHECK_MIN_INTERVAL_SECONDS` so it can't be used to hammer the provider.
 
@@ -440,8 +444,9 @@ The JSON body of both endpoints looks like:
 
 | Env var | Default | Description |
 |---|---|---|
-| `HEALTHCHECK_ENABLED` | `false` | Turn the provider health probe on |
+| `HEALTHCHECK_ENABLED` | `false` | Turn the provider health probe on (only useful behind a VPN) |
 | `HEALTHCHECK_STREAM_ID` | — | Live channel id to probe, as it appears in a stream URL (e.g. `12345` or `12345.ts`). Pick a stable, always-on channel |
+| `HEALTHCHECK_BLOCKED_CODES` | `456` | Comma-separated upstream status code(s) that mean "IP blocked" (reported as `blocked` vs generic `error`). `456` is common but non-standard, so it's configurable |
 | `HEALTHCHECK_TIMES` | — | Comma-separated local `HH:MM` times to self-probe, e.g. `04:00,16:00`. Empty = probe only at startup and on demand, leaving all scheduling to the watchdog |
 | `HEALTHCHECK_TIMEOUT_SECONDS` | `15` | Per-probe timeout |
 | `HEALTHCHECK_MIN_INTERVAL_SECONDS` | `60` | Minimum spacing between real probes; caps how often the force-probe endpoint hits the provider |
@@ -451,7 +456,7 @@ The image ships a `HEALTHCHECK` that polls `/healthz`. When `HEALTHCHECK_ENABLED
 
 ### Closing the loop (external watchdog)
 
-See [`examples/vpn-watchdog/`](examples/vpn-watchdog/) for a ready-to-adapt script and compose snippet. The recommended topology runs stream-share with `network_mode: "service:gluetun"` so its provider traffic egresses through the VPN, and runs the watchdog in the same namespace so it can reach gluetun's control server on `http://localhost:8000`. The watchdog reads `/api/internal/health`, and on `blocked` issues gluetun's `PUT /v1/openvpn/status` stop/start to rotate onto a new server, repeating until the provider accepts the new IP or an attempt budget is exhausted. stream-share and gluetun never reference each other — the watchdog is the only piece that knows about both.
+See [`examples/vpn-watchdog/`](examples/vpn-watchdog/) for a ready-to-adapt script and compose snippet. It targets gluetun as a concrete example, but the pattern works for any VPN with a controllable reconnect — swap out the reconnect call. The recommended topology runs stream-share with `network_mode: "service:<vpn>"` so its provider traffic egresses through the VPN, and runs the watchdog in the same namespace so it can reach the VPN's control server on `http://localhost:8000`. The watchdog reads `/api/internal/health`, and on `blocked` reconnects the VPN onto a new server — for gluetun: stop, confirm the tunnel actually dropped, start, then poll until a usable public IP returns (supporting both API-key and Basic-Auth control servers) — repeating until the provider accepts the new IP or an attempt budget is exhausted. stream-share and the VPN never reference each other — the watchdog is the only piece that knows about both.
 
 ---
 

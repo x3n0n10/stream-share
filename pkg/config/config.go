@@ -135,6 +135,12 @@ type ProxyConfig struct {
 	// HealthCheckStreamID is the live channel id to probe (as it appears in a
 	// stream URL, e.g. "12345" or "12345.ts").
 	HealthCheckStreamID string
+	// HealthCheckBlockedCodes is a comma-separated list of upstream HTTP status
+	// codes that mean "our egress IP is blocked" (reported as "blocked" rather
+	// than a generic "error"). Defaults to "456", which many Xtream providers
+	// use — but that code is outside the HTTP standard, so providers may use
+	// others; hence it is configurable rather than hardcoded.
+	HealthCheckBlockedCodes string
 	// HealthCheckTimes is an optional comma-separated list of local wall-clock
 	// times (HH:MM, in the container's TZ) at which to self-probe, e.g.
 	// "04:00,16:00". When empty, probes only happen at startup and on demand via

@@ -157,6 +157,7 @@ It supports:
 			// Provider health check (reporting only; VPN reconnect is external)
 			HealthCheckEnabled:            viper.GetBool("healthcheck-enabled"),
 			HealthCheckStreamID:           viper.GetString("healthcheck-stream-id"),
+			HealthCheckBlockedCodes:       viper.GetString("healthcheck-blocked-codes"),
 			HealthCheckTimes:              viper.GetString("healthcheck-times"),
 			HealthCheckTimeoutSeconds:     viper.GetInt("healthcheck-timeout-seconds"),
 			HealthCheckMinIntervalSeconds: viper.GetInt("healthcheck-min-interval-seconds"),

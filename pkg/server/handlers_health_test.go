@@ -21,7 +21,34 @@ package server
 import (
 	"testing"
 	"time"
+
+	"github.com/lucasduport/stream-share/pkg/config"
 )
+
+func TestIsBlockedStatus(t *testing.T) {
+	cases := []struct {
+		name   string
+		codes  string
+		status int
+		want   bool
+	}{
+		{"default matches 456", "", 456, true},
+		{"default rejects 403", "", 403, false},
+		{"custom single", "455", 455, true},
+		{"custom rejects default when overridden", "455", 456, false},
+		{"custom list with spaces", " 456 , 461 ", 461, true},
+		{"zero status never blocked", "456", 0, false},
+		{"malformed entries ignored", "abc,456", 456, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Config{ProxyConfig: &config.ProxyConfig{HealthCheckBlockedCodes: tc.codes}}
+			if got := c.isBlockedStatus(tc.status); got != tc.want {
+				t.Errorf("isBlockedStatus(%d) with codes %q = %v, want %v", tc.status, tc.codes, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestParseDailyTimes(t *testing.T) {
 	got := parseDailyTimes(" 04:00, 16:00 ,,bad,25:00,12:61,08:30")

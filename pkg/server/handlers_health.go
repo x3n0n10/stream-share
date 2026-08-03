@@ -41,13 +41,34 @@ const (
 	healthStatusDisabled = "disabled" // the feature is turned off
 )
 
-// providerBlockedStatus is the HTTP status Xtream providers return when the
-// requesting IP is blocked. This is the signal an external watchdog keys on to
-// decide the VPN should reconnect onto a different server. It is deliberately the
-// only condition reported as "blocked": other failures (provider outage, a bad
-// probe channel id, transport errors) report as "error" so a watchdog does not
-// churn the VPN over problems reconnecting cannot fix.
-const providerBlockedStatus = 456
+// defaultBlockedCodes is the upstream status treated as "egress IP blocked" when
+// the operator hasn't set HEALTHCHECK_BLOCKED_CODES. Many Xtream providers return
+// 456, but it is outside the HTTP standard, so providers may use other codes —
+// hence a configurable default rather than a hardcoded constant.
+//
+// A "blocked" verdict is deliberately the only condition an external watchdog
+// should act on: other failures (provider outage, a bad probe channel id,
+// transport errors) report as "error" so the watchdog does not churn the VPN
+// over problems reconnecting cannot fix.
+const defaultBlockedCodes = "456"
+
+// isBlockedStatus reports whether an upstream status code is one the operator has
+// designated as "egress IP blocked".
+func (c *Config) isBlockedStatus(status int) bool {
+	if status <= 0 {
+		return false
+	}
+	spec := strings.TrimSpace(c.HealthCheckBlockedCodes)
+	if spec == "" {
+		spec = defaultBlockedCodes
+	}
+	for _, part := range strings.Split(spec, ",") {
+		if code, err := strconv.Atoi(strings.TrimSpace(part)); err == nil && code == status {
+			return true
+		}
+	}
+	return false
+}
 
 // healthState caches the most recent provider-probe result. /healthz reads it
 // cheaply (so the frequent Docker HEALTHCHECK never contacts the provider) while
@@ -148,8 +169,8 @@ func (c *Config) runProviderProbe() (status, code, detail string) {
 		return healthStatusHealthy, "", "provider served a live response"
 	}
 	code = uerr.Key
-	if uerr.StatusCode == providerBlockedStatus {
-		return healthStatusBlocked, code, "provider returned 456: egress IP is blocked"
+	if c.isBlockedStatus(uerr.StatusCode) {
+		return healthStatusBlocked, code, fmt.Sprintf("provider returned %d: egress IP is blocked", uerr.StatusCode)
 	}
 	return healthStatusError, code, uerr.Error()
 }

@@ -34,33 +34,45 @@ const (
 	reset       = "\x1b[0m"
 )
 
-// art is the plain-text (no color) rendering of the logo: three streams
-// converging into a single play signal.
-var art = [5]string{
-	`      \`,
-	`       \`,
-	`--------o>`,
-	`       /`,
-	`      /`,
-}
+// streams is the plain-text rendering of the three converging streams.
+// triangle is the play signal they feed into, sized to match the streams'
+// full height rather than a single-character glyph.
+var (
+	streams = [5]string{
+		`      \ `,
+		`       \`,
+		`--------`,
+		`       /`,
+		`      / `,
+	}
+	triangle = [5]string{
+		`   |\`,
+		`   | \`,
+		`   |   >`,
+		`   | /`,
+		`   |/`,
+	}
+)
 
 // Print writes an ASCII rendering of the StreamShare logo to stdout, colored
 // when stdout is a terminal and plain otherwise (e.g. when piped to a log
 // collector).
 func Print() {
-	if isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()) {
-		fmt.Println(green + art[0] + reset)
-		fmt.Println(green + art[1] + reset)
-		fmt.Println(green + art[2][:8] + brightGreen + art[2][8:] + reset + "  " + bold + "stream-share" + reset)
-		fmt.Println(green + art[3] + reset)
-		fmt.Println(green + art[4] + reset)
-		return
-	}
+	color := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
 
-	for i, line := range art {
-		if i == 2 {
-			fmt.Println(line + "  stream-share")
+	for i := range streams {
+		if !color {
+			line := streams[i] + triangle[i]
+			if i == 2 {
+				line += "  stream-share"
+			}
+			fmt.Println(line)
 			continue
+		}
+
+		line := green + streams[i] + reset + brightGreen + triangle[i] + reset
+		if i == 2 {
+			line += "  " + bold + "stream-share" + reset
 		}
 		fmt.Println(line)
 	}

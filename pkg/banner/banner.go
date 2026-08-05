@@ -25,34 +25,43 @@ import (
 	isatty "github.com/mattn/go-isatty"
 )
 
-// green/brightGreen match the StreamShare logo's converging-streams (#65c86b)
-// and play-signal (#9bf89f) colors.
+// green matches the StreamShare logo's stroke color (#65c86b).
 const (
-	green       = "\x1b[38;2;101;200;107m"
-	brightGreen = "\x1b[38;2;155;248;159m"
-	bold        = "\x1b[1m"
-	reset       = "\x1b[0m"
+	green = "\x1b[38;2;101;200;107m"
+	bold  = "\x1b[1m"
+	reset = "\x1b[0m"
 )
 
-// streams is the plain-text rendering of the three converging streams.
-// triangle is the play signal they feed into, sized to match the streams'
-// full height rather than a single-character glyph.
-var (
-	streams = [5]string{
-		`      \ `,
-		`       \`,
-		`--------`,
-		`       /`,
-		`      / `,
-	}
-	triangle = [5]string{
-		`   |\`,
-		`   | \`,
-		`   |   >`,
-		`   | /`,
-		`   |/`,
-	}
-)
+// art is the ASCII rendering of the StreamShare logo: the three converging
+// streams and play signal carved out of a solid mark as negative space.
+var art = [23]string{
+	`     @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@     `,
+	`   @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@   `,
+	` @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ `,
+	`@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@`,
+	`@@@@@@   @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@`,
+	`@@@@@@       @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@`,
+	`@@@@@@          @@@@@@@@  @@@@@@@@@@@@@@@@@`,
+	`@@@@@@@@@          @@@@@    @@@@@@@@@@@@@@@`,
+	`@@@@@@@@@@@@          @@       @@@@@@@@@@@@`,
+	`@@@@@@@@@@@@@@@                  @@@@@@@@@@`,
+	`@@@@@@                              @@@@@@@`,
+	`@@@@@@                                @@@@@`,
+	`@@@@@@                              @@@@@@@`,
+	`@@@@@@@@@@@@@@@                  @@@@@@@@@@`,
+	`@@@@@@@@@@@@          @@       @@@@@@@@@@@@`,
+	`@@@@@@@@@          @@@@@    @@@@@@@@@@@@@@@`,
+	`@@@@@@          @@@@@@@@  @@@@@@@@@@@@@@@@@`,
+	`@@@@@@       @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@`,
+	`@@@@@@   @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@`,
+	`@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@`,
+	` @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ `,
+	`   @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@   `,
+	`     @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@     `,
+}
+
+// label is centered under the mark.
+const label = "stream-share"
 
 // Print writes an ASCII rendering of the StreamShare logo to stdout, colored
 // when stdout is a terminal and plain otherwise (e.g. when piped to a log
@@ -60,20 +69,19 @@ var (
 func Print() {
 	color := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
 
-	for i := range streams {
-		if !color {
-			line := streams[i] + triangle[i]
-			if i == 2 {
-				line += "  stream-share"
-			}
+	for _, line := range art {
+		if color {
+			fmt.Println(green + line + reset)
+		} else {
 			fmt.Println(line)
-			continue
 		}
+	}
 
-		line := green + streams[i] + reset + brightGreen + triangle[i] + reset
-		if i == 2 {
-			line += "  " + bold + "stream-share" + reset
-		}
-		fmt.Println(line)
+	pad := (len(art[0]) - len(label)) / 2
+	padded := fmt.Sprintf("%*s%s", pad, "", label)
+	if color {
+		fmt.Println(bold + padded + reset)
+	} else {
+		fmt.Println(padded)
 	}
 }

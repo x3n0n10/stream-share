@@ -61,6 +61,14 @@ func (b *Bot) handleHistory(s *discordgo.Session, m *discordgo.MessageCreate, us
 		return
 	}
 	mp, _ := data.(map[string]interface{})
+	// /history/:username resolves an IP alias into display_name (LDAP usernames
+	// pass through unchanged) — prefer it for the title so an aliased viewer
+	// doesn't show up by raw IP here while everywhere else shows the alias.
+	if username != "" {
+		if dn, ok := mp["display_name"].(string); ok && strings.TrimSpace(dn) != "" {
+			title = "📜 Watch History — " + dn
+		}
+	}
 	text := ""
 	if s, ok := mp["text"].(string); ok {
 		text = strings.TrimSpace(s)

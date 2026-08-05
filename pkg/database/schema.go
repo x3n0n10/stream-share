@@ -120,6 +120,21 @@ func (m *DBManager) initSchema() error {
 		return fmt.Errorf("failed to add epg_channel_id to stream_names: %w", err)
 	}
 
+	// ip_aliases lets a friendly name be assigned to a client IP address — useful
+	// when LDAP is disabled, since every viewer is then identified by raw IP
+	// (see resolveRequestUsername) rather than a login name. One alias per IP.
+	if _, err := m.db.Exec(`
+        CREATE TABLE IF NOT EXISTS ip_aliases (
+            ip_address TEXT PRIMARY KEY,
+            alias      TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    `); err != nil {
+		utils.ErrorLog("Failed to create ip_aliases table: %v", err)
+		return fmt.Errorf("failed to create ip_aliases table: %w", err)
+	}
+
 	utils.InfoLog("Database schema initialized successfully")
 	return nil
 }

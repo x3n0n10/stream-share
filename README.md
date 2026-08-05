@@ -174,6 +174,7 @@ StreamShare exposes an internal API (used by the Discord bot and admin tools) un
 | `/api/internal/ip-aliases` | GET | List all configured IP -> alias mappings | X-API-Key |
 | `/api/internal/ip-aliases` | POST | Create or replace the alias for an IP address — body `{"ip_address": "...", "alias": "..."}` | X-API-Key |
 | `/api/internal/ip-aliases/delete/:ip` | POST | Remove the alias for an IP address | X-API-Key |
+| `/api/internal/ip-aliases/resolve/:alias` | GET | Resolve an alias back to its IP address (case-insensitive) | X-API-Key |
 
 There is also an unauthenticated **`GET /healthz`** at the server root (not under `/api/internal`) that reports container **readiness** — `200` once the service has finished starting and is listening, `503`/refused before then. It drives the Docker `HEALTHCHECK`; see [Container Health & Startup Ordering](#container-health--startup-ordering). (This is separate from provider/VPN health, which is on `/api/internal/health` above.)
 
@@ -199,7 +200,11 @@ curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   https://streamshare.example.com/api/internal/ip-aliases
 ```
 
-Every endpoint that surfaces a viewer identity then includes a resolved `display_name` alongside the raw one — e.g. `streams`/`status` return `viewers: [{"id": "192.168.1.42", "display_name": "Living Room TV"}]` instead of a bare string list, `users` adds a top-level `display_name`, and `history`'s per-entry `username` is joined by a `display_name`. The raw `id`/`username` (IP or LDAP username) is always still there too — that's the real identity used for lookups (e.g. `GET /users/:username`, `GET /history/:username`); the alias is display-only. One alias per IP: posting again for the same `ip_address` replaces the existing alias rather than adding a second one. This also flows into the Discord `/status` and `/history` text output, so aliases show up there too.
+Every endpoint that surfaces a viewer identity then includes a resolved `display_name` alongside the raw one — e.g. `streams`/`status` return `viewers: [{"id": "192.168.1.42", "display_name": "Living Room TV"}]` instead of a bare string list, `users` adds a top-level `display_name`, and `history`'s per-entry `username` is joined by a `display_name`. The raw `id`/`username` (IP or LDAP username) is always still there too — that's the real identity used for lookups (e.g. `GET /users/:username`, `GET /history/:username`); the alias is display-only. One alias per IP: posting again for the same `ip_address` replaces the existing alias rather than adding a second one. Aliases are also unique (case-insensitively) across IPs, so they double as a reverse lookup — `GET /ip-aliases/resolve/:alias` — used by Discord's `/history alias:` option to look a viewer up by their friendly name instead of typing out the IP.
+
+This also flows into Discord:
+- `/status`'s viewer list shows `Alias (raw IP)` when an alias is set (or just the raw identifier when it isn't), so you always see both at a glance.
+- `/history` accepts either `username` (raw IP or LDAP username) or `alias` — not both — to drill into one viewer's timeline; the embed title shows the resolved alias either way.
 
 #### Technical stream info (`tech`)
 

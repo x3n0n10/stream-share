@@ -19,6 +19,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -110,12 +111,43 @@ func (c *Config) upsertIPAlias(ctx *gin.Context) {
 		return
 	}
 	if err := c.db.UpsertIPAlias(ip, alias); err != nil {
+		if errors.Is(err, database.ErrIPAliasInUse) {
+			ctx.JSON(http.StatusConflict, types.APIResponse{Success: false, Error: err.Error()})
+			return
+		}
 		utils.ErrorLog("Failed to save IP alias for %s: %v", ip, err)
 		ctx.JSON(http.StatusInternalServerError, types.APIResponse{Success: false, Error: "Failed to save alias: " + err.Error()})
 		return
 	}
 
 	utils.InfoLog("IP alias set: %s -> %s", ip, alias)
+	ctx.JSON(http.StatusOK, types.APIResponse{Success: true, Data: database.IPAlias{IPAddress: ip, Alias: alias}})
+}
+
+// resolveIPAlias GET /api/internal/ip-aliases/resolve/:alias — looks up the IP
+// address an alias was assigned to (case-insensitive). Used by the Discord bot
+// to let admins look up a viewer by the friendly name they gave it instead of
+// the raw IP.
+func (c *Config) resolveIPAlias(ctx *gin.Context) {
+	alias := strings.TrimSpace(ctx.Param("alias"))
+	if alias == "" {
+		ctx.JSON(http.StatusBadRequest, types.APIResponse{Success: false, Error: "alias is required"})
+		return
+	}
+	if c.db == nil {
+		ctx.JSON(http.StatusInternalServerError, types.APIResponse{Success: false, Error: "Database not initialized"})
+		return
+	}
+	ip, found, err := c.db.GetIPByAlias(alias)
+	if err != nil {
+		utils.ErrorLog("Failed to resolve IP alias %q: %v", alias, err)
+		ctx.JSON(http.StatusInternalServerError, types.APIResponse{Success: false, Error: "Failed to resolve alias: " + err.Error()})
+		return
+	}
+	if !found {
+		ctx.JSON(http.StatusNotFound, types.APIResponse{Success: false, Error: fmt.Sprintf("no IP address found for alias %q", alias)})
+		return
+	}
 	ctx.JSON(http.StatusOK, types.APIResponse{Success: true, Data: database.IPAlias{IPAddress: ip, Alias: alias}})
 }
 

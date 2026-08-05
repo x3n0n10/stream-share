@@ -108,6 +108,7 @@ func (c *Config) setupInternalAPI(r *gin.Engine) {
 	api.GET("/ip-aliases", c.listIPAliases)
 	api.POST("/ip-aliases", c.upsertIPAlias)
 	api.POST("/ip-aliases/delete/:ip", c.deleteIPAlias)
+	api.GET("/ip-aliases/resolve/:alias", c.resolveIPAlias)
 
 	// Debug endpoint to verify API is working
 	api.GET("/ping", func(ctx *gin.Context) {

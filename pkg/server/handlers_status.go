@@ -79,7 +79,12 @@ func (c *Config) statusSummary(ctx *gin.Context) {
 			}
 			viewerNames := make([]string, 0, len(it.Viewers))
 			for _, v := range it.Viewers {
-				viewerNames = append(viewerNames, v.DisplayName)
+				if v.DisplayName != "" && v.DisplayName != v.ID {
+					// Aliased: show the friendly name with the raw IP alongside it.
+					viewerNames = append(viewerNames, fmt.Sprintf("%s (%s)", v.DisplayName, v.ID))
+				} else {
+					viewerNames = append(viewerNames, v.ID)
+				}
 			}
 			fmt.Fprintf(&b, "- %s%s [%s] — %d viewer(s): %s (since %s)\n",
 				title, epgSuffix, it.StreamType, it.ViewerCount, strings.Join(viewerNames, ", "), it.Duration,

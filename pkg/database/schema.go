@@ -135,6 +135,15 @@ func (m *DBManager) initSchema() error {
 		return fmt.Errorf("failed to create ip_aliases table: %w", err)
 	}
 
+	// Aliases are also looked up in reverse (alias -> IP, e.g. Discord's
+	// /history alias option), so they must be unique too, not just per-IP.
+	// Case-insensitive so "Living Room" and "living room" can't coexist as
+	// two different aliases pointing at two different IPs.
+	if _, err := m.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ip_aliases_alias_ci ON ip_aliases (LOWER(alias))`); err != nil {
+		utils.ErrorLog("Failed to create ip_aliases alias index: %v", err)
+		return fmt.Errorf("failed to create ip_aliases alias index: %w", err)
+	}
+
 	utils.InfoLog("Database schema initialized successfully")
 	return nil
 }

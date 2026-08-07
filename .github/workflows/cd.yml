@@ -33,6 +33,9 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
+          # GITHUB_TOKEN is minted per run and never expires, unlike the PAT this
+          # replaced. The job already grants packages: write, which is what it
+          # needs to push to GHCR.
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run GoReleaser

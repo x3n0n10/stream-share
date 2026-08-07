@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -39,11 +40,19 @@ import (
 	"github.com/lucasduport/stream-share/pkg/database"
 	"github.com/lucasduport/stream-share/pkg/discord"
 	"github.com/lucasduport/stream-share/pkg/session"
+	"github.com/lucasduport/stream-share/pkg/slate"
 	"github.com/lucasduport/stream-share/pkg/utils"
+	xtreamapi "github.com/lucasduport/stream-share/pkg/xtream"
 	uuid "github.com/satori/go.uuid"
 
 	"github.com/gin-gonic/gin"
 )
+
+// upstreamReadyTimeout bounds how long a viewer waits for the provider to
+// answer before we give up and return a status. It has to stay tight: this sits
+// in the channel-zap path, so a generous value makes every start feel sluggish
+// when the provider is slow.
+const upstreamReadyTimeout = 8 * time.Second
 
 var defaultProxyfiedM3UPath = filepath.Join(os.TempDir(), uuid.NewV4().String()+".stream-share.m3u")
 var endpointAntiColision = strings.Split(uuid.NewV4().String(), "-")[0]
@@ -66,6 +75,18 @@ type Config struct {
 	catchupManager *catchup.Manager
 	db             *database.DBManager
 	discordBot     *discord.Bot
+
+	// startTime records process start, used to report uptime via the API
+	startTime time.Time
+
+	// ready flips to 1 once startup completes and the server is about to listen,
+	// so /healthz can report container readiness for `depends_on:
+	// condition: service_healthy` ordering. Accessed atomically (0 = starting).
+	ready int32
+
+	// health caches the latest provider health-probe result. Non-nil only when
+	// HealthCheckEnabled; nil means /healthz reports "disabled".
+	health *healthState
 
 	// inProgressDownloads guards against concurrent duplicate fetchToFile goroutines
 	inProgressDownloads sync.Map
@@ -108,6 +129,23 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		sessionManager:       nil,
 		db:                   nil,
 		discordBot:           nil,
+		startTime:            time.Now(),
+	}
+
+	// Provider health check: report-only. Reconnecting the VPN on a bad result is
+	// left to an external watchdog (see docker-compose.yml), so nothing here knows
+	// about gluetun or any VPN.
+	if config.HealthCheckEnabled {
+		if config.HealthCheckTimeoutSeconds <= 0 {
+			config.HealthCheckTimeoutSeconds = 15
+		}
+		if config.HealthCheckMinIntervalSeconds <= 0 {
+			config.HealthCheckMinIntervalSeconds = 60
+		}
+		if strings.TrimSpace(config.HealthCheckStreamID) == "" {
+			utils.WarnLog("Health check enabled but HEALTHCHECK_STREAM_ID is empty; probes will report 'error'")
+		}
+		serverConfig.health = &healthState{}
 	}
 
 	// Force PostgreSQL initialization (sqlite removed)
@@ -120,6 +158,9 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	serverConfig.sessionManager = session.NewSessionManager(db)
 	serverConfig.sessionManager.SetNameResolver(serverConfig.resolveStreamName)
 	utils.InfoLog("Session manager initialized with database connection")
+
+	// Seed in-memory name indices from DB so names are available before the first API call.
+	serverConfig.warmChannelIndexFromDB()
 
 	// After session manager init
 	if serverConfig.sessionManager == nil {
@@ -167,6 +208,43 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		}
 	}
 
+	// Error slate: show viewers why a live stream failed instead of dropping the
+	// connection, and keep retrying the provider behind the slate. Requires
+	// ffmpeg; when it is missing the generator reports unavailable and the
+	// session manager silently keeps the previous drop behavior, so older images
+	// are unaffected by the default being on.
+	if serverConfig.sessionManager != nil {
+		slateRetry := 10
+		if config.ErrorSlateRetryMaxMinutes > 0 {
+			slateRetry = config.ErrorSlateRetryMaxMinutes
+		}
+		serverConfig.sessionManager.SetErrorCatalog(session.LoadCatalog(config.ErrorSlateMessagesFile))
+
+		if config.ErrorSlateEnabled {
+			gen := slate.New(utils.SlateCacheDir())
+			serverConfig.sessionManager.SetSlateProvider(gen)
+			serverConfig.sessionManager.SetSlateRetryMax(time.Duration(slateRetry) * time.Minute)
+			if gen.Available() {
+				utils.InfoLog("Bootstrap: error slates ENABLED (retry up to %d minute(s) before giving up)", slateRetry)
+			} else {
+				utils.WarnLog("Bootstrap: error slates requested but ffmpeg is unavailable; streams will drop on upstream failure as before")
+			}
+		} else {
+			utils.InfoLog("Bootstrap: error slates DISABLED (set ERROR_SLATE_ENABLED=true to show upstream errors on screen)")
+		}
+	}
+
+	// The LDAP cache trades revocation latency for a large drop in directory
+	// traffic, so make the active window visible at startup rather than leaving
+	// an operator to infer it.
+	if config.LDAPEnabled {
+		if mins := config.LDAPAuthCacheMinutes; mins > 0 {
+			utils.InfoLog("Bootstrap: LDAP auth cache ENABLED (successful logins trusted for %d minute(s); disabled accounts keep working until their entry expires)", mins)
+		} else {
+			utils.InfoLog("Bootstrap: LDAP auth cache DISABLED — every request re-checks the directory")
+		}
+	}
+
 	// Configure session parameters from configuration. Each setter is only
 	// applied when the value is > 0, leaving the manager defaults otherwise.
 	if serverConfig.sessionManager != nil {
@@ -186,6 +264,16 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 			serverConfig.sessionManager.SetVODCacheStaleAge(time.Duration(hours) * time.Hour)
 			utils.InfoLog("VOD cache stale age set to %d hours", hours)
 		}
+		// Prune the on-disk slate clip cache too (clips are regenerated on demand).
+		// This runs regardless of ErrorSlateEnabled so leftover clips are cleaned up
+		// even after the feature is turned off. 0 = default 7 days; negative disables.
+		if hours := config.SlateCacheStaleHours; hours >= 0 {
+			if hours == 0 {
+				hours = 168
+			}
+			serverConfig.sessionManager.SetSlateCache(utils.SlateCacheDir(), time.Duration(hours)*time.Hour)
+			utils.InfoLog("Slate cache stale age set to %d hours", hours)
+		}
 		if secs := config.MultiplexStallTimeoutSeconds; secs > 0 {
 			serverConfig.sessionManager.SetClientStallTimeout(time.Duration(secs) * time.Second)
 			utils.InfoLog("Multiplex client stall timeout set to %d seconds", secs)
@@ -202,7 +290,9 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		apiURL := config.DiscordAPIURL
 		if apiURL == "" {
 			protocol := "http"
-			if config.HTTPS { protocol = "https" }
+			if config.HTTPS {
+				protocol = "https"
+			}
 			hostPart := fmt.Sprintf("%s:%d", config.HostConfig.Hostname, config.HostConfig.Port)
 			if config.ReverseProxyEnabled {
 				// Behind reverse proxy: use hostname without port by default
@@ -256,16 +346,16 @@ func cleanDebugAPIFiles(cacheDir string) {
 	}
 }
 
-// Serve the stream-share api
 // Serve boots the HTTP server, internal API, routes, and optional Discord bot.
 func (c *Config) Serve() error {
 	utils.InfoLog("[stream-share] Server is starting...")
 
-	if c.db != nil && c.db.IsInitialized() {
+	switch {
+	case c.db != nil && c.db.IsInitialized():
 		utils.InfoLog("Bootstrap: Database is initialized and connected")
-	} else if c.db != nil {
+	case c.db != nil:
 		utils.WarnLog("Bootstrap: Database manager present but not initialized")
-	} else {
+	default:
 		utils.WarnLog("Bootstrap: Database is DISABLED (no persistence)")
 	}
 
@@ -286,6 +376,30 @@ func (c *Config) Serve() error {
 	// resolve names immediately, without waiting for a player to request the list.
 	go c.warmChannelNameIndex()
 
+	// Start background goroutine to keep apiChannelIndex fresh.
+	nameRefreshStop := make(chan struct{})
+	c.startNameIndexRefresher(nameRefreshStop)
+	defer close(nameRefreshStop)
+
+	// Drop expired LDAP auth-cache entries so they do not linger for the life of
+	// the process. Only successes are cached, so the map is small either way.
+	if c.LDAPEnabled && c.ldapCacheTTL() > 0 {
+		ldapSweepStop := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(c.ldapCacheTTL())
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ldapSweepStop:
+					return
+				case <-ticker.C:
+					sweepLDAPCache()
+				}
+			}
+		}()
+		defer close(ldapSweepStop)
+	}
+
 	if c.sessionManager != nil {
 		defer c.sessionManager.Stop()
 	}
@@ -302,7 +416,17 @@ func (c *Config) Serve() error {
 		defer c.discordBot.Stop()
 	}
 
-	router := gin.Default()
+	// gin.New() rather than gin.Default(): the default access logger logs every
+	// request, which drowns the log in noise from the frequently-polled /healthz
+	// and internal API endpoints. Log only failures (>= 400) unless debug logging
+	// is on, in which case fall back to the full access log.
+	router := gin.New()
+	if utils.IsDebugLogEnabled() {
+		router.Use(gin.Logger())
+	} else {
+		router.Use(quietRequestLogger())
+	}
+	router.Use(gin.Recovery())
 	router.Use(cors.Default())
 	utils.InfoLog("Setting up routes and internal API...")
 
@@ -319,9 +443,53 @@ func (c *Config) Serve() error {
 	// Add temporary link download route
 	router.GET("/download/:token", c.handleTemporaryLink)
 
+	// Container readiness endpoint for the Docker HEALTHCHECK. Reports whether
+	// THIS service has finished starting (see the ready flag set below), never
+	// provider/VPN state, so it is safe to gate compose ordering on.
+	router.GET("/healthz", c.healthz)
+
+	// Seed and, if configured, schedule provider health probes.
+	if c.health != nil {
+		healthStop := make(chan struct{})
+		c.startHealthMonitor(healthStop)
+		defer close(healthStop)
+	}
+
+	// Startup is complete; mark the service ready so /healthz returns 200 (and the
+	// container reports healthy) from here on. router.Run below starts accepting
+	// connections, so any request that reaches /healthz is necessarily past this
+	// point.
+	atomic.StoreInt32(&c.ready, 1)
+
 	// Add a message to indicate the server is ready
 	utils.InfoLog("[stream-share] Server is ready and listening on :%d", c.HostConfig.Port)
 	return router.Run(fmt.Sprintf(":%d", c.HostConfig.Port))
+}
+
+// quietRequestLogger logs only failed HTTP requests (status >= 400), keeping the
+// success flood — health checks, internal API polling — out of the log. Requests
+// it does log go through the project logger at a severity matching their status.
+func quietRequestLogger() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		start := time.Now()
+		ctx.Next()
+
+		status := ctx.Writer.Status()
+		if status < 400 {
+			return
+		}
+		path := ctx.Request.URL.Path
+		if raw := ctx.Request.URL.RawQuery; raw != "" {
+			path = path + "?" + raw
+		}
+		msg := fmt.Sprintf("[HTTP] %d | %v | %s | %s %q",
+			status, time.Since(start), ctx.ClientIP(), ctx.Request.Method, path)
+		if status >= 500 {
+			utils.ErrorLog("%s", msg)
+		} else {
+			utils.WarnLog("%s", msg)
+		}
+	}
 }
 
 // Add direct streaming routes with proxy credentials
@@ -363,17 +531,7 @@ func (c *Config) authWithPathCredentials() gin.HandlerFunc {
 
 		// If LDAP is enabled, authenticate against LDAP
 		if c.LDAPEnabled {
-			ok := ldapAuthenticate(
-				c.LDAPServer,
-				c.LDAPBaseDN,
-				c.LDAPBindDN,
-				c.LDAPBindPassword,
-				c.LDAPUserAttribute,
-				c.LDAPGroupAttribute,
-				c.LDAPRequiredGroup,
-				username,
-				password,
-			)
+			ok := c.ldapAuthenticateCached(username, password)
 			if !ok {
 				utils.DebugLog("LDAP authentication failed for user in path: %s", username)
 				ctx.AbortWithStatus(http.StatusUnauthorized)
@@ -418,10 +576,22 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 		idRaw := strings.TrimSuffix(tempLink.StreamID, path.Ext(tempLink.StreamID))
 		if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil && entry.Status == "ready" {
 			utils.InfoLog("Download via cache for %s -> %s", c.vodLabel(tempLink.StreamID), entry.FilePath)
-			ext := strings.ToLower(path.Ext(entry.FilePath)); if ext == "" { ext = ".mp4" }
-			_ = c.db.TouchVODCache(idRaw)
+			ext := strings.ToLower(path.Ext(entry.FilePath))
+			if ext == "" {
+				ext = ".mp4"
+			}
+			c.touchVODCache(idRaw)
 			var ct string
-			switch ext { case ".ts": ct = "video/mp2t"; case ".mkv": ct = "video/x-matroska"; case ".mp4": ct = "video/mp4"; default: ct = "application/octet-stream" }
+			switch ext {
+			case ".ts":
+				ct = "video/mp2t"
+			case ".mkv":
+				ct = "video/x-matroska"
+			case ".mp4":
+				ct = "video/mp4"
+			default:
+				ct = "application/octet-stream"
+			}
 			serveLocalFileRange(ctx, entry.FilePath, ct, sanitiseFilename(tempLink.Title)+ext, true)
 			return
 		}
@@ -429,8 +599,15 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 
 	// Fallback: proxy upstream URL
 	targetURL, err := url.Parse(tempLink.URL)
-	if err != nil { utils.ErrorLog("Invalid URL in temporary link: %v", err); ctx.AbortWithStatus(http.StatusInternalServerError); return }
-	ext := strings.ToLower(path.Ext(targetURL.Path)); if ext == "" { ext = ".mp4" }
+	if err != nil {
+		utils.ErrorLog("Invalid URL in temporary link: %v", err)
+		ctx.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	ext := strings.ToLower(path.Ext(targetURL.Path))
+	if ext == "" {
+		ext = ".mp4"
+	}
 	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, sanitiseFilename(tempLink.Title), ext))
 	c.stream(ctx, targetURL)
 }
@@ -458,6 +635,24 @@ func (c *Config) resolveRequestUsername(ctx *gin.Context) string {
 // multiplexedStream handles streaming with connection multiplexing
 // multiplexedStream proxies a stream while sharing a single upstream connection
 // across multiple clients for the same content using the SessionManager.
+// classifyStreamType infers the Xtream stream type ("movie", "series", "live",
+// "timeshift") from the segments of a URL path, returning fallback when none of
+// the known segments are present.
+func classifyStreamType(p, fallback string) string {
+	switch {
+	case strings.Contains(p, "/movie/"):
+		return "movie"
+	case strings.Contains(p, "/series/"):
+		return "series"
+	case strings.Contains(p, "/live/"):
+		return "live"
+	case strings.Contains(p, "/timeshift/"):
+		return "timeshift"
+	default:
+		return fallback
+	}
+}
+
 func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	username := c.resolveRequestUsername(ctx)
 
@@ -465,30 +660,11 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	streamID := path.Base(targetURL.Path)
 	// Normalize stream id for cache lookup (strip extension if present)
 	streamIDRaw := strings.TrimSuffix(streamID, path.Ext(streamID))
-	streamType := "unknown"
-	p := targetURL.Path
-	if strings.Contains(p, "/movie/") {
-		streamType = "movie"
-	} else if strings.Contains(p, "/series/") {
-		streamType = "series"
-	} else if strings.Contains(p, "/live/") {
-		streamType = "live"
-	} else if strings.Contains(p, "/timeshift/") {
-		streamType = "timeshift"
-	}
-	// Fallback: check incoming request path for type hints.
-	// The generic /:user/:pass/:id route maps to live streams in Xtream protocol.
+	streamType := classifyStreamType(targetURL.Path, "unknown")
+	// Fallback: check the incoming request path for type hints. The generic
+	// /:user/:pass/:id route maps to live streams in the Xtream protocol.
 	if streamType == "unknown" {
-		reqPath := ctx.Request.URL.Path
-		if strings.Contains(reqPath, "/movie/") {
-			streamType = "movie"
-		} else if strings.Contains(reqPath, "/series/") {
-			streamType = "series"
-		} else if strings.Contains(reqPath, "/live/") {
-			streamType = "live"
-		} else {
-			streamType = "live"
-		}
+		streamType = classifyStreamType(ctx.Request.URL.Path, "live")
 	}
 
 	// Title from query parameter, name resolution (live index or lazy VOD
@@ -514,8 +690,14 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 				utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, c.streamLabel(streamIDRaw), entry.FilePath)
 				// Content-Type based on file extension
 				var ct string
-				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" { ct = "video/mp2t" } else if ext == ".mkv" { ct = "video/x-matroska" } else { ct = "video/mp4" }
-				_ = c.db.TouchVODCache(streamIDRaw)
+				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" {
+					ct = "video/mp2t"
+				} else if ext == ".mkv" {
+					ct = "video/x-matroska"
+				} else {
+					ct = "video/mp4"
+				}
+				c.touchVODCache(streamIDRaw)
 				serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
 				return
 			}
@@ -550,6 +732,40 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	}
 	doneChan, _ := c.sessionManager.GetClientDone(streamID, username)
 	clientGone := ctx.Request.Context().Done()
+
+	// Wait until the pump knows whether the upstream actually came up, before we
+	// commit to a 200. Historically RequestStream returned before the provider
+	// was ever contacted, so a 403 or dial timeout could only ever surface as an
+	// unexplained mid-body disconnect. A co-viewer joining a healthy stream sees
+	// an already-closed channel here and does not wait.
+	if buffer != nil {
+		select {
+		case <-buffer.Ready():
+			if startErr := buffer.StartError(); startErr != nil {
+				// The session manager serves an error slate for eligible live
+				// streams; the bytes arrive on dataChan like any other content,
+				// so fall through. Anything else keeps the old behavior, except
+				// the status is now genuinely reachable before the first byte.
+				if !c.sessionManager.ServesSlateFor(streamID) {
+					utils.WarnLog("Multiplex: upstream failed for %s (user=%s): %s",
+						label, username, startErr.Error())
+					c.sessionManager.RemoveClient(streamID, username)
+					ctx.AbortWithStatus(http.StatusBadGateway)
+					return
+				}
+			}
+		case <-time.After(upstreamReadyTimeout):
+			utils.WarnLog("Multiplex: upstream did not respond within %s for %s (user=%s)",
+				upstreamReadyTimeout, label, username)
+			c.sessionManager.RemoveClient(streamID, username)
+			ctx.AbortWithStatus(http.StatusGatewayTimeout)
+			return
+		case <-clientGone:
+			utils.DebugLog("Multiplex: client %s left before %s started", username, label)
+			c.sessionManager.RemoveClient(streamID, username)
+			return
+		}
+	}
 
 	// Set content-type and disable intermediary buffering
 	setNoBufferingHeaders(ctx, contentTypeForPath(targetURL.Path))
@@ -616,7 +832,7 @@ func (c *Config) marshallInto(into *os.File, xtream bool) error {
 	for i, track := range c.playlist.Tracks {
 		var buffer bytes.Buffer
 
-		buffer.WriteString("#EXTINF:")                       // nolint: errcheck
+		buffer.WriteString("#EXTINF:") // nolint: errcheck
 		fmt.Fprintf(&buffer, "%d ", track.Length)
 		for i := range track.Tags {
 			if i == len(track.Tags)-1 {
@@ -709,4 +925,46 @@ func sanitiseFilename(name string) string {
 		}
 		return r
 	}, name)
+}
+
+// startNameIndexRefresher runs a background goroutine that periodically re-fetches
+// get_live_streams from the upstream Xtream API to keep apiChannelIndex fresh.
+func (c *Config) startNameIndexRefresher(stopCh <-chan struct{}) {
+	interval := time.Duration(c.M3UCacheExpiration) * time.Hour
+	if interval <= 0 {
+		interval = 24 * time.Hour
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				c.refreshAPIChannelIndex()
+			}
+		}
+	}()
+}
+
+// refreshAPIChannelIndex re-fetches get_live_streams from the upstream Xtream API
+// and updates the in-memory apiChannelIndex (and persists to DB).
+func (c *Config) refreshAPIChannelIndex() {
+	if c.XtreamBaseURL == "" {
+		return
+	}
+	client, err := xtreamapi.New(c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL, "")
+	if err != nil {
+		utils.WarnLog("stream_names refresh: failed to create Xtream client: %v", err)
+		return
+	}
+	resp, _, _, err := client.Action(c.ProxyConfig, "get_live_streams", nil)
+	if err != nil {
+		utils.WarnLog("stream_names refresh: get_live_streams failed: %v", err)
+		return
+	}
+	if n := c.harvestChannelNames(xtreamapi.ProcessResponse(resp)); n > 0 {
+		utils.DebugLog("stream_names: refreshed %d live channel names from upstream", n)
+	}
 }

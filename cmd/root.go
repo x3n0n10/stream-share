@@ -25,6 +25,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/lucasduport/stream-share/pkg/banner"
 	"github.com/lucasduport/stream-share/pkg/config"
 	"github.com/lucasduport/stream-share/pkg/server"
 	homedir "github.com/mitchellh/go-homedir"
@@ -48,6 +49,7 @@ It supports:
 - Caching for performance optimization`,
 
 	Run: func(cmd *cobra.Command, args []string) {
+		banner.Print()
 		log.Printf("[stream-share] Server is starting...")
 
 		// Parse M3U URL if provided
@@ -108,14 +110,15 @@ It supports:
 			CustomId:             viper.GetString("custom-id"),
 			XtreamGenerateApiGet: viper.GetBool("xtream-api-get-enabled"),
 			// LDAP configuration
-			LDAPEnabled:        viper.GetBool("ldap-enabled"),
-			LDAPServer:         viper.GetString("ldap-server"),
-			LDAPBaseDN:         viper.GetString("ldap-base-dn"),
-			LDAPBindDN:         viper.GetString("ldap-bind-dn"),
-			LDAPBindPassword:   viper.GetString("ldap-bind-password"),
-			LDAPUserAttribute:  viper.GetString("ldap-user-attribute"),
-			LDAPGroupAttribute: viper.GetString("ldap-group-attribute"),
-			LDAPRequiredGroup:  viper.GetString("ldap-required-group"),
+			LDAPEnabled:          viper.GetBool("ldap-enabled"),
+			LDAPServer:           viper.GetString("ldap-server"),
+			LDAPBaseDN:           viper.GetString("ldap-base-dn"),
+			LDAPBindDN:           viper.GetString("ldap-bind-dn"),
+			LDAPBindPassword:     viper.GetString("ldap-bind-password"),
+			LDAPUserAttribute:    viper.GetString("ldap-user-attribute"),
+			LDAPGroupAttribute:   viper.GetString("ldap-group-attribute"),
+			LDAPRequiredGroup:    viper.GetString("ldap-required-group"),
+			LDAPAuthCacheMinutes: viper.GetInt("ldap-auth-cache-minutes"),
 
 			// Reverse proxy / public URL
 			ReverseProxyEnabled: viper.GetBool("reverse-proxy-enabled"),
@@ -132,6 +135,12 @@ It supports:
 			CatchupDurationHours:     viper.GetInt("catchup-duration-hours"),
 			CatchupPauseGraceMinutes: viper.GetInt("catchup-pause-grace-minutes"),
 
+			// Error slate
+			ErrorSlateEnabled:         viper.GetBool("error-slate-enabled"),
+			ErrorSlateRetryMaxMinutes: viper.GetInt("error-slate-retry-max-minutes"),
+			ErrorSlateMessagesFile:    viper.GetString("error-slate-messages-file"),
+			SlateCacheStaleHours:      viper.GetInt("slate-cache-stale-hours"),
+
 			// Session / stream timeouts
 			SessionTimeoutMinutes:        viper.GetInt("session-timeout-minutes"),
 			StreamTimeoutMinutes:         viper.GetInt("stream-timeout-minutes"),
@@ -143,6 +152,19 @@ It supports:
 			DiscordBotToken:    viper.GetString("discord-bot-token"),
 			DiscordAdminRoleID: viper.GetString("discord-admin-role-id"),
 			DiscordAPIURL:      viper.GetString("discord-api-url"),
+
+			// Dashboard
+			InstanceName:           viper.GetString("instance-name"),
+			StreamTechProbeEnabled: viper.GetBool("stream-tech-probe-enabled"),
+
+			// Provider health check (reporting only; VPN reconnect is external)
+			HealthCheckEnabled:            viper.GetBool("healthcheck-enabled"),
+			HealthCheckStreamID:           viper.GetString("healthcheck-stream-id"),
+			HealthCheckBlockedCodes:       viper.GetString("healthcheck-blocked-codes"),
+			HealthCheckTimes:              viper.GetString("healthcheck-times"),
+			HealthCheckTimeoutSeconds:     viper.GetInt("healthcheck-timeout-seconds"),
+			HealthCheckMinIntervalSeconds: viper.GetInt("healthcheck-min-interval-seconds"),
+			HealthCheckStaleMinutes:       viper.GetInt("healthcheck-stale-minutes"),
 		}
 
 		// Use port if advertised port is not specified
@@ -206,6 +228,7 @@ func init() {
 	rootCmd.Flags().String("ldap-user-attribute", "uid", "LDAP username attribute")
 	rootCmd.Flags().String("ldap-group-attribute", "memberOf", "LDAP group attribute")
 	rootCmd.Flags().String("ldap-required-group", "iptv", "Required LDAP group")
+	rootCmd.Flags().Int("ldap-auth-cache-minutes", 5, "Cache successful LDAP authentications for this many minutes (0 = re-check the directory on every request)")
 
 	// Reverse proxy / public URL configuration
 	rootCmd.Flags().Bool("reverse-proxy-enabled", false, "Behind a reverse proxy: drop the port in generated public URLs")
@@ -222,6 +245,11 @@ func init() {
 	rootCmd.Flags().Int("catchup-duration-hours", 4, "Number of hours of catchup buffer to retain")
 	rootCmd.Flags().Int("catchup-pause-grace-minutes", 5, "Minutes a catchup live stream keeps recording after the last viewer disconnects")
 
+	// Error slate configuration
+	rootCmd.Flags().Bool("error-slate-enabled", true, "Show upstream errors as an on-screen slate instead of dropping the stream (requires ffmpeg)")
+	rootCmd.Flags().Int("error-slate-retry-max-minutes", 10, "How long to keep showing the slate and retrying upstream before giving up")
+	rootCmd.Flags().String("error-slate-messages-file", "", "Optional JSON file overriding the per-error-code slate messages")
+
 	// Session / stream timeout configuration
 	rootCmd.Flags().Int("session-timeout-minutes", 0, "Session inactivity timeout in minutes (0 = manager default)")
 	rootCmd.Flags().Int("stream-timeout-minutes", 0, "Stream inactivity timeout in minutes (0 = manager default)")
@@ -233,6 +261,10 @@ func init() {
 	rootCmd.Flags().String("discord-bot-token", "", "Discord bot token (enables the Discord bot when set)")
 	rootCmd.Flags().String("discord-admin-role-id", "", "Discord admin role ID")
 	rootCmd.Flags().String("discord-api-url", "", "Base URL the Discord bot uses to reach this API")
+
+	// Dashboard configuration
+	rootCmd.Flags().String("instance-name", "", "Friendly name for this instance, used to identify it in a multi-instance dashboard (defaults to hostname)")
+	rootCmd.Flags().Bool("stream-tech-probe-enabled", false, "Expose audio/video technical info (codec, resolution, bitrate) for active live streams via the dashboard API; requires ffprobe in the runtime image")
 
 	// Bind all flags to viper
 	if err := viper.BindPFlags(rootCmd.Flags()); err != nil {

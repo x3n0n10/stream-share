@@ -43,7 +43,8 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             --file .Dockerfile.goreleaser \
-            --tag ghcr.io/lucasduport/stream-share:dev-${{ env.SHORT_SHA }}-amd64 \
+            --label org.opencontainers.image.source=https://github.com/${{ github.repository_owner }}/stream-share \
+            --tag ghcr.io/${{ github.repository_owner }}/stream-share:dev-${{ env.SHORT_SHA }}-amd64 \
             ${{ inputs.push_image && '--push' || '--load' }} \
             .
 
@@ -53,7 +54,8 @@ jobs:
           docker buildx build \
             --platform linux/arm64 \
             --file .Dockerfile.goreleaser \
-            --tag ghcr.io/lucasduport/stream-share:dev-${{ env.SHORT_SHA }}-arm64 \
+            --label org.opencontainers.image.source=https://github.com/${{ github.repository_owner }}/stream-share \
+            --tag ghcr.io/${{ github.repository_owner }}/stream-share:dev-${{ env.SHORT_SHA }}-arm64 \
             ${{ inputs.push_image && '--push' || '--load' }} \
             .
 
@@ -61,7 +63,7 @@ jobs:
         if: inputs.push_image
         run: |
           docker buildx imagetools create \
-            -t ghcr.io/lucasduport/stream-share:dev-${{ env.SHORT_SHA }} \
-            -t ghcr.io/lucasduport/stream-share:dev \
-            ghcr.io/lucasduport/stream-share:dev-${{ env.SHORT_SHA }}-amd64 \
-            ghcr.io/lucasduport/stream-share:dev-${{ env.SHORT_SHA }}-arm64
+            -t ghcr.io/${{ github.repository_owner }}/stream-share:dev-${{ env.SHORT_SHA }} \
+            -t ghcr.io/${{ github.repository_owner }}/stream-share:dev \
+            ghcr.io/${{ github.repository_owner }}/stream-share:dev-${{ env.SHORT_SHA }}-amd64 \
+            ghcr.io/${{ github.repository_owner }}/stream-share:dev-${{ env.SHORT_SHA }}-arm64

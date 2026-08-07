@@ -43,6 +43,12 @@ services:
       LDAP_USER_ATTRIBUTE: "uid"       # LDAP attribute containing username
       LDAP_GROUP_ATTRIBUTE: "memberOf" # LDAP attribute for group membership
       LDAP_REQUIRED_GROUP: "iptv"      # Group required for authentication
+      # Players re-send credentials on every request, including every Range request
+      # of a movie, so one playback can mean hundreds of LDAP binds. Successful
+      # logins are cached for this long. Only successes are cached, so a wrong
+      # password is always re-checked — but a disabled account or changed password
+      # keeps working until its entry expires. Set to 0 to re-check every request.
+      LDAP_AUTH_CACHE_MINUTES: "5"
 
       # Database Configuration
       DB_HOST: "db"                    # Postgres hostname 
@@ -56,16 +62,60 @@ services:
       DISCORD_ADMIN_ROLE_ID: ""        # Discord role ID for admin commands
       DISCORD_API_URL: ""              # API URL for Discord bot (defaults to hostname)
 
+      # Dashboard Configuration
+      INSTANCE_NAME: ""                # Friendly name for this instance, returned by /api/internal/instance (defaults to hostname); useful when a dashboard combines several instances
+      STREAM_TECH_PROBE_ENABLED: "false"  # Add audio/video technical info (codec, resolution, bitrate) to active live streams in the dashboard API. Samples bytes already flowing through the existing viewer connection (no extra provider connection); requires ffmpeg (bundled in this image).
+
+      # Provider health check — only relevant when stream-share runs behind a VPN.
+      # It periodically probes one live channel so an external watchdog can tell
+      # when the provider is blocking our VPN egress IP (many Xtream providers
+      # answer with HTTP 456, but that code is non-standard and configurable
+      # below). stream-share only REPORTS health here; reconnecting the VPN is
+      # intentionally left to a separate service (see the commented "vpn-watchdog"
+      # example at the bottom of this file), so this app carries no dependency on
+      # any VPN. The verdict is exposed at the authenticated /api/internal/health.
+      # This is SEPARATE from the container's Docker HEALTHCHECK, which reports
+      # readiness via /healthz (used for `depends_on: condition: service_healthy`)
+      # and is unaffected by these settings.
+      HEALTHCHECK_ENABLED: "false"          # Enable the provider health probe
+      HEALTHCHECK_STREAM_ID: ""             # Live channel id to probe (as in a stream URL, e.g. "12345" or "12345.ts")
+      HEALTHCHECK_BLOCKED_CODES: "456"      # Comma-separated upstream status code(s) that mean "IP blocked" (report as "blocked" vs generic "error"); default 456 is just what most providers use
+      HEALTHCHECK_TIMES: "04:00,16:00"      # Local (TZ) times to self-probe, comma-separated HH:MM. Empty = only probe at startup and on demand (leave scheduling to the watchdog).
+      HEALTHCHECK_TIMEOUT_SECONDS: "15"     # Per-probe timeout
+      HEALTHCHECK_MIN_INTERVAL_SECONDS: "60" # Minimum spacing between real probes; caps how often the force-probe endpoint can hit the provider
+      HEALTHCHECK_STALE_MINUTES: "0"        # If > 0, /healthz reports unhealthy when the last probe is older than this (catches a stalled probe loop)
+
       # Multiplexing and Session Management
       SESSION_TIMEOUT_MINUTES: "30"    # User session timeout in minutes
       STREAM_TIMEOUT_MINUTES: "2"      # Stream timeout (after all users disconnect)
       TEMP_LINK_HOURS: "24"            # Temporary download link expiration in hours
       MULTIPLEX_STALL_TIMEOUT_SECONDS: "30"  # Drop a multiplexed viewer whose buffer stalls this long (protects co-viewers)
 
+      # Error slate — when the provider fails before a live stream starts, show the
+      # reason on screen instead of dropping the connection, and keep retrying the
+      # provider behind the slate. Needs ffmpeg + ttf-dejavu (both in the image);
+      # without them this silently falls back to the old drop behaviour.
+      ERROR_SLATE_ENABLED: "true"           # Show upstream errors as an on-screen slate
+      ERROR_SLATE_RETRY_MAX_MINUTES: "10"   # Keep retrying upstream behind the slate for this long
+      # Optional JSON file customising the message per error code. The slate shows the
+      # code, its official meaning, and your message. Only "message" is usually needed —
+      # the meaning falls back to the standard HTTP text. Applied at startup.
+      #   {"403": {"message": "Check your subscription."},
+      #    "456": {"meaning": "Connection limit", "message": "All slots in use."}}
+      # ERROR_SLATE_MESSAGES_FILE: "/root/error-messages.json"
+      # Rendered slate clips are cached on disk (in <root>/slate) and reused. They
+      # are pruned when not modified within this many hours; regenerated on demand.
+      # 0 uses the default (168 = 7 days); a negative value disables pruning.
+      SLATE_CACHE_STALE_HOURS: "168"
+
       # Caching (single root; subfolders are created internally: <root>/vod and <root>/catchup)
       VOD_CACHE_ENABLED: "true"          # Enable on-demand VOD caching
       CACHE_FOLDER: "/cache"           # Root cache folder — VOD files go in /cache/vod, catchup buffers in /cache/catchup
-      VOD_CACHE_STALE_HOURS: "24"      # Delete cached VOD files not accessed for this many hours
+      # Delete cached VOD files not accessed for this many hours. The sweep also
+      # removes files whose entry has expired, orphaned files no longer tracked in
+      # the database, and leftover ".part" files from failed downloads. It runs
+      # shortly after startup and daily thereafter.
+      VOD_CACHE_STALE_HOURS: "24"
 
       # Local Catchup Buffering
       TZ: "Europe/Amsterdam"           # Timezone — MUST match the timezone of your IPTV clients (TiviMate sends local time)
@@ -96,6 +146,19 @@ services:
     # ports:
     #  - "5432:5432"
     
+  # --- Optional: VPN watchdog -------------------------------------------------
+  # Only relevant if you run stream-share behind a VPN. stream-share reports
+  # provider health but never reconnects the VPN itself, so it stays independent
+  # of any VPN. A separate service closes the loop: it reads the health signal
+  # and, when the provider is blocking our egress IP, reconnects the VPN onto a
+  # new server and re-checks. A complete, self-contained example (using gluetun,
+  # but adaptable to any VPN) lives at examples/vpn-watchdog/ (script + compose
+  # snippet). Typical setup: stream-share shares the VPN's network namespace
+  #   network_mode: "service:gluetun"
+  # so provider traffic egresses through the VPN and the watchdog can reach the
+  # VPN's control server on http://localhost:8000.
+  # ----------------------------------------------------------------------------
+
   # Adminer for database management (optional)
   # adminer:
   #   image: adminer

@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.svg" alt="" width="96" height="96"></p>
+
 # StreamShare - Advanced IPTV Access Management Platform
 
 ## Overview
@@ -22,6 +24,10 @@ StreamShare is a comprehensive IPTV management solution that allows secure shari
   - TiviMate (and other Xtream-compatible players) automatically show the rewind UI on all channels
   - Channels that already have native catchup continue to use the provider's own timeshift endpoint unchanged
   - Configurable buffer duration (default 4 hours) and pause grace period for seamless pause/resume
+- **On-Screen Error Slates**
+  - When the provider fails, viewers see the reason rendered on screen instead of a frozen picture or a silently dropped connection
+  - Shows the error code, its official meaning, and a message you control per code
+  - Keeps retrying the provider behind the slate and resumes live video if it comes back
 - **User Experience**
   - Enhanced VOD search, including series episodes (queries like "the office s02e04")
   - Discord bot with prettier embed-based responses, dropdown selection, and pagination
@@ -128,6 +134,7 @@ StreamShare includes a powerful Discord bot for content discovery and streaming.
 | `/cache <title> <days>` | Cache a movie or episode on the server for 1–14 days |
 | `/cached` | List cached items and expiration times |
 | `/status` | Show server status (admin only) |
+| `/history [username] [period]` | Watch history timeline for live and VOD (admin only). Omit `username` for a feed across all clients; `period` selects the window (24h, 7d, 30d, 90d, all time) |
 | `/disconnect <ldap_username>` | Disconnect a user from the stream |
 | `/timeout <ldap_username> <minutes>` | Temporarily block a user for N minutes |
 
@@ -147,6 +154,7 @@ StreamShare exposes an internal API (used by the Discord bot and admin tools) un
 |----------|--------|-------------|----------------|
 | `/api/internal/status` | GET | Get server status summary | X-API-Key |
 | `/api/internal/streams` | GET | List all active streams | X-API-Key |
+| `/api/internal/streams/:streamid` | GET | Get details for one active stream | X-API-Key |
 | `/api/internal/users` | GET | List all connected users | X-API-Key |
 | `/api/internal/users/:username` | GET | Get details for a user | X-API-Key |
 | `/api/internal/users/disconnect/:username` | POST | Forcibly disconnect a user | X-API-Key |
@@ -160,6 +168,71 @@ StreamShare exposes an internal API (used by the Discord bot and admin tools) un
 | `/api/internal/cache/by-stream/:streamid` | GET | Get cache entry by stream ID | X-API-Key |
 | `/api/internal/cache/progress/:streamid` | GET | Get cache download progress | X-API-Key |
 | `/api/internal/cache/list` | GET | List active cache entries | X-API-Key |
+| `/api/internal/history?hours=N&limit=N&offset=N` | GET | Chronological watch-history feed across all users, paginated | X-API-Key |
+| `/api/internal/history/:username?hours=N&limit=N&offset=N` | GET | Watch history for one user, paginated | X-API-Key |
+| `/api/internal/instance` | GET | Identify this deployment (name, uptime, enabled features) — for labeling data in a multi-instance dashboard | X-API-Key |
+| `/api/internal/stats?hours=N` | GET | Aggregate dashboard stats: live activity plus historical totals and top titles/users over the window (default 24h, `hours=0` for all-time) | X-API-Key |
+| `/api/internal/health` | GET | Force a fresh provider health probe (rate-limited) and return the verdict — see [Provider Health Check](#provider-health-check) | X-API-Key |
+| `/api/internal/ip-aliases` | GET | List all configured IP -> alias mappings | X-API-Key |
+| `/api/internal/ip-aliases` | POST | Create or replace the alias for an IP address — body `{"ip_address": "...", "alias": "..."}` | X-API-Key |
+| `/api/internal/ip-aliases/delete/:ip` | POST | Remove the alias for an IP address | X-API-Key |
+| `/api/internal/ip-aliases/resolve/:alias` | GET | Resolve an alias back to its IP address (case-insensitive) | X-API-Key |
+
+There is also an unauthenticated **`GET /healthz`** at the server root (not under `/api/internal`) that reports container **readiness** — `200` once the service has finished starting and is listening, `503`/refused before then. It drives the Docker `HEALTHCHECK`; see [Container Health & Startup Ordering](#container-health--startup-ordering). (This is separate from provider/VPN health, which is on `/api/internal/health` above.)
+
+### Building a dashboard
+
+Everything above is machine-readable JSON (`{success, data, error}`) and is enough to build an external dashboard, including one that combines several stream-share instances:
+
+- **Active streams**: `/api/internal/streams` or `/api/internal/status` for live sessions and viewers. Each stream item includes a display-resolved `stream_title` (never blank — falls back through the channel/VOD name index to the raw stream ID) and, for live channels, an optional `tech` object with audio/video technical info (see below).
+- **Watch history**: `/api/internal/history` (global) or `/api/internal/history/:username`, both paginated with `limit`/`offset` and filterable with `hours`.
+- **VOD search**: `/api/internal/vod/search` — the same live provider search used by the `/vod` Discord command.
+- **Overview stats**: `/api/internal/stats` for counts and leaderboards to show on a summary page.
+- **Multi-instance**: this API has no built-in concept of "instance" or "tenant" — each deployment is independent, with its own database and API key. Call `/api/internal/instance` on each one to fetch a stable display name (set via `INSTANCE_NAME`, see below) and combine results client-side by polling each instance's base URL with its own API key.
+
+#### Viewer identity and IP aliases
+
+Every place a viewer shows up — `streams`/`status`'s `viewers` list, `users`, and `history`'s `username` field — is keyed by whatever `resolveRequestUsername` resolved for that request. With LDAP enabled that's the LDAP username; with LDAP disabled, the native Xtream streaming routes carry no per-request credentials, so **the client's raw IP address becomes the de-facto viewer identity** instead.
+
+Rather than showing bare IPs in a dashboard, assign each one a friendly name:
+
+```bash
+curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"ip_address": "192.168.1.42", "alias": "Living Room TV"}' \
+  https://streamshare.example.com/api/internal/ip-aliases
+```
+
+Every endpoint that surfaces a viewer identity then includes a resolved `display_name` alongside the raw one — e.g. `streams`/`status` return `viewers: [{"id": "192.168.1.42", "display_name": "Living Room TV"}]` instead of a bare string list, `users` adds a top-level `display_name`, and `history`'s per-entry `username` is joined by a `display_name`. The raw `id`/`username` (IP or LDAP username) is always still there too — that's the real identity used for lookups (e.g. `GET /users/:username`, `GET /history/:username`); the alias is display-only. One alias per IP: posting again for the same `ip_address` replaces the existing alias rather than adding a second one. Aliases are also unique (case-insensitively) across IPs, so they double as a reverse lookup — `GET /ip-aliases/resolve/:alias` — used by Discord's `/history alias:` option to look a viewer up by their friendly name instead of typing out the IP.
+
+This also flows into Discord:
+- `/status`'s viewer list shows `Alias (raw IP)` when an alias is set (or just the raw identifier when it isn't), so you always see both at a glance.
+- `/history` accepts either `username` (raw IP or LDAP username) or `alias` — not both — to drill into one viewer's timeline; the embed title shows the resolved alias either way.
+
+#### Technical stream info (`tech`)
+
+When `STREAM_TECH_PROBE_ENABLED=true`, active stream items (from `/api/internal/streams`, `/streams/:streamid`, `/status`, and the Discord `/status` command's text output) include a `tech` object with best-effort audio/video/subtitle characteristics detected by `ffprobe`:
+
+```json
+"tech": {
+  "container_format": "mpegts",
+  "video_codec": "h264", "width": 1920, "height": 1080, "frame_rate": 25, "video_bitrate_kbps": 4500,
+  "audio_tracks": [
+    {"index": 1, "codec": "aac", "channels": 2, "sample_rate_hz": 48000, "language": "eng", "bitrate_kbps": 128},
+    {"index": 2, "codec": "aac", "channels": 2, "sample_rate_hz": 48000, "language": "spa", "bitrate_kbps": 128}
+  ],
+  "subtitle_tracks": [
+    {"index": 3, "codec": "dvb_subtitle", "language": "eng"}
+  ],
+  "probed_at": "2026-01-01T12:00:00Z"
+}
+```
+
+Notes:
+- **No extra provider connection either way**:
+  - **Live channels** are probed from a small sample of bytes already flowing through that channel's existing shared upstream connection (the same one serving its viewers) — never an additional connection to your provider, so it's safe even on strict concurrent-connection limits. A channel is only probed once it has at least one real viewer (there's nothing to sample otherwise).
+  - **Cached VOD/series** (once fully downloaded — see [VOD Caching](#vod-caching)) are probed directly off the local file, no network involved at all. Because the whole file is available (unlike a short live sample), this reliably lists every audio and subtitle track the file contains, not just whichever one happened to be in the sample; `duration_sec` is also included. VOD/series that aren't cached (or aren't fully downloaded yet) have no `tech`.
+- Requires `ffprobe` in the runtime image (bundled in the official Docker image; if you build your own, install `ffmpeg`).
+- Off by default. Results are cached for a few minutes per stream and refreshed lazily on the next request after the cache goes stale — list endpoints never block waiting on a probe, but `/streams/:streamid` (a single-item lookup) will wait briefly for a fresh result if nothing is cached yet.
 
 ### Authentication
 
@@ -172,6 +245,10 @@ curl -H "X-API-Key: your_api_key" https://streamshare.example.com/api/internal/s
 The API key is automatically generated on first run and stored in the database.
 
 To override, set `INTERNAL_API_KEY` in the environment so the bot and integrations can authenticate reliably.
+
+Set `INSTANCE_NAME` to give this deployment a stable display name (defaults to the machine hostname), returned by `/api/internal/instance` — useful when a dashboard combines data from multiple stream-share instances.
+
+Set `STREAM_TECH_PROBE_ENABLED=true` to enable the `tech` (audio/video technical info) field on active live streams — see [Technical stream info](#technical-stream-info-tech) above.
 
 ---
 
@@ -189,6 +266,19 @@ SESSION_TIMEOUT_MINUTES=120  # User session timeout (default: 60)
 STREAM_TIMEOUT_MINUTES=240   # Stream session timeout (default: 120)
 TEMP_LINK_HOURS=24           # Temporary link validity (default: 24)
 ```
+
+### LDAP Authentication Caching
+
+Media players re-send credentials on every request — including every HTTP Range request while a movie plays — so a single playback can mean hundreds of LDAP bind and search round trips. Successful authentications are cached briefly to avoid that:
+
+```
+LDAP_AUTH_CACHE_MINUTES=5    # Trust a successful login for this long (default: 5; 0 = re-check every request)
+```
+
+Behavior:
+- **Only successes are cached.** A failed login always re-checks the directory, so a corrected password works immediately and an LDAP outage is never remembered as a denial.
+- Credentials are never stored. The cache key is a keyed hash, salted per process.
+- **The trade-off is revocation latency**: a disabled account or changed password keeps working until its entry expires. Set `LDAP_AUTH_CACHE_MINUTES=0` if revocation must take effect at once.
 
 ### Direct Stream URLs
 
@@ -259,6 +349,159 @@ At 10 Mbps a 4-hour buffer is approximately **18 GB per active channel**. Only c
 | `CATCHUP_DURATION_HOURS` | `4` | Hours of catchup to buffer and advertise to clients |
 | `CATCHUP_PAUSE_GRACE_MINUTES` | `5` | Minutes to keep recording after the last viewer leaves (for pause/resume); channel switches bypass this |
 | `TZ` | — | **Required.** Must match the timezone of your IPTV clients — TiviMate sends local time in timeshift URLs (e.g. `TZ=Europe/Amsterdam`) |
+
+---
+
+## On-Screen Error Slates
+
+When a provider refuses or fails to answer, players give the viewer nothing useful — the picture freezes, or the connection closes with no explanation. Instead of dropping the stream, StreamShare can play a short generated clip that says what went wrong, and keep retrying the provider behind it.
+
+The slate shows three things: the error code, its official meaning, and a message you control.
+
+```
+              Error 456 - Connection Limit
+          All provider connections are in use.
+                      NL Sport 1
+```
+
+### How It Works
+
+1. A viewer opens a live channel and the provider fails — a 403, a 404, a connection limit, a timeout, or an unreachable host.
+2. The failure is classified and turned into a slate rendered with ffmpeg, then cached on disk so the same error is never rendered twice.
+3. Every viewer of that channel sees the slate while the provider is retried in the background, with backoff.
+4. If the provider comes back, live video resumes. If it does not come back within the retry budget, the stream stops as it did before.
+
+Behavior:
+- Applies to **live and timeshift** streams only. Movies and series are served over HTTP byte ranges, where injecting a clip would corrupt the response, so they are untouched.
+- Requires `ffmpeg` and the DejaVu font, both present in the Docker image. If either is missing the feature quietly disables itself and streams drop exactly as before — so upgrading is safe and downgrading loses nothing.
+- Resuming live video after a slate is a stream discontinuity. Most players re-sync on it, but behavior varies by player.
+
+### Configuration
+
+| Env var | Default | Description |
+|---|---|---|
+| `ERROR_SLATE_ENABLED` | `true` | Set to `false` to drop failed streams instead of showing a slate |
+| `ERROR_SLATE_RETRY_MAX_MINUTES` | `10` | How long to keep showing the slate and retrying the provider before giving up |
+| `ERROR_SLATE_MESSAGES_FILE` | — | Optional path to a JSON file customising the message shown per error code |
+
+### Customising the messages
+
+The built-in messages are deliberately generic. To write your own — pointing users at your support channel, say — create a JSON file and point `ERROR_SLATE_MESSAGES_FILE` at it:
+
+```yaml
+# docker-compose.yml
+environment:
+  ERROR_SLATE_MESSAGES_FILE: "/root/error-messages.json"
+volumes:
+  - ss_config:/root     # error-messages.json lives here
+```
+
+The file is a single object mapping an error key to the text for that error:
+
+```json
+{
+  "403": { "message": "Your subscription does not include this channel." },
+  "404": { "message": "This channel was removed by the provider." },
+  "456": { "meaning": "Connection limit", "message": "All slots are in use. Ask in #support." },
+  "UNREACHABLE": { "message": "The provider is down. We are on it." }
+}
+```
+
+**The key** is either an HTTP status code as a string (`"403"`), or one of these for failures that never produced a response:
+
+| Key | When it is used |
+|---|---|
+| `UNREACHABLE` | The provider could not be contacted at all |
+| `TIMEOUT` | The provider accepted the connection but did not respond in time |
+| `DNS` | The provider's hostname could not be resolved |
+| `TLS` | The provider's certificate could not be verified |
+
+**The fields** are both optional, and each falls back independently — so overriding one does not blank the other:
+
+| Field | Purpose |
+|---|---|
+| `message` | Your custom text, shown under the headline. Falls back to the built-in message for that code, then to a generic one. |
+| `meaning` | The official meaning shown next to the code. Usually omit it: standard HTTP codes already resolve to their proper text (`403` → `Forbidden`). Worth setting only for non-standard provider codes like `456` or `461`, which have no official meaning. |
+
+Notes:
+- Any key not in the file keeps its built-in wording, so the file only needs the codes you actually want to change.
+- Unknown keys are accepted, so you can add a provider-specific code (`"499"`) without a code change.
+- The file is read once at startup — restart the container after editing it.
+- A missing or malformed file logs a warning and falls back to the built-in messages. Bad JSON never stops streams from being served.
+- Text is sanitised before rendering, so characters that are meaningful to ffmpeg (`:`, quotes, `\`, `%`) are dropped from the picture. Keep messages plain.
+- Long messages wrap to two lines and are then truncated — aim for something short enough to read at a glance from the sofa.
+
+---
+
+## Container Health & Startup Ordering
+
+The image defines a Docker `HEALTHCHECK` that reports **readiness**: the container becomes `healthy` once stream-share has finished starting up and is listening, and stays `starting`/`unhealthy` until then. This lets other services in a Compose stack wait for stream-share to be ready before they start:
+
+```yaml
+services:
+  stream-share:
+    image: ghcr.io/lucasduport/stream-share:latest
+    # ... (the image already includes the HEALTHCHECK) ...
+
+  some-dependent-service:
+    depends_on:
+      stream-share:
+        condition: service_healthy   # waits until /healthz returns 200
+```
+
+Under the hood the check polls **`GET /healthz`**, which returns `200 {"status":"ready"}` after startup completes (the point where the server logs `Server is ready and listening` and begins accepting connections) and `503 {"status":"starting"}` before that. The endpoint is unauthenticated, trivial, and never contacts the IPTV provider, so it is cheap to poll and safe to gate ordering on.
+
+This readiness check applies to **every** deployment and is independent of the VPN/provider feature below — that has its own separate endpoint (`/api/internal/health`) and never affects the container's health status. You can tune the check's cadence by overriding the `HEALTHCHECK` in your own Compose file (e.g. a shorter `interval` for faster ordering, or a longer `start_period` if first-time playlist fetching is slow).
+
+---
+
+## Provider Health Check
+
+> **This feature is only relevant if you run stream-share behind a VPN.** Without a VPN there is no egress IP to rotate, so there is nothing for it to do — leave `HEALTHCHECK_ENABLED` off. It is separate from the container readiness check above and never affects the container's `healthy`/`unhealthy` status.
+
+VPN egress IPs get blocked. If you run stream-share behind a VPN, the provider will periodically ban whatever server you're on and refuse live streams until you reconnect onto a fresh IP — sometimes after a few tries. This feature lets stream-share *detect* that state so an external service can reconnect the VPN automatically.
+
+**stream-share only reports health. It never touches the VPN.** Reconnecting is deliberately left to a separate service, so this app has no dependency on any particular VPN — gluetun, WireGuard, OpenVPN, or anything else you choose. That separation is the whole design:
+
+- **stream-share** probes one configured live channel and classifies the result — `healthy` (provider served video), `blocked` (the provider refused with a code that means "your IP is banned"), or `error` (outage, bad probe channel, transport failure). It's the right place to do this: it already holds the provider credentials and, when it shares the VPN's network namespace, its probe egresses through the exact IP a real viewer would use.
+- **`GET /api/internal/health`** (authenticated) exposes that verdict as machine-readable JSON, forcing a fresh probe on each call.
+- **Your watchdog** (a separate container, for whatever VPN you run) reads that endpoint and, only on `blocked`, reconnects the VPN onto a new server and re-checks in a loop. A complete example — using gluetun's control API but adaptable to any VPN — is in [`examples/vpn-watchdog/`](examples/vpn-watchdog/).
+
+Which upstream code counts as "blocked" is configurable via `HEALTHCHECK_BLOCKED_CODES`. Many Xtream providers use **HTTP 456**, which is the default, but that code is outside the HTTP standard and providers may use others — so it is not hardcoded.
+
+### How it works
+
+1. On a schedule (`HEALTHCHECK_TIMES`, e.g. `04:00,16:00` in the container's `TZ`) and once at startup, stream-share dials the probe channel with the same headers a real player uses and records the verdict. It reuses the provider-error classification from the error-slate feature, so a block code is surfaced as `blocked` even though a live viewer would normally see a slate instead.
+2. `GET /api/internal/health` (authenticated) **forces** a fresh probe and returns the verdict. A watchdog calls this right after reconnecting the VPN, to test whether the new IP is accepted. It's rate-limited by `HEALTHCHECK_MIN_INTERVAL_SECONDS` so it can't be used to hammer the provider. The HTTP status mirrors the verdict — `200` when healthy, `503` when blocked, errored, or stale — but a consumer should read the `status` field from the body rather than rely on the status code (a `503` here is the verdict, not a transport failure).
+
+Probing is intentionally sparing — twice a day plus a handful of checks during an actual reconnect — because aggressive probing is exactly what gets an IP blocked faster.
+
+The `/api/internal/health` JSON body looks like:
+
+```json
+{ "status": "blocked", "code": "456", "detail": "provider returned 456: egress IP is blocked",
+  "checked_at": "2026-08-03T04:00:07Z", "age_seconds": 12, "stale": false }
+```
+
+`status` is one of `healthy`, `blocked`, `error`, `unknown` (no probe yet), or `disabled`.
+
+### Configuration
+
+| Env var | Default | Description |
+|---|---|---|
+| `HEALTHCHECK_ENABLED` | `false` | Turn the provider health probe on (only useful behind a VPN) |
+| `HEALTHCHECK_STREAM_ID` | — | Live channel id to probe, as it appears in a stream URL (e.g. `12345` or `12345.ts`). Pick a stable, always-on channel |
+| `HEALTHCHECK_BLOCKED_CODES` | `456` | Comma-separated upstream status code(s) that mean "IP blocked" (reported as `blocked` vs generic `error`). `456` is common but non-standard, so it's configurable |
+| `HEALTHCHECK_TIMES` | — | Comma-separated local `HH:MM` times to self-probe, e.g. `04:00,16:00`. Empty = probe only at startup and on demand, leaving all scheduling to the watchdog |
+| `HEALTHCHECK_TIMEOUT_SECONDS` | `15` | Per-probe timeout |
+| `HEALTHCHECK_MIN_INTERVAL_SECONDS` | `60` | Minimum spacing between real probes; caps how often the force-probe endpoint hits the provider |
+| `HEALTHCHECK_STALE_MINUTES` | `0` | If > 0, `/api/internal/health` reports `stale` (HTTP `503`) when the last probe is older than this (catches a stalled probe loop) |
+
+Note: this provider feature is **separate** from the container's Docker `HEALTHCHECK`, which reports readiness via `/healthz` (see [Container Health & Startup Ordering](#container-health--startup-ordering)). Enabling or disabling `HEALTHCHECK_ENABLED` never changes whether the container is reported `healthy`.
+
+### Closing the loop (external watchdog)
+
+See [`examples/vpn-watchdog/`](examples/vpn-watchdog/) for a ready-to-adapt script and compose snippet. It targets gluetun as a concrete example, but the pattern works for any VPN with a controllable reconnect — swap out the reconnect call. The recommended topology runs stream-share with `network_mode: "service:<vpn>"` so its provider traffic egresses through the VPN, and runs the watchdog in the same namespace so it can reach the VPN's control server on `http://localhost:8000`. The watchdog reads `/api/internal/health`, and on `blocked` reconnects the VPN onto a new server — for gluetun: stop, confirm stopped, start, confirm running (supporting both API-key and Basic-Auth control servers) — then re-runs the health check, repeating until the provider accepts the new IP or an attempt budget is exhausted. stream-share and the VPN never reference each other — the watchdog is the only piece that knows about both.
 
 ---
 

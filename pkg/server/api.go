@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
- package server
+package server
 
 import (
 	"fmt"
@@ -89,6 +89,26 @@ func (c *Config) setupInternalAPI(r *gin.Engine) {
 
 	// Status summary for Discord and dashboards
 	api.GET("/status", c.statusSummary)
+
+	// Force a fresh provider health probe (rate-limited). Meant for an external
+	// VPN watchdog to test a new egress IP right after reconnecting.
+	api.GET("/health", c.healthProbe)
+
+	// Watch history endpoints (used by Discord and dashboards)
+	api.GET("/history", c.getHistoryFeed)
+	api.GET("/history/:username", c.getUserHistory)
+
+	// Dashboard endpoints: instance identity (for multi-instance aggregation)
+	// and aggregate/leaderboard stats
+	api.GET("/instance", c.getInstanceInfo)
+	api.GET("/stats", c.getDashboardStats)
+
+	// IP alias management — assign a friendly name to a client IP, which is
+	// the de-facto viewer identity when LDAP is disabled
+	api.GET("/ip-aliases", c.listIPAliases)
+	api.POST("/ip-aliases", c.upsertIPAlias)
+	api.POST("/ip-aliases/delete/:ip", c.deleteIPAlias)
+	api.GET("/ip-aliases/resolve/:alias", c.resolveIPAlias)
 
 	// Debug endpoint to verify API is working
 	api.GET("/ping", func(ctx *gin.Context) {

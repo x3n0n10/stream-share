@@ -19,6 +19,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -34,6 +35,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lucasduport/stream-share/pkg/catchup"
 	"github.com/lucasduport/stream-share/pkg/database"
+	"github.com/lucasduport/stream-share/pkg/slate"
 	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
@@ -56,11 +58,21 @@ type SessionManager struct {
 	streamTimeout      time.Duration
 	tempLinkTimeout    time.Duration
 	vodCacheStaleAge   time.Duration
+	slateCacheDir      string        // dir holding rendered slate clips; "" disables slate pruning
+	slateStaleAge      time.Duration // prune slate clips not modified within this; 0 disables
 	clientStallTimeout time.Duration // drop a multiplexed client whose buffer stays full this long
 	httpClient         *http.Client
 	stopChan           chan struct{} // closed by Stop() to terminate background goroutines
 	catchupManager     *catchup.Manager
 	nameResolver       func(streamID string) (string, bool) // optional channel-name lookup for logs
+
+	// Error slate: when the upstream fails before delivering a byte, live
+	// viewers are shown a rendered explanation instead of a dropped connection,
+	// while the pump keeps retrying the provider. slateProvider is nil when the
+	// feature is disabled or ffmpeg is unavailable.
+	slateProvider SlateProvider
+	errorCatalog  *Catalog
+	slateRetryMax time.Duration
 
 	// pauseGrace controls how long a catchup-enabled live stream keeps its
 	// upstream connection (and disk recording) alive after its last viewer
@@ -78,6 +90,19 @@ type SessionManager struct {
 	// streamID + "\x00" + username. Guarded by its own mutex.
 	vodViewTimersMu sync.Mutex
 	vodViewTimers   map[string]*time.Timer
+	// vodHistoryIDs maps an active VOD view (streamID + "\x00" + username) to its
+	// open stream_history row id, so the row is written once per viewing session
+	// (not once per Range request) and closed when the view ends. Guarded by
+	// vodViewTimersMu.
+	vodHistoryIDs map[string]int64
+
+	// liveHistoryIDs maps an active live viewer (streamID + "\x00" + username) to
+	// its open stream_history row id. A row is opened when a user starts watching
+	// a live stream (including multiplexed co-viewers) and closed when that user
+	// leaves, so durations reflect actual watch time. Guarded by liveHistoryMu.
+	// A sentinel value of 0 means "insert in flight" (see recordLiveHistory).
+	liveHistoryMu  sync.Mutex
+	liveHistoryIDs map[string]int64
 }
 
 // Stream multiplexing tuning.
@@ -126,6 +151,86 @@ type StreamBuffer struct {
 
 	// Optional disk buffer for local catchup (nil when catchup is disabled)
 	diskBuffer *catchup.DiskBuffer
+
+	// probeTaps are one-shot listeners that sample bytes already flowing through
+	// this buffer's upstream pump (e.g. for technical stream-info probing),
+	// without opening any additional connection to the provider.
+	probeTaps     []*probeTap
+	probeTapsLock sync.Mutex
+
+	// ready is closed once the pump knows whether the upstream came up, so the
+	// HTTP handler can decide what to send before it commits to a 200. startErr
+	// is nil on success and set when the upstream failed before delivering any
+	// byte. slateOK records whether this stream type may be replaced by an error
+	// slate (live/timeshift only — VOD is served over byte ranges).
+	ready      chan struct{}
+	readyOnce  sync.Once
+	startErrMu sync.Mutex
+	startErr   *UpstreamError
+	slateOK    bool
+}
+
+// markReady records the upstream outcome and releases anyone waiting on Ready.
+// Only the first call counts: later transitions (e.g. a mid-stream failure) must
+// not retroactively change what the handler already decided.
+func (b *StreamBuffer) markReady(err *UpstreamError) {
+	b.readyOnce.Do(func() {
+		b.startErrMu.Lock()
+		b.startErr = err
+		b.startErrMu.Unlock()
+		close(b.ready)
+	})
+}
+
+// Ready returns a channel closed once the upstream outcome is known.
+func (b *StreamBuffer) Ready() <-chan struct{} { return b.ready }
+
+// StartError returns the upstream failure recorded before any byte was
+// delivered, or nil if the stream started successfully.
+func (b *StreamBuffer) StartError() *UpstreamError {
+	b.startErrMu.Lock()
+	defer b.startErrMu.Unlock()
+	return b.startErr
+}
+
+// probeTap collects up to maxBytes of upstream data fed to it by the pump, then
+// closes done. Safe for concurrent feed (from the pump goroutine) and snapshot
+// (from whoever requested the sample), even after a timeout races a feed.
+type probeTap struct {
+	mu        sync.Mutex
+	buf       bytes.Buffer
+	maxBytes  int
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+func newProbeTap(maxBytes int) *probeTap {
+	return &probeTap{maxBytes: maxBytes, done: make(chan struct{})}
+}
+
+func (t *probeTap) feed(chunk []byte) {
+	select {
+	case <-t.done:
+		return
+	default:
+	}
+	t.mu.Lock()
+	if t.buf.Len() < t.maxBytes {
+		t.buf.Write(chunk)
+	}
+	full := t.buf.Len() >= t.maxBytes
+	t.mu.Unlock()
+	if full {
+		t.closeOnce.Do(func() { close(t.done) })
+	}
+}
+
+func (t *probeTap) snapshot() []byte {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]byte, t.buf.Len())
+	copy(out, t.buf.Bytes())
+	return out
 }
 
 // NewSessionManager creates a new session manager
@@ -144,6 +249,8 @@ func NewSessionManager(db *database.DBManager) *SessionManager {
 		clientStallTimeout: defaultClientStallTimeout,
 		pendingStops:       make(map[string]chan struct{}),
 		vodViewTimers:      make(map[string]*time.Timer),
+		vodHistoryIDs:      make(map[string]int64),
+		liveHistoryIDs:     make(map[string]int64),
 		stopChan:           make(chan struct{}),
 		httpClient: &http.Client{
 			// No global Timeout: long-running streams must not be cut after 60s
@@ -212,6 +319,13 @@ func (sm *SessionManager) cleanupRoutine() {
 	cacheTicker := time.NewTicker(sm.cleanupInterval)
 	defer cacheTicker.Stop()
 
+	// Run cache maintenance shortly after startup as well as on the daily ticker,
+	// so a container that restarts more often than once a day is not left with an
+	// ever-growing cache. The short delay lets bootstrap finish applying config
+	// (stale ages, slate dir) before the first pass.
+	initial := time.NewTimer(30 * time.Second)
+	defer initial.Stop()
+
 	for {
 		select {
 		case <-sm.stopChan:
@@ -219,21 +333,35 @@ func (sm *SessionManager) cleanupRoutine() {
 		case <-sessionTicker.C:
 			sm.cleanupExpiredSessions()
 			sm.cleanupUnusedStreams()
+		case <-initial.C:
+			sm.runCacheMaintenance()
 		case <-cacheTicker.C:
-			if sm.db != nil {
-				// Remove temporary links past their expiry date
-				if count, err := sm.db.CleanupExpiredLinks(); err != nil {
-					utils.ErrorLog("Failed to clean expired links: %v", err)
-				} else if count > 0 {
-					utils.InfoLog("Cleaned %d expired temporary links", count)
-				}
-				// Remove DB rows whose expires_at has passed
-				if _, err := sm.db.CleanupExpiredCache(); err != nil {
-					utils.ErrorLog("Failed to clean expired VOD cache entries: %v", err)
-				}
-				// Delete files (and their DB rows) not accessed within the stale age
-				sm.cleanupStaleVODFiles()
-			}
+			sm.runCacheMaintenance()
+		}
+	}
+}
+
+// runCacheMaintenance reaps everything that accumulates on disk: expired temp
+// links, expired and stale VOD cache files (plus their .part siblings), orphaned
+// VOD files no longer referenced by any row, and stale slate clips.
+func (sm *SessionManager) runCacheMaintenance() {
+	if sm.db != nil {
+		if count, err := sm.db.CleanupExpiredLinks(); err != nil {
+			utils.ErrorLog("Failed to clean expired links: %v", err)
+		} else if count > 0 {
+			utils.InfoLog("Cleaned %d expired temporary links", count)
+		}
+		// Order matters: delete expired/stale entries' files *before* their rows,
+		// then reap anything left unreferenced (e.g. failed downloads' .part files).
+		sm.cleanupExpiredVODFiles()
+		sm.cleanupStaleVODFiles()
+		sm.reapVODOrphans()
+	}
+	if sm.slateStaleAge > 0 && sm.slateCacheDir != "" {
+		if n, err := slate.PruneCache(sm.slateCacheDir, sm.slateStaleAge); err != nil {
+			utils.WarnLog("Slate cache prune failed: %v", err)
+		} else if n > 0 {
+			utils.InfoLog("Pruned %d stale slate clip(s)", n)
 		}
 	}
 }
@@ -242,9 +370,12 @@ func (sm *SessionManager) cleanupRoutine() {
 func (sm *SessionManager) cleanupExpiredSessions() {
 	threshold := time.Now().Add(-sm.sessionTimeout)
 
-	sm.userLock.Lock()
-	defer sm.userLock.Unlock()
+	// Collect (username, streamID) pairs to close after releasing the locks, so
+	// the history DB round-trips don't run while holding userLock.
+	type departed struct{ username, streamID string }
+	var toClose []departed
 
+	sm.userLock.Lock()
 	for username, session := range sm.userSessions {
 		if session.LastActive.Before(threshold) {
 			utils.InfoLog("Session expired for user %s (inactive for %s)",
@@ -252,18 +383,27 @@ func (sm *SessionManager) cleanupExpiredSessions() {
 
 			// If user was watching a stream, remove from viewers
 			if session.StreamID != "" {
+				streamID := session.StreamID
 				sm.streamLock.Lock()
-				if streamSession, exists := sm.streamSessions[session.StreamID]; exists {
+				if streamSession, exists := sm.streamSessions[streamID]; exists {
 					if !streamSession.RemoveViewer(username) && streamSession.Active {
 						// No more viewers, stop the stream
-						sm.stopStream(session.StreamID)
+						sm.stopStream(streamID)
 					}
 				}
 				sm.streamLock.Unlock()
+				toClose = append(toClose, departed{username, streamID})
 			}
 
 			delete(sm.userSessions, username)
 		}
+	}
+	sm.userLock.Unlock()
+
+	// Close each departed viewer's live history row (no-op for VOD, which is
+	// closed via its own grace path).
+	for _, d := range toClose {
+		sm.closeLiveHistory(d.username, d.streamID)
 	}
 }
 
@@ -373,6 +513,8 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 			}
 		}
 		sm.streamLock.Unlock()
+		// Close the departing viewer's history row for the previous stream.
+		sm.closeLiveHistory(username, prevStreamID)
 	}
 
 	// Check if this stream is already active
@@ -391,10 +533,15 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 			utils.DebugLog("%s resumed before pause grace expired; continuing uninterrupted", sm.streamLabel(streamID))
 		}
 
+		joinTitle := streamType
 		if streamSession, exists := sm.streamSessions[streamID]; exists {
 			streamSession.AddViewer(username)
 			streamSession.LastRequested = time.Now()
+			joinTitle = streamSession.StreamTitle
 		}
+		// Record this co-viewer's own history row (multiplexed joiners were
+		// previously never recorded).
+		sm.recordLiveHistory(username, streamID, streamType, joinTitle, userSession.IPAddress, userSession.UserAgent)
 
 		existingBuffer.clientsLock.Lock()
 		// If the user already has a client attached (reconnect), drop the old one so
@@ -431,6 +578,8 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		active:      true,
 		clients:     map[string]*streamClient{username: newStreamClient()},
 		stopChan:    make(chan struct{}),
+		ready:       make(chan struct{}),
+		slateOK:     slateEligible(streamType),
 	}
 
 	// Start local disk buffer for live streams when catchup is enabled
@@ -444,16 +593,8 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 	// Start the single upstream pump that fans out to all clients
 	go sm.streamToClients(streamBuffer, upstreamURL)
 
-	// Record in database
-	if sm.db != nil {
-		_, err := sm.db.AddStreamHistory(
-			username, streamID, streamType, streamTitle,
-			userSession.IPAddress, userSession.UserAgent,
-		)
-		if err != nil {
-			utils.ErrorLog("Failed to record stream history: %v", err)
-		}
-	}
+	// Record this viewer's history row (opened now, closed when they leave).
+	sm.recordLiveHistory(username, streamID, streamType, streamTitle, userSession.IPAddress, userSession.UserAgent)
 
 	utils.InfoLog("Started new %s for user %s", sm.streamLabel(streamID), username)
 	return streamBuffer, nil
@@ -483,6 +624,10 @@ func (sm *SessionManager) deliver(buffer *StreamBuffer, cl *streamClient, chunk 
 		}
 		return false
 	}
+	// Use an explicit timer (stopped on the fast path) rather than time.After,
+	// which would otherwise leave one live timer per chunk until it fires.
+	stall := time.NewTimer(sm.clientStallTimeout)
+	defer stall.Stop()
 	select {
 	case cl.ch <- chunk:
 		return false
@@ -490,7 +635,7 @@ func (sm *SessionManager) deliver(buffer *StreamBuffer, cl *streamClient, chunk 
 		return false
 	case <-buffer.stopChan:
 		return false
-	case <-time.After(sm.clientStallTimeout):
+	case <-stall.C:
 		cl.close()
 		return true
 	}
@@ -509,41 +654,47 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 		cancel()
 	}()
 
-	// Bind the upstream request to the cancelable context
-	req, err := http.NewRequestWithContext(ctx, "GET", upstreamURL.String(), nil)
-	if err != nil {
-		utils.ErrorLog("Failed to create request: %v", err)
-		return
+	// Dial the upstream. dialUpstream sets the same headers as before: never
+	// inject Range, so the upstream returns a natural 200 with Content-Length
+	// rather than a 206 that may lack a Content-Range total (which causes
+	// avformat errors in media players). 200 and 206 are both accepted, since
+	// some providers return 206 unconditionally.
+	resp, uerr := sm.dialUpstream(ctx, upstreamURL)
+
+	// Release the HTTP handler waiting to learn whether this stream came up, so
+	// it can choose a response before committing to a 200.
+	buffer.markReady(uerr)
+
+	if uerr != nil {
+		utils.ErrorLog("Upstream failed for %s: %s", sm.streamLabel(buffer.streamID), uerr.Error())
+
+		if !sm.slateEnabled(buffer) {
+			sm.stopStreamLocking(buffer.streamID)
+			return
+		}
+		// Show the viewer what went wrong and keep retrying the provider. This
+		// returns a live response only if the upstream came back.
+		if resp = sm.serveSlateAndRetry(ctx, buffer, upstreamURL, uerr); resp == nil {
+			sm.stopStreamLocking(buffer.streamID)
+			return
+		}
 	}
 
-	// Set common headers; never inject Range — let the upstream return a natural 200
-	// with Content-Length so clients can seek. Injecting bytes=0- forces a 206 response
-	// which may lack a Content-Range total and causes avformat errors in media players.
-	req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Accept-Language", utils.GetLanguageHeader())
-	req.Header.Set("Accept-Encoding", "identity")
-	req.Header.Set("Connection", "keep-alive")
-
-	resp, err := sm.httpClient.Do(req)
-	if err != nil {
-		utils.ErrorLog("Failed to connect to upstream: %v", err)
-		sm.stopStreamLocking(buffer.streamID)
-		return
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	// Accept 200 (expected) and 206 (some providers return it unconditionally).
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		utils.ErrorLog("Upstream returned status %d for %s",
-			resp.StatusCode, sm.streamLabel(buffer.streamID))
-		sm.stopStreamLocking(buffer.streamID)
-		return
-	}
+	// resp is reassigned when a slate retry succeeds, so close whatever is
+	// current at return rather than capturing the original.
+	defer func() {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+	}()
 
 	// The buffer was created active; the pump does not flip the flag itself so
 	// that every read/write of buffer.active stays under sm.streamLock.
 	dataBuffer := make([]byte, streamChunkSize)
+
+	// LastRequested only needs to stay fresh relative to streamTimeout (minutes),
+	// so throttle the streamLock update rather than taking the lock per chunk.
+	var lastTouch time.Time
 
 	for {
 		// Stop requested
@@ -567,12 +718,24 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 				buffer.diskBuffer.Write(chunk)
 			}
 
-			// Touch stream LastRequested to avoid cleanup timeout while data flows
-			sm.streamLock.Lock()
-			if ss, ok := sm.streamSessions[buffer.streamID]; ok {
-				ss.LastRequested = time.Now()
+			// Feed any attached probe taps (e.g. technical-info sampling). Almost
+			// always empty, so this is a cheap lock+iterate over nothing.
+			buffer.probeTapsLock.Lock()
+			taps := buffer.probeTaps
+			buffer.probeTapsLock.Unlock()
+			for _, t := range taps {
+				t.feed(chunk)
 			}
-			sm.streamLock.Unlock()
+
+			// Touch stream LastRequested to avoid cleanup timeout while data flows.
+			if now := time.Now(); now.Sub(lastTouch) >= time.Second {
+				lastTouch = now
+				sm.streamLock.Lock()
+				if ss, ok := sm.streamSessions[buffer.streamID]; ok {
+					ss.LastRequested = now
+				}
+				sm.streamLock.Unlock()
+			}
 		}
 		if rerr != nil {
 			if rerr != io.EOF && ctx.Err() == nil {
@@ -598,17 +761,23 @@ func (sm *SessionManager) fanOut(buffer *StreamBuffer, chunk []byte) {
 	}
 	buffer.clientsLock.RUnlock()
 
-	if len(targets) == 0 {
+	switch len(targets) {
+	case 0:
+		return
+	case 1:
+		// Sole viewer: deliver inline on the pump goroutine (no fan-out
+		// goroutine or WaitGroup). deliver never drops the sole client, so
+		// there is nothing to remove afterwards.
+		sm.deliver(buffer, targets[0], chunk, true)
 		return
 	}
-	sole := len(targets) == 1
 
 	var wg sync.WaitGroup
+	wg.Add(len(targets))
 	for i := range targets {
-		wg.Add(1)
 		go func(name string, cl *streamClient) {
 			defer wg.Done()
-			if sm.deliver(buffer, cl, chunk, sole) {
+			if sm.deliver(buffer, cl, chunk, false) {
 				utils.WarnLog("Dropping slow client %s from %s (buffer stalled)", name, sm.streamLabel(buffer.streamID))
 				sm.RemoveClient(buffer.streamID, name)
 			}
@@ -685,6 +854,10 @@ func (sm *SessionManager) RemoveClient(streamID, username string) {
 		delete(buffer.clients, username)
 	}
 	buffer.clientsLock.Unlock()
+
+	// This viewer is leaving the stream — close their live history row. A later
+	// resume (e.g. after a catchup pause) opens a fresh row via RequestStream.
+	sm.closeLiveHistory(username, streamID)
 
 	// Remove from stream session and stop the stream if last viewer
 	streamSession, exists := sm.streamSessions[streamID]
@@ -785,6 +958,12 @@ func (sm *SessionManager) stopStream(streamID string) {
 	// Signal the upstream pump to stop (Once prevents double-close panic)
 	buffer.stopOnce.Do(func() { close(buffer.stopChan) })
 	buffer.active = false
+
+	// Release any handler still waiting to learn whether this stream came up.
+	// Normally the pump has already marked it ready and this is a no-op; it only
+	// matters when a stream is torn down before the upstream dial finished, where
+	// otherwise the handler would block until its own timeout.
+	buffer.markReady(&UpstreamError{Key: KeyUnreachable})
 
 	// Signal every client's HTTP handler to finish
 	buffer.clientsLock.Lock()
@@ -908,8 +1087,9 @@ func (sm *SessionManager) DisconnectUser(username string) {
 	utils.InfoLog("User %s forcibly disconnected", username)
 }
 
-// vodViewKey identifies a synthetic VOD view by stream and user.
-func vodViewKey(streamID, username string) string { return streamID + "\x00" + username }
+// streamUserKey identifies a (stream, user) pair for the per-view history and
+// grace-timer maps.
+func streamUserKey(streamID, username string) string { return streamID + "\x00" + username }
 
 // RegisterVODView creates a synthetic stream session so status commands see users
 // watching local files. Cached VOD is served as many short Range requests, so any
@@ -917,6 +1097,11 @@ func vodViewKey(streamID, username string) string { return streamID + "\x00" + u
 // player keeps requesting, the session stays visible in /status.
 func (sm *SessionManager) RegisterVODView(username, streamID, streamType, title string) {
 	sm.cancelVODViewTimer(streamID, username)
+
+	// Record a stream_history row once per viewing session. RegisterVODView is
+	// called on every Range request; recordVODHistory de-duplicates so only the
+	// first request for a (user, stream) view inserts a row.
+	sm.recordVODHistory(username, streamID, streamType, title)
 
 	sm.userLock.Lock()
 	if sess, exists := sm.userSessions[username]; exists {
@@ -932,6 +1117,14 @@ func (sm *SessionManager) RegisterVODView(username, streamID, streamType, title 
 		ss.AddViewer(username)
 		ss.LastRequested = time.Now()
 		ss.Active = true
+		// The title passed on the very first request may have been an
+		// unresolved fallback (e.g. a transient lookup failure). Later calls
+		// (RegisterVODView runs on every Range request) can carry a properly
+		// resolved title, so adopt it once available instead of sticking with
+		// the initial fallback for the rest of the session.
+		if (ss.StreamTitle == "" || ss.StreamTitle == streamID) && title != "" && title != streamID {
+			ss.StreamTitle = title
+		}
 	} else {
 		ss := &types.StreamSession{
 			StreamID: streamID, StreamType: streamType, StreamTitle: title,
@@ -949,7 +1142,7 @@ func (sm *SessionManager) RegisterVODView(username, streamID, streamType, title 
 // grace window keeps the session in /status across those gaps. A subsequent
 // RegisterVODView (i.e. the next range request) cancels the pending removal.
 func (sm *SessionManager) UnregisterVODView(username, streamID string) {
-	key := vodViewKey(streamID, username)
+	key := streamUserKey(streamID, username)
 	sm.vodViewTimersMu.Lock()
 	if t, ok := sm.vodViewTimers[key]; ok {
 		t.Stop()
@@ -963,9 +1156,129 @@ func (sm *SessionManager) UnregisterVODView(username, streamID string) {
 	sm.vodViewTimersMu.Unlock()
 }
 
+// recordVODHistory inserts a stream_history row for a VOD view the first time it
+// is seen, keyed by (stream, user). Repeat calls (subsequent Range requests) are
+// no-ops while the view is active. The row is closed in removeVODView.
+func (sm *SessionManager) recordVODHistory(username, streamID, streamType, title string) {
+	if sm.db == nil {
+		return
+	}
+	key := streamUserKey(streamID, username)
+
+	sm.vodViewTimersMu.Lock()
+	if _, exists := sm.vodHistoryIDs[key]; exists {
+		sm.vodViewTimersMu.Unlock()
+		return
+	}
+	// Reserve the slot so a concurrent Range request cannot insert a duplicate row.
+	sm.vodHistoryIDs[key] = 0
+	sm.vodViewTimersMu.Unlock()
+
+	ip, ua := "", ""
+	sm.userLock.RLock()
+	if sess, ok := sm.userSessions[username]; ok {
+		ip, ua = sess.IPAddress, sess.UserAgent
+	}
+	sm.userLock.RUnlock()
+
+	id, err := sm.db.AddStreamHistory(username, streamID, streamType, title, ip, ua)
+	if err != nil {
+		utils.ErrorLog("Failed to record VOD stream history: %v", err)
+		sm.vodViewTimersMu.Lock()
+		delete(sm.vodHistoryIDs, key)
+		sm.vodViewTimersMu.Unlock()
+		return
+	}
+	sm.vodViewTimersMu.Lock()
+	sm.vodHistoryIDs[key] = id
+	sm.vodViewTimersMu.Unlock()
+}
+
+// closeVODHistory marks a VOD view's stream_history row as ended, if one is open.
+func (sm *SessionManager) closeVODHistory(username, streamID string) {
+	key := streamUserKey(streamID, username)
+	sm.vodViewTimersMu.Lock()
+	id, ok := sm.vodHistoryIDs[key]
+	if ok {
+		delete(sm.vodHistoryIDs, key)
+	}
+	sm.vodViewTimersMu.Unlock()
+	if ok && id > 0 && sm.db != nil {
+		if err := sm.db.CloseStreamHistory(id); err != nil {
+			utils.WarnLog("Failed to close VOD stream history %d: %v", id, err)
+		}
+	}
+}
+
+// recordLiveHistory opens a stream_history row for a live viewer the first time
+// they are seen on a stream, keyed by (stream, user). The DB insert runs off the
+// caller's goroutine (callers hold streamLock) so the streaming hot path is not
+// blocked on database latency. If the viewer leaves before the insert completes,
+// the row is closed immediately when the id lands.
+func (sm *SessionManager) recordLiveHistory(username, streamID, streamType, title, ip, ua string) {
+	if sm.db == nil {
+		return
+	}
+	key := streamUserKey(streamID, username)
+
+	sm.liveHistoryMu.Lock()
+	if _, exists := sm.liveHistoryIDs[key]; exists {
+		sm.liveHistoryMu.Unlock()
+		return
+	}
+	// Reserve the slot (sentinel 0 = insert in flight) so a concurrent join for the
+	// same viewer cannot open a duplicate row.
+	sm.liveHistoryIDs[key] = 0
+	sm.liveHistoryMu.Unlock()
+
+	go func() {
+		id, err := sm.db.AddStreamHistory(username, streamID, streamType, title, ip, ua)
+		if err != nil {
+			utils.ErrorLog("Failed to record live stream history: %v", err)
+			sm.liveHistoryMu.Lock()
+			if v, ok := sm.liveHistoryIDs[key]; ok && v == 0 {
+				delete(sm.liveHistoryIDs, key)
+			}
+			sm.liveHistoryMu.Unlock()
+			return
+		}
+		sm.liveHistoryMu.Lock()
+		if v, ok := sm.liveHistoryIDs[key]; ok && v == 0 {
+			sm.liveHistoryIDs[key] = id
+			sm.liveHistoryMu.Unlock()
+			return
+		}
+		// The viewer already left before the insert completed (slot was deleted):
+		// close the freshly-created row so it does not stay open forever.
+		sm.liveHistoryMu.Unlock()
+		if err := sm.db.CloseStreamHistory(id); err != nil {
+			utils.WarnLog("Failed to close orphaned live stream history %d: %v", id, err)
+		}
+	}()
+}
+
+// closeLiveHistory marks a live viewer's stream_history row as ended, if one is
+// open. Safe to call for non-live streams and unknown viewers (no-op). Deleting a
+// still-reserved slot (id 0) signals recordLiveHistory's goroutine to close the
+// row as soon as its insert completes.
+func (sm *SessionManager) closeLiveHistory(username, streamID string) {
+	key := streamUserKey(streamID, username)
+	sm.liveHistoryMu.Lock()
+	id, ok := sm.liveHistoryIDs[key]
+	if ok {
+		delete(sm.liveHistoryIDs, key)
+	}
+	sm.liveHistoryMu.Unlock()
+	if ok && id > 0 && sm.db != nil {
+		if err := sm.db.CloseStreamHistory(id); err != nil {
+			utils.WarnLog("Failed to close live stream history %d: %v", id, err)
+		}
+	}
+}
+
 // cancelVODViewTimer stops any pending grace-period removal for a VOD view.
 func (sm *SessionManager) cancelVODViewTimer(streamID, username string) {
-	key := vodViewKey(streamID, username)
+	key := streamUserKey(streamID, username)
 	sm.vodViewTimersMu.Lock()
 	if t, ok := sm.vodViewTimers[key]; ok {
 		t.Stop()
@@ -977,6 +1290,8 @@ func (sm *SessionManager) cancelVODViewTimer(streamID, username string) {
 // removeVODView detaches a user from a synthetic VOD viewing session once the
 // grace period has elapsed without further range requests.
 func (sm *SessionManager) removeVODView(username, streamID string) {
+	sm.closeVODHistory(username, streamID)
+
 	sm.userLock.Lock()
 	if sess, exists := sm.userSessions[username]; exists && sess.StreamID == streamID {
 		sess.StreamID = ""
@@ -1001,6 +1316,47 @@ func (sm *SessionManager) GetStreamInfo(streamID string) (*types.StreamSession, 
 
 	session, exists := sm.streamSessions[streamID]
 	return session, exists
+}
+
+// CaptureStreamSample returns up to maxBytes of upstream data for an actively
+// buffered (multiplexed live) stream, sampled from bytes already flowing
+// through its existing pump — it does NOT open any additional connection to
+// the provider. Returns an error if the stream has no active shared buffer
+// (e.g. it is a VOD view, which has no persistent upstream connection to tap).
+// If the timeout elapses before maxBytes is reached, whatever was captured so
+// far is returned (which may be a usable, if smaller, sample).
+func (sm *SessionManager) CaptureStreamSample(streamID string, maxBytes int, timeout time.Duration) ([]byte, error) {
+	sm.streamLock.RLock()
+	buffer, exists := sm.streamBuffers[streamID]
+	sm.streamLock.RUnlock()
+	if !exists || !buffer.active {
+		return nil, fmt.Errorf("no active shared upstream connection for stream %s", streamID)
+	}
+
+	tap := newProbeTap(maxBytes)
+	buffer.probeTapsLock.Lock()
+	buffer.probeTaps = append(buffer.probeTaps, tap)
+	buffer.probeTapsLock.Unlock()
+	defer func() {
+		buffer.probeTapsLock.Lock()
+		for i, t := range buffer.probeTaps {
+			if t == tap {
+				buffer.probeTaps = append(buffer.probeTaps[:i], buffer.probeTaps[i+1:]...)
+				break
+			}
+		}
+		buffer.probeTapsLock.Unlock()
+	}()
+
+	select {
+	case <-tap.done:
+		return tap.snapshot(), nil
+	case <-time.After(timeout):
+		if sample := tap.snapshot(); len(sample) > 0 {
+			return sample, nil
+		}
+		return nil, fmt.Errorf("timed out sampling stream %s", streamID)
+	}
 }
 
 // SetSessionTimeout sets the user session timeout duration
@@ -1039,6 +1395,59 @@ func (sm *SessionManager) SetClientStallTimeout(d time.Duration) {
 	}
 }
 
+// SetSlateCache configures pruning of the on-disk slate clip cache: clips not
+// modified within age are deleted (they are regenerated on demand). An empty dir
+// or a non-positive age disables pruning.
+func (sm *SessionManager) SetSlateCache(dir string, age time.Duration) {
+	sm.slateCacheDir = dir
+	sm.slateStaleAge = age
+}
+
+// vodCacheContains reports whether path is safely inside the VOD cache directory,
+// guarding every deletion against a stray absolute path in a DB row.
+func vodCacheContains(cacheDir, path string) bool {
+	return strings.HasPrefix(filepath.Clean(path), cacheDir+string(os.PathSeparator))
+}
+
+// removeVODFile deletes a cached VOD media file and its sibling ".part" (left by
+// an interrupted download), but only when they live inside the cache directory.
+func removeVODFile(cacheDir, path string) {
+	if path == "" {
+		return
+	}
+	if !vodCacheContains(cacheDir, path) {
+		utils.WarnLog("Refusing to delete out-of-cache-dir path: %s", path)
+		return
+	}
+	for _, p := range []string{path, path + ".part"} {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			utils.WarnLog("Could not delete VOD file %s: %v", p, err)
+		}
+	}
+}
+
+// cleanupExpiredVODFiles removes entries whose expires_at has passed, deleting
+// the file (and its .part sibling) before the DB row so expiry never orphans a
+// file. Unlike the stale sweep this spans every status, so an expired failed or
+// in-progress entry is cleaned up too.
+func (sm *SessionManager) cleanupExpiredVODFiles() {
+	cacheDir := filepath.Clean(utils.VODCacheDir())
+	entries, err := sm.db.GetExpiredVODCache()
+	if err != nil {
+		utils.ErrorLog("Failed to query expired VOD cache: %v", err)
+		return
+	}
+	for _, e := range entries {
+		removeVODFile(cacheDir, e.FilePath)
+		if err := sm.db.DeleteVODCacheEntry(e.StreamID); err != nil {
+			utils.ErrorLog("Failed to remove expired VOD cache row for %s: %v", e.StreamID, err)
+		}
+	}
+	if len(entries) > 0 {
+		utils.InfoLog("Removed %d expired VOD cache entry(ies)", len(entries))
+	}
+}
+
 // cleanupStaleVODFiles deletes cached VOD files (and their DB rows) that have
 // not been accessed within vodCacheStaleAge. In-progress downloads are skipped.
 func (sm *SessionManager) cleanupStaleVODFiles() {
@@ -1051,18 +1460,63 @@ func (sm *SessionManager) cleanupStaleVODFiles() {
 		return
 	}
 	for _, e := range entries {
-		// Safety: only delete files that are inside the expected cache directory.
-		if !strings.HasPrefix(filepath.Clean(e.FilePath), cacheDir+string(os.PathSeparator)) {
-			utils.WarnLog("Refusing to delete out-of-cache-dir path: %s", e.FilePath)
-			continue
-		}
-		if err := os.Remove(e.FilePath); err != nil && !os.IsNotExist(err) {
-			utils.WarnLog("Could not delete stale VOD file %s: %v", e.FilePath, err)
-		}
+		removeVODFile(cacheDir, e.FilePath)
 		if err := sm.db.DeleteVODCacheEntry(e.StreamID); err != nil {
 			utils.ErrorLog("Failed to remove stale VOD cache row for %s: %v", e.StreamID, err)
 		} else {
 			utils.InfoLog("Removed stale VOD cache entry %s (last accessed %s ago)", e.StreamID, utils.HumanDuration(time.Since(e.LastAccess)))
 		}
+	}
+}
+
+// reapVODOrphans removes files in the VOD cache directory that no row references,
+// plus leftover ".part" files from failed or interrupted downloads. It only
+// deletes files idle for at least vodCacheStaleAge: an active download writes its
+// ".part" continuously, so the mtime grace keeps a live transfer safe while a
+// dead one eventually ages past the threshold.
+func (sm *SessionManager) reapVODOrphans() {
+	cacheDir := filepath.Clean(utils.VODCacheDir())
+	dirEntries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			utils.WarnLog("VOD orphan sweep: cannot read %s: %v", cacheDir, err)
+		}
+		return
+	}
+	known, err := sm.db.ListVODCacheFilePaths()
+	if err != nil {
+		utils.ErrorLog("VOD orphan sweep: cannot list referenced files: %v", err)
+		return
+	}
+	cutoff := time.Now().Add(-sm.vodCacheStaleAge)
+	removed := 0
+	for _, de := range dirEntries {
+		if de.IsDir() {
+			continue
+		}
+		full := filepath.Join(cacheDir, de.Name())
+		// A finished media file referenced by a row is governed by that row's
+		// expiry/staleness, not this sweep. ".part" files are never referenced
+		// (rows track the final path), so they always fall through to the age check.
+		if !strings.HasSuffix(de.Name(), ".part") {
+			if _, ok := known[full]; ok {
+				continue
+			}
+		}
+		info, err := de.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(cutoff) {
+			continue // too fresh — may be an active download or a just-written file
+		}
+		if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
+			utils.WarnLog("VOD orphan sweep: could not delete %s: %v", full, err)
+			continue
+		}
+		removed++
+	}
+	if removed > 0 {
+		utils.InfoLog("VOD orphan sweep: removed %d unreferenced file(s)", removed)
 	}
 }

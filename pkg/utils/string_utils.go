@@ -19,6 +19,8 @@
 package utils
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"strconv"
@@ -54,7 +56,7 @@ func MaskURL(urlStr string) string {
 // composed into generated URLs of the form "<scheme>://<host>[:<port>]...".
 // Operators frequently set HOSTNAME (or --hostname) to a full URL such as
 // "https://tv.example.com:8443/whatever"; composing that naively yields
-// malformed links — a duplicated scheme ("http://https://...") or a duplicated
+// malformed links - a duplicated scheme ("http://https://...") or a duplicated
 // port ("host:8443:8080"). It strips a leading scheme (tolerating the "https//"
 // missing-colon typo), discards any path/query/fragment, and splits off a
 // trailing port. It returns the bare host (IPv6 literals keep their brackets),
@@ -83,7 +85,7 @@ func NormalizeHostname(raw string) (host string, port int, https bool) {
 
 // splitHostPort separates a trailing numeric port from a "host:port" authority.
 // It returns the host (IPv6 literals keep their brackets) and the port, or the
-// input unchanged with port 0 when there is no numeric port — including a bare,
+// input unchanged with port 0 when there is no numeric port - including a bare,
 // unbracketed IPv6 literal, whose colons are not a port separator.
 func splitHostPort(authority string) (host string, port int) {
 	if authority == "" {
@@ -135,4 +137,20 @@ func HumanBytes(b int64) string {
 		exp = len(pre) - 1
 	}
 	return fmt.Sprintf("%.1f %s", float64(b)/float64(div), pre[exp])
+}
+
+// GenerateShortToken generates a random alphanumeric token of the specified length.
+// It uses cryptographically secure random number generation.
+// The token uses hex encoding which gives us [0-9a-f] characters.
+func GenerateShortToken(length int) (string, error) {
+	if length <= 0 {
+		length = 8
+	}
+	// Each hex character represents 4 bits, so we need length/2 bytes
+	// But we generate extra bytes and truncate to handle odd lengths
+	bytes := make([]byte, (length+1)/2)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes)[:length], nil
 }

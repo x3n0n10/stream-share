@@ -32,7 +32,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
+
 	"github.com/lucasduport/stream-share/pkg/catchup"
 	"github.com/lucasduport/stream-share/pkg/database"
 	"github.com/lucasduport/stream-share/pkg/slate"
@@ -990,7 +990,10 @@ func (sm *SessionManager) stopStream(streamID string) {
 
 // GenerateTemporaryLink creates a temporary download link
 func (sm *SessionManager) GenerateTemporaryLink(username, streamID, title, rawURL string) (string, error) {
-	token := uuid.New().String()
+	token, err := utils.GenerateShortToken(8)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate token: %v", err)
+	}
 	expiresAt := time.Now().Add(sm.tempLinkTimeout)
 
 	tempLink := &types.TemporaryLink{

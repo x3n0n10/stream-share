@@ -160,28 +160,73 @@ heal() {
   return 1
 }
 
-# seconds_until_next returns the seconds to wait until the next HH:MM in CHECK_TIMES.
-seconds_until_next() {
-  now=$(date +%s)
-  best=""
-  IFS=','
-  for t in $CHECK_TIMES; do
-    t=$(echo "$t" | tr -d ' ')
-    [ -z "$t" ] && continue
-    target=$(date -d "today $t" +%s 2>/dev/null) || continue
-    [ "$target" -le "$now" ] && target=$((target + 86400))
-    if [ -z "$best" ] || [ "$target" -lt "$best" ]; then best=$target; fi
-  done
-  unset IFS
-  [ -z "$best" ] && best=$((now + 43200))   # fallback: 12h
-  echo $((best - now))
+# undec strips leading zeros so clock values like 08/09 are not misread as octal
+# in shell arithmetic. Empty or all-zero input becomes 0.
+undec() {
+  v=$1
+  while [ "${v#0}" != "$v" ]; do v=${v#0}; done
+  [ -z "$v" ] && v=0
+  echo "$v"
 }
 
-log "VPN watchdog starting. Checking at: $CHECK_TIMES"
-heal || true                                # run once at startup
+# time_to_min converts "H:M" / "HH:MM" to minutes since midnight (0..1439), or
+# prints -1 when it is not a valid time.
+time_to_min() {
+  case "$1" in *:*) ;; *) echo -1; return ;; esac
+  h=$(undec "${1%%:*}")
+  m=$(undec "${1#*:}")
+  case "$h$m" in *[!0-9]*) echo -1; return ;; esac
+  if [ "$h" -ge 0 ] && [ "$h" -le 23 ] && [ "$m" -ge 0 ] && [ "$m" -le 59 ]; then
+    echo $(( h * 60 + m ))
+  else
+    echo -1
+  fi
+}
+
+# Parse CHECK_TIMES once into a list of minutes-of-day. BusyBox date (alpine) has
+# no GNU `date -d` parsing, so the schedule is matched against the wall clock
+# directly instead of computing a sleep duration — which is what made the old
+# version fall back to a fixed 12h wait and ignore the configured times.
+TARGET_MINS=""
+oldIFS=$IFS
+IFS=','
+for t in $CHECK_TIMES; do
+  t=$(echo "$t" | tr -d '[:space:]')
+  [ -z "$t" ] && continue
+  mm=$(time_to_min "$t")
+  if [ "$mm" -lt 0 ]; then
+    log "Ignoring invalid CHECK_TIMES entry '$t' (want HH:MM)"
+    continue
+  fi
+  TARGET_MINS="$TARGET_MINS $mm"
+done
+IFS=$oldIFS
+
+if [ -z "$TARGET_MINS" ]; then
+  log "No valid CHECK_TIMES configured; defaulting to 04:00,16:00."
+  TARGET_MINS="240 960"
+fi
+
+log "VPN watchdog starting. Checking at: ${CHECK_TIMES:-04:00,16:00} (local time)"
+heal || true                                  # run once at startup
+# Remember the minute the startup check ran in, so the poll loop does not
+# immediately fire again within that same minute.
+last_stamp=$(date +%Y%m%d%H%M)
+
+# Poll the clock every 30s and run heal when the current minute matches one of
+# the target minutes. The stamp (date + minute) guards against firing twice in
+# the same minute while still firing again on the next day.
 while true; do
-  wait_s="$(seconds_until_next)"
-  log "Next check in ${wait_s}s."
-  sleep "$wait_s"
-  heal || true
+  sleep 30
+  set -- $(date '+%H %M %Y%m%d%H%M')
+  cur=$(( $(undec "$1") * 60 + $(undec "$2") ))
+  stamp=$3
+  [ "$stamp" = "$last_stamp" ] && continue
+  for tm in $TARGET_MINS; do
+    if [ "$cur" -eq "$tm" ]; then
+      last_stamp=$stamp
+      heal || true
+      break
+    fi
+  done
 done

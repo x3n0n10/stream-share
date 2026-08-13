@@ -19,7 +19,11 @@
 #
 # Requirements: a POSIX shell and `curl` (both in the alpine/curl image used by
 # docker-compose.snippet.yml). It must be able to reach the stream-share internal
-# API (STREAM_SHARE_URL) and the VPN control server (GLUETUN_URL).
+# API (WATCHDOG_STREAM_SHARE_URL) and the VPN control server (WATCHDOG_GLUETUN_URL).
+#
+# All of this watchdog's own environment variables are namespaced with a
+# WATCHDOG_ prefix so they cannot collide with variables belonging to
+# stream-share or the VPN when several services share a network namespace.
 #
 # NOTE: this file must use LF line endings. CRLF (Windows) endings make a POSIX
 # shell fail with errors like `: not found` on blank lines and `elif unexpected`.
@@ -27,31 +31,31 @@
 # `sed -i 's/\r$//' watchdog.sh` (or `dos2unix watchdog.sh`).
 
 # --- stream-share ------------------------------------------------------------
-STREAM_SHARE_URL="${STREAM_SHARE_URL:-http://localhost:8080}"
-INTERNAL_API_KEY="${INTERNAL_API_KEY:?set INTERNAL_API_KEY to the stream-share internal API key}"
+STREAM_SHARE_URL="${WATCHDOG_STREAM_SHARE_URL:-http://localhost:8080}"
+INTERNAL_API_KEY="${WATCHDOG_INTERNAL_API_KEY:?set WATCHDOG_INTERNAL_API_KEY to the stream-share internal API key}"
 
 # --- VPN control (gluetun example) -------------------------------------------
-GLUETUN_URL="${GLUETUN_URL:-http://localhost:8000}"
+GLUETUN_URL="${WATCHDOG_GLUETUN_URL:-http://localhost:8000}"
 # Auth: the gluetun control server supports HTTP Basic Auth or an API key,
 # depending on its roles config. Set whichever matches; if both are set, Basic
 # Auth wins (a client maps to exactly one auth method).
-GLUETUN_USER="${GLUETUN_USER:-}"
-GLUETUN_PASSWORD="${GLUETUN_PASSWORD:-}"
-GLUETUN_API_KEY="${GLUETUN_API_KEY:-}"
+GLUETUN_USER="${WATCHDOG_GLUETUN_USER:-}"
+GLUETUN_PASSWORD="${WATCHDOG_GLUETUN_PASSWORD:-}"
+GLUETUN_API_KEY="${WATCHDOG_GLUETUN_API_KEY:-}"
 # /v1/vpn/status is the current unified gluetun status/start/stop endpoint (both
 # OpenVPN and WireGuard). Override to /v1/openvpn/status for older gluetun.
-GLUETUN_STATUS_PATH="${GLUETUN_STATUS_PATH:-/v1/vpn/status}"
+GLUETUN_STATUS_PATH="${WATCHDOG_GLUETUN_STATUS_PATH:-/v1/vpn/status}"
 
 # --- behaviour ---------------------------------------------------------------
-# CHECK_TIMES is the single schedule for hitting the provider: each run forces a
+# WATCHDOG_CHECK_TIMES is the single schedule for hitting the provider: each run forces a
 # fresh probe (which also refreshes the stream-share /healthz). When this watchdog
 # is running, leave the stream-share HEALTHCHECK_TIMES empty so the provider is
 # not probed twice on two schedules for the same information.
-CHECK_TIMES="${CHECK_TIMES:-04:00,16:00}"       # local times to run, comma-separated HH:MM
-MAX_RECONNECTS="${MAX_RECONNECTS:-5}"           # give up after this many server switches
-RECONNECT_TIMEOUT="${RECONNECT_TIMEOUT:-45}"    # per-cycle budget (seconds) to confirm stopped then running
-CONNECT_RETRIES="${CONNECT_RETRIES:-5}"         # retries when stream-share is unreachable (e.g. still starting after a restart)
-CONNECT_RETRY_WAIT="${CONNECT_RETRY_WAIT:-5}"   # seconds to wait between those retries
+CHECK_TIMES="${WATCHDOG_CHECK_TIMES:-04:00,16:00}"       # local times to run, comma-separated HH:MM
+MAX_RECONNECTS="${WATCHDOG_MAX_RECONNECTS:-5}"           # give up after this many server switches
+RECONNECT_TIMEOUT="${WATCHDOG_RECONNECT_TIMEOUT:-45}"    # per-cycle budget (seconds) to confirm stopped then running
+CONNECT_RETRIES="${WATCHDOG_CONNECT_RETRIES:-5}"         # retries when stream-share is unreachable (e.g. still starting after a restart)
+CONNECT_RETRY_WAIT="${WATCHDOG_CONNECT_RETRY_WAIT:-5}"   # seconds to wait between those retries
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -82,7 +86,7 @@ EOF
 #
 # An EMPTY HEALTH_STATUS is never a provider verdict: it means the watchdog could
 # not get an answer from stream-share. HEALTH_DETAIL then explains why — a
-# connection failure, an HTTP 401 from a wrong INTERNAL_API_KEY, a wrong URL, and
+# connection failure, an HTTP 401 from a wrong WATCHDOG_INTERNAL_API_KEY, a wrong URL, and
 # so on — rather than the old opaque "<unreachable>". heal() never cycles the VPN
 # on an empty status.
 fetch_health() {

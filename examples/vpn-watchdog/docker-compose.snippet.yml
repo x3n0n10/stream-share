@@ -57,21 +57,24 @@ services:
     # the same network namespace.
     network_mode: "service:gluetun"
     environment:
-      STREAM_SHARE_URL: "http://localhost:8080"
-      INTERNAL_API_KEY: "change-me"        # must match stream-share's INTERNAL_API_KEY
-      GLUETUN_URL: "http://localhost:8000"
+      # This watchdog's own settings are all namespaced with WATCHDOG_ so they
+      # cannot collide with stream-share's or the VPN's variables in the shared
+      # network namespace.
+      WATCHDOG_STREAM_SHARE_URL: "http://localhost:8080"
+      WATCHDOG_INTERNAL_API_KEY: "change-me"        # must match stream-share's INTERNAL_API_KEY
+      WATCHDOG_GLUETUN_URL: "http://localhost:8000"
       # Auth for gluetun's control server — set EITHER these two (Basic Auth) ...
-      GLUETUN_USER: ""
-      GLUETUN_PASSWORD: ""
+      WATCHDOG_GLUETUN_USER: ""
+      WATCHDOG_GLUETUN_PASSWORD: ""
       # ... OR this (API key). If both are set, Basic Auth is used.
-      GLUETUN_API_KEY: ""
+      WATCHDOG_GLUETUN_API_KEY: ""
       # Override only for older gluetun that lacks the unified endpoint:
-      # GLUETUN_STATUS_PATH: "/v1/openvpn/status"
-      CHECK_TIMES: "04:00,16:00"
-      MAX_RECONNECTS: "5"
-      RECONNECT_TIMEOUT: "45"              # per-cycle budget to reach a usable IP
-      CONNECT_RETRIES: "5"                 # retries when stream-share is unreachable (e.g. still starting)
-      CONNECT_RETRY_WAIT: "5"              # seconds between those retries
+      # WATCHDOG_GLUETUN_STATUS_PATH: "/v1/openvpn/status"
+      WATCHDOG_CHECK_TIMES: "04:00,16:00"
+      WATCHDOG_MAX_RECONNECTS: "5"
+      WATCHDOG_RECONNECT_TIMEOUT: "45"              # per-cycle budget to reach a usable IP
+      WATCHDOG_CONNECT_RETRIES: "5"                 # retries when stream-share is unreachable (e.g. still starting)
+      WATCHDOG_CONNECT_RETRY_WAIT: "5"              # seconds between those retries
     volumes:
       - ./examples/vpn-watchdog/watchdog.sh:/watchdog.sh:ro
     entrypoint: ["sh", "/watchdog.sh"]

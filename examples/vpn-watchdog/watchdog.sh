@@ -53,7 +53,10 @@ GLUETUN_STATUS_PATH="${WATCHDOG_GLUETUN_STATUS_PATH:-/v1/vpn/status}"
 # not probed twice on two schedules for the same information.
 CHECK_TIMES="${WATCHDOG_CHECK_TIMES:-04:00,16:00}"       # local times to run, comma-separated HH:MM
 MAX_RECONNECTS="${WATCHDOG_MAX_RECONNECTS:-5}"           # give up after this many server switches
-RECONNECT_TIMEOUT="${WATCHDOG_RECONNECT_TIMEOUT:-45}"    # per-cycle budget (seconds) to confirm stopped then running
+RECONNECT_TIMEOUT="${WATCHDOG_RECONNECT_TIMEOUT:-45}"    # seconds to wait for a usable public IP after restart
+STATUS_TIMEOUT="${WATCHDOG_STATUS_TIMEOUT:-20}"         # seconds to wait for gluetun to report stopped / running
+DISCONNECT_TIMEOUT="${WATCHDOG_DISCONNECT_TIMEOUT:-15}" # seconds to wait for the tunnel to actually drop after stop
+RECONNECT_SETTLE="${WATCHDOG_RECONNECT_SETTLE:-8}"      # seconds to pause between reconnect attempts
 CONNECT_RETRIES="${WATCHDOG_CONNECT_RETRIES:-5}"         # retries when stream-share is unreachable (e.g. still starting after a restart)
 CONNECT_RETRY_WAIT="${WATCHDOG_CONNECT_RETRY_WAIT:-5}"   # seconds to wait between those retries
 
@@ -151,10 +154,11 @@ set_vpn() { gluetun_curl -X PUT -H "Content-Type: application/json" -d "{\"statu
 # last status it actually saw plus any transport error and a snippet of the raw
 # body, so a wrong GLUETUN_STATUS_PATH (e.g. a 404 on /v1/vpn/status for older
 # gluetun) or an auth problem is visible instead of a silent per-second spin.
-wait_status() { # $1=desired $2=deadline_epoch
+wait_status() { # $1=desired $2=timeout_seconds
+  deadline=$(( $(date +%s) + $2 ))
   errf="$(mktemp 2>/dev/null || echo /tmp/wd_vpn_err)"
   seen=""; raw=""; err=""
-  while [ "$(date +%s)" -lt "$2" ]; do
+  while [ "$(date +%s)" -lt "$deadline" ]; do
     raw="$(gluetun_curl "$GLUETUN_URL$GLUETUN_STATUS_PATH" 2>"$errf")"
     if [ $? -ne 0 ]; then err="$(tr '\n' ' ' < "$errf" | sed 's/  */ /g;s/ *$//')"; else err=""; fi
     seen="$(json_str "$raw" status)"
@@ -163,29 +167,59 @@ wait_status() { # $1=desired $2=deadline_epoch
   done
   rm -f "$errf"
   snip="$(printf '%s' "$raw" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-120)"
-  log "gluetun did not report '$1' in time (last status: '${seen:-<none>}'${err:+; error: $err}${snip:+; body: $snip}). Check WATCHDOG_GLUETUN_URL / WATCHDOG_GLUETUN_STATUS_PATH / auth."
+  log "gluetun did not report '$1' within ${2}s (last status: '${seen:-<none>}'${err:+; error: $err}${snip:+; body: $snip}). Check WATCHDOG_GLUETUN_URL / WATCHDOG_GLUETUN_STATUS_PATH / auth."
   return 1
 }
 
-# cycle_vpn reconnects the VPN: stop, confirm stopped, start, confirm running.
-# Once gluetun reports "running" we treat the tunnel as back and return — the
-# caller re-runs the health check to judge whether the new server is unblocked,
-# so we do not poll the public-IP endpoint. Reselecting a *different* server
-# depends on the VPN config allowing more than one — e.g. the gluetun
-# SERVER_*/VPN_* vars. The public IP is fetched once, best-effort, only to log
-# which exit we landed on.
+# wait_disconnected returns once the public-IP probe fails — i.e. the tunnel has
+# really gone down — or the budget runs out. Some setups do not firewall non-VPN
+# traffic, so the probe may keep succeeding; it is bounded so we proceed anyway.
+wait_disconnected() { # $1=timeout_seconds
+  deadline=$(( $(date +%s) + $1 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    public_ip >/dev/null 2>&1 || return 0
+    sleep 1
+  done
+  return 1
+}
+
+# wait_public_ip prints the first usable public IP within the budget, else empty.
+# gluetun reports "running" before it has re-resolved its exit IP, so a usable IP
+# is the real proof the new tunnel is up — and yields the new IP for logging.
+wait_public_ip() { # $1=timeout_seconds
+  deadline=$(( $(date +%s) + $1 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    ip="$(public_ip)" && { echo "$ip"; return 0; }
+    sleep 2
+  done
+  return 1
+}
+
+# cycle_vpn reconnects the VPN, mirroring the stream-share-dashboard sequence
+# (which is known to work): stop, confirm stopped, wait until traffic actually
+# stops routing, start, confirm running, then wait for a usable public IP.
+# gluetun reports "running" as its TARGET state before the tunnel is really back,
+# so trusting that flag alone reconnects far too fast (and hammers gluetun on the
+# next attempt). Each phase has its own timeout, and the old vs new IP is logged
+# so an unchanged IP (single-server gluetun) is obvious.
 cycle_vpn() {
-  deadline=$(( $(date +%s) + RECONNECT_TIMEOUT ))
-  log "Cycling VPN..."
+  oldip="$(public_ip 2>/dev/null || echo '?')"
+  log "Cycling VPN (current IP: $oldip)..."
 
   set_vpn stopped || log "warning: stop request failed"
-  wait_status stopped "$deadline" || log "warning: never confirmed stopped"
+  wait_status stopped "$STATUS_TIMEOUT" || :
+  wait_disconnected "$DISCONNECT_TIMEOUT" || \
+    log "note: traffic still routing after stop (VPN kill-switch may be off); proceeding"
 
   set_vpn running || log "warning: start request failed"
-  if wait_status running "$deadline"; then
-    log "VPN reports running (IP: $(public_ip 2>/dev/null || echo '?'))."
+  wait_status running "$STATUS_TIMEOUT" || :
+  newip="$(wait_public_ip "$RECONNECT_TIMEOUT" || true)"
+  if [ -z "$newip" ]; then
+    log "warning: no usable public IP within ${RECONNECT_TIMEOUT}s after restart"
+  elif [ "$newip" = "$oldip" ] && [ "$oldip" != "?" ]; then
+    log "VPN back up but exit IP is UNCHANGED ($newip) — gluetun likely has only one server to pick from, so a reconnect cannot rotate the IP and the provider stays blocked. Give gluetun multiple servers (e.g. SERVER_COUNTRIES / SERVER_CITIES / SERVER_HOSTNAMES)."
   else
-    log "warning: never confirmed running within ${RECONNECT_TIMEOUT}s."
+    log "VPN back up (new IP: $newip)"
   fi
 }
 
@@ -222,6 +256,8 @@ heal() {
     fi
     log "Still ${HEALTH_STATUS:-<unreachable>} after attempt $i."
     i=$((i + 1))
+    # Let gluetun settle before hammering it with another stop/start.
+    [ "$i" -le "$MAX_RECONNECTS" ] && sleep "$RECONNECT_SETTLE"
   done
   log "Gave up after $MAX_RECONNECTS reconnects; provider still ${HEALTH_STATUS:-<unreachable>}."
   return 1

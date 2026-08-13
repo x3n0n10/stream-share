@@ -59,6 +59,10 @@ DISCONNECT_TIMEOUT="${WATCHDOG_DISCONNECT_TIMEOUT:-15}" # seconds to wait for th
 RECONNECT_SETTLE="${WATCHDOG_RECONNECT_SETTLE:-8}"      # seconds to pause between reconnect attempts
 CONNECT_RETRIES="${WATCHDOG_CONNECT_RETRIES:-5}"         # retries when stream-share is unreachable (e.g. still starting after a restart)
 CONNECT_RETRY_WAIT="${WATCHDOG_CONNECT_RETRY_WAIT:-5}"   # seconds to wait between those retries
+FRESH_WAIT="${WATCHDOG_FRESH_WAIT:-3}"                  # seconds between retries while stream-share serves a cached (throttled) verdict
+FRESH_MAX_WAIT="${WATCHDOG_FRESH_MAX_WAIT:-15}"        # give up waiting for a fresh verdict after this long (then use the cached one)
+SETTLE_WAIT="${WATCHDOG_SETTLE_WAIT:-5}"                # seconds between re-checks while a post-reconnect error settles
+SETTLE_MAX="${WATCHDOG_SETTLE_MAX:-20}"                # max seconds to let a transient post-reconnect error resolve before moving on
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -95,10 +99,14 @@ EOF
 fetch_health() {
   HEALTH_STATUS=""
   HEALTH_DETAIL=""
+  HEALTH_THROTTLED=0
 
   errf="$(mktemp 2>/dev/null || echo /tmp/wd_curl_err)"
+  hdrf="$(mktemp 2>/dev/null || echo /tmp/wd_hdr)"
   # -w appends the HTTP status on its own final line so we can read body and code
-  # from one request without curl -f swallowing error bodies.
+  # from one request without curl -f swallowing error bodies; -D captures the
+  # response headers so we can tell whether the verdict was freshly probed or a
+  # cached one stream-share served under its rate limit (X-Health-Throttled).
   #
   # A connection failure (curl rc != 0) usually means stream-share is not up yet
   # — common right after a restart — so retry a few times before giving up. Note
@@ -106,7 +114,7 @@ fetch_health() {
   # server answering, so it is handled below without retrying.
   attempt=0
   while :; do
-    resp="$(curl -sS -w '\n%{http_code}' -H "X-API-Key: $INTERNAL_API_KEY" \
+    resp="$(curl -sS -D "$hdrf" -w '\n%{http_code}' -H "X-API-Key: $INTERNAL_API_KEY" \
       "$STREAM_SHARE_URL/api/internal/health" 2>"$errf")"
     rc=$?
     [ "$rc" -eq 0 ] && break
@@ -119,10 +127,13 @@ fetch_health() {
       continue
     fi
     HEALTH_DETAIL="cannot reach $STREAM_SHARE_URL after $((CONNECT_RETRIES + 1)) attempt(s): ${curlerr:-connection failed}"
-    rm -f "$errf"
+    rm -f "$errf" "$hdrf"
     return
   done
   rm -f "$errf"
+
+  grep -iq '^x-health-throttled:[[:space:]]*true' "$hdrf" 2>/dev/null && HEALTH_THROTTLED=1
+  rm -f "$hdrf"
 
   code="$(printf '%s' "$resp" | tail -n1)"
   body="$(printf '%s' "$resp" | sed '$d')"
@@ -136,6 +147,40 @@ fetch_health() {
     404) HEALTH_DETAIL="HTTP 404 — check STREAM_SHARE_URL points at stream-share" ;;
     *)   HEALTH_DETAIL="unexpected HTTP $code from stream-share" ;;
   esac
+}
+
+# probe_fresh calls fetch_health and, if stream-share served a throttled (cached)
+# verdict, waits and re-requests so decisions use a freshly-probed reading rather
+# than a stale one from a previous IP. Bounded by FRESH_MAX_WAIT so a high
+# HEALTHCHECK_MIN_INTERVAL_SECONDS on stream-share cannot stall the watchdog.
+probe_fresh() {
+  waited=0
+  fetch_health
+  while [ "${HEALTH_THROTTLED:-0}" = "1" ] && [ "$waited" -lt "$FRESH_MAX_WAIT" ]; do
+    log "provider verdict was cached (stream-share throttled the probe); waiting ${FRESH_WAIT}s for a fresh reading — lower HEALTHCHECK_MIN_INTERVAL_SECONDS on stream-share to avoid this"
+    sleep "$FRESH_WAIT"
+    waited=$((waited + FRESH_WAIT))
+    fetch_health
+  done
+}
+
+# settle_and_probe reads a fresh verdict after a reconnect, tolerating a transient
+# error/unknown/unreachable (DNS or connectivity still settling while gluetun
+# finishes its own restart) by waiting and re-probing instead of burning another
+# VPN cycle on it. Returns as soon as the verdict is definitive (healthy/blocked),
+# or after SETTLE_MAX seconds.
+settle_and_probe() {
+  waited=0
+  while :; do
+    probe_fresh
+    case "$HEALTH_STATUS" in
+      healthy|blocked) return 0 ;;
+    esac
+    [ "$waited" -ge "$SETTLE_MAX" ] && return 0
+    log "provider ${HEALTH_STATUS:-unreachable} right after reconnect (likely still settling); re-checking in ${SETTLE_WAIT}s"
+    sleep "$SETTLE_WAIT"
+    waited=$((waited + SETTLE_WAIT))
+  done
 }
 
 # public_ip reads the gluetun control server. (VPN status is read inline by
@@ -214,6 +259,7 @@ cycle_vpn() {
   set_vpn running || log "warning: start request failed"
   wait_status running "$STATUS_TIMEOUT" || :
   newip="$(wait_public_ip "$RECONNECT_TIMEOUT" || true)"
+  LAST_IP="${newip:-?}"
   if [ -z "$newip" ]; then
     log "warning: no usable public IP within ${RECONNECT_TIMEOUT}s after restart"
   elif [ "$newip" = "$oldip" ] && [ "$oldip" != "?" ]; then
@@ -225,7 +271,7 @@ cycle_vpn() {
 
 # heal probes once and, while blocked, cycles the VPN up to MAX_RECONNECTS times.
 heal() {
-  fetch_health
+  probe_fresh
   log "Provider status: ${HEALTH_STATUS:-<unreachable>}${HEALTH_DETAIL:+ ($HEALTH_DETAIL)}"
 
   case "$HEALTH_STATUS" in
@@ -245,21 +291,27 @@ heal() {
       ;;
   esac
 
+  heal_start="$(date +%s)"
+  tried_ips=""
   i=1
   while [ "$i" -le "$MAX_RECONNECTS" ]; do
     log "Blocked — reconnect attempt $i/$MAX_RECONNECTS"
     cycle_vpn
-    fetch_health
+    tried_ips="$tried_ips ${LAST_IP:-?}"
+
+    # Read a fresh verdict, giving a transient post-reconnect error time to settle
+    # rather than immediately spending another reconnect on it.
+    settle_and_probe
     if [ "$HEALTH_STATUS" = "healthy" ]; then
-      log "Recovered after $i reconnect(s)."
+      log "Recovered after $i reconnect(s) in $(( $(date +%s) - heal_start ))s. IPs tried:$tried_ips"
       return 0
     fi
-    log "Still ${HEALTH_STATUS:-<unreachable>} after attempt $i."
+    log "Still ${HEALTH_STATUS:-<unreachable>} after attempt $i (IP: ${LAST_IP:-?})."
     i=$((i + 1))
     # Let gluetun settle before hammering it with another stop/start.
     [ "$i" -le "$MAX_RECONNECTS" ] && sleep "$RECONNECT_SETTLE"
   done
-  log "Gave up after $MAX_RECONNECTS reconnects; provider still ${HEALTH_STATUS:-<unreachable>}."
+  log "Gave up after $MAX_RECONNECTS reconnects in $(( $(date +%s) - heal_start ))s; provider still ${HEALTH_STATUS:-<unreachable>}. IPs tried:$tried_ips"
   return 1
 }
 

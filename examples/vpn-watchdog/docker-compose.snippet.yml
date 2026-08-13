@@ -46,6 +46,11 @@ services:
       # if you want docker/monitoring health refreshed more often than the watchdog
       # runs, or if you run WITHOUT a watchdog.
       HEALTHCHECK_TIMES: ""
+      # Keep this LOW when the watchdog is driving probes: it rate-limits the
+      # /api/internal/health probe, and a high value makes the watchdog act on a
+      # stale cached verdict (of a previous IP) during a reconnect loop. 10s is a
+      # good value — the watchdog only probes hard during an active heal.
+      HEALTHCHECK_MIN_INTERVAL_SECONDS: "10"
       INTERNAL_API_KEY: "change-me"        # the watchdog authenticates with this
     restart: unless-stopped
 
@@ -78,6 +83,8 @@ services:
       WATCHDOG_RECONNECT_SETTLE: "8"                # pause between reconnect attempts (don't hammer gluetun)
       WATCHDOG_CONNECT_RETRIES: "5"                 # retries when stream-share is unreachable (e.g. still starting)
       WATCHDOG_CONNECT_RETRY_WAIT: "5"              # seconds between those retries
+      WATCHDOG_FRESH_MAX_WAIT: "15"                 # max wait for a fresh (non-throttled) verdict before using the cached one
+      WATCHDOG_SETTLE_MAX: "20"                     # max wait for a transient post-reconnect error to resolve
     volumes:
       - ./examples/vpn-watchdog/watchdog.sh:/watchdog.sh:ro
     entrypoint: ["sh", "/watchdog.sh"]

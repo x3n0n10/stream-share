@@ -135,8 +135,8 @@ fetch_health() {
   esac
 }
 
-# vpn_status / public_ip read the gluetun control server.
-vpn_status() { json_str "$(gluetun_curl "$GLUETUN_URL$GLUETUN_STATUS_PATH" 2>/dev/null)" status; }
+# public_ip reads the gluetun control server. (VPN status is read inline by
+# wait_status so it can surface the raw body/error on failure.)
 public_ip() {
   body="$(gluetun_curl "$GLUETUN_URL/v1/publicip/ip" 2>/dev/null)" || return 1
   ip="$(json_str "$body" public_ip)"; [ -z "$ip" ] && ip="$(json_str "$body" ip)"
@@ -146,12 +146,24 @@ public_ip() {
 
 set_vpn() { gluetun_curl -X PUT -H "Content-Type: application/json" -d "{\"status\":\"$1\"}" "$GLUETUN_URL$GLUETUN_STATUS_PATH" >/dev/null; }
 
-# wait_status polls until gluetun reports the desired status or the deadline.
+# wait_status polls the gluetun control server until it reports the desired
+# status ("running"/"stopped") or the deadline passes. On timeout it logs the
+# last status it actually saw plus any transport error and a snippet of the raw
+# body, so a wrong GLUETUN_STATUS_PATH (e.g. a 404 on /v1/vpn/status for older
+# gluetun) or an auth problem is visible instead of a silent per-second spin.
 wait_status() { # $1=desired $2=deadline_epoch
+  errf="$(mktemp 2>/dev/null || echo /tmp/wd_vpn_err)"
+  seen=""; raw=""; err=""
   while [ "$(date +%s)" -lt "$2" ]; do
-    [ "$(vpn_status)" = "$1" ] && return 0
-    sleep 1
+    raw="$(gluetun_curl "$GLUETUN_URL$GLUETUN_STATUS_PATH" 2>"$errf")"
+    if [ $? -ne 0 ]; then err="$(tr '\n' ' ' < "$errf" | sed 's/  */ /g;s/ *$//')"; else err=""; fi
+    seen="$(json_str "$raw" status)"
+    [ "$seen" = "$1" ] && { rm -f "$errf"; return 0; }
+    sleep 2
   done
+  rm -f "$errf"
+  snip="$(printf '%s' "$raw" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-120)"
+  log "gluetun did not report '$1' in time (last status: '${seen:-<none>}'${err:+; error: $err}${snip:+; body: $snip}). Check WATCHDOG_GLUETUN_URL / WATCHDOG_GLUETUN_STATUS_PATH / auth."
   return 1
 }
 

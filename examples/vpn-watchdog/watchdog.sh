@@ -70,19 +70,48 @@ $1
 EOF
 }
 
-# fetch_health forces a fresh probe and sets HEALTH_STATUS / HEALTH_DETAIL from
-# the JSON body. Verdicts: healthy | blocked | error | unknown | disabled.
+# fetch_health forces a fresh probe and sets HEALTH_STATUS / HEALTH_DETAIL.
+# Verdicts: healthy | blocked | error | unknown | disabled.
 #
-# IMPORTANT: /api/internal/health returns HTTP 503 when the provider is blocked
-# or errored — that 503 is the intended "unhealthy" signal for Docker's
-# HEALTHCHECK, and the real verdict is in the body. So read the body regardless
-# of status code: do NOT pass curl -f here, or it discards the body exactly when
-# it says "blocked". (A genuine connection failure yields an empty body, which we
-# treat as unreachable.)
+# /api/internal/health returns HTTP 503 when the provider is blocked or errored
+# (that 503 is the intended "unhealthy" signal for Docker's HEALTHCHECK, and the
+# real verdict is in the body), so the body is read on both 200 and 503 — never
+# pass curl -f, which would discard the body exactly when it says "blocked".
+#
+# An EMPTY HEALTH_STATUS is never a provider verdict: it means the watchdog could
+# not get an answer from stream-share. HEALTH_DETAIL then explains why — a
+# connection failure, an HTTP 401 from a wrong INTERNAL_API_KEY, a wrong URL, and
+# so on — rather than the old opaque "<unreachable>". heal() never cycles the VPN
+# on an empty status.
 fetch_health() {
-  body="$(curl -sS -H "X-API-Key: $INTERNAL_API_KEY" "$STREAM_SHARE_URL/api/internal/health" 2>/dev/null)"
-  HEALTH_STATUS="$(json_str "$body" status)"
-  HEALTH_DETAIL="$(json_str "$body" detail)"
+  HEALTH_STATUS=""
+  HEALTH_DETAIL=""
+
+  errf="$(mktemp 2>/dev/null || echo /tmp/wd_curl_err)"
+  # -w appends the HTTP status on its own final line so we can read body and code
+  # from one request without curl -f swallowing error bodies.
+  resp="$(curl -sS -w '\n%{http_code}' -H "X-API-Key: $INTERNAL_API_KEY" \
+    "$STREAM_SHARE_URL/api/internal/health" 2>"$errf")"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    HEALTH_DETAIL="cannot reach $STREAM_SHARE_URL: $(tr '\n' ' ' < "$errf" | sed 's/  */ /g;s/ *$//')"
+    rm -f "$errf"
+    return
+  fi
+  rm -f "$errf"
+
+  code="$(printf '%s' "$resp" | tail -n1)"
+  body="$(printf '%s' "$resp" | sed '$d')"
+  case "$code" in
+    200|503)
+      HEALTH_STATUS="$(json_str "$body" status)"
+      HEALTH_DETAIL="$(json_str "$body" detail)"
+      [ -z "$HEALTH_STATUS" ] && HEALTH_DETAIL="unexpected response body from stream-share (HTTP $code)"
+      ;;
+    401) HEALTH_DETAIL="HTTP 401 unauthorized — INTERNAL_API_KEY does not match the stream-share key" ;;
+    404) HEALTH_DETAIL="HTTP 404 — check STREAM_SHARE_URL points at stream-share" ;;
+    *)   HEALTH_DETAIL="unexpected HTTP $code from stream-share" ;;
+  esac
 }
 
 # vpn_status / public_ip read the gluetun control server.
@@ -135,11 +164,16 @@ heal() {
   case "$HEALTH_STATUS" in
     healthy|disabled) return 0 ;;
     blocked) ;;                         # the only case we act on
+    error|unknown)
+      # A real provider verdict that reconnecting will not reliably fix (provider
+      # outage, bad probe channel, stream-share still starting). Detail says which.
+      log "Not a block (provider $HEALTH_STATUS); leaving the VPN alone."
+      return 0
+      ;;
     *)
-      # error / unknown / unreachable: reconnecting will not reliably help
-      # (provider outage, bad probe channel, stream-share still starting). The
-      # detail above says which — e.g. an empty HEALTHCHECK_STREAM_ID.
-      log "Not a block; leaving the VPN alone."
+      # Empty status: could not talk to stream-share (see detail). A watchdog
+      # <-> stream-share problem is never a reason to cycle the VPN.
+      log "Could not determine provider status; leaving the VPN alone."
       return 0
       ;;
   esac

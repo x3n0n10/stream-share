@@ -50,6 +50,8 @@ GLUETUN_STATUS_PATH="${GLUETUN_STATUS_PATH:-/v1/vpn/status}"
 CHECK_TIMES="${CHECK_TIMES:-04:00,16:00}"       # local times to run, comma-separated HH:MM
 MAX_RECONNECTS="${MAX_RECONNECTS:-5}"           # give up after this many server switches
 RECONNECT_TIMEOUT="${RECONNECT_TIMEOUT:-45}"    # per-cycle budget (seconds) to confirm stopped then running
+CONNECT_RETRIES="${CONNECT_RETRIES:-5}"         # retries when stream-share is unreachable (e.g. still starting after a restart)
+CONNECT_RETRY_WAIT="${CONNECT_RETRY_WAIT:-5}"   # seconds to wait between those retries
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -90,14 +92,29 @@ fetch_health() {
   errf="$(mktemp 2>/dev/null || echo /tmp/wd_curl_err)"
   # -w appends the HTTP status on its own final line so we can read body and code
   # from one request without curl -f swallowing error bodies.
-  resp="$(curl -sS -w '\n%{http_code}' -H "X-API-Key: $INTERNAL_API_KEY" \
-    "$STREAM_SHARE_URL/api/internal/health" 2>"$errf")"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    HEALTH_DETAIL="cannot reach $STREAM_SHARE_URL: $(tr '\n' ' ' < "$errf" | sed 's/  */ /g;s/ *$//')"
+  #
+  # A connection failure (curl rc != 0) usually means stream-share is not up yet
+  # — common right after a restart — so retry a few times before giving up. Note
+  # this only retries genuine unreachability; an HTTP 401/404 is a reachable
+  # server answering, so it is handled below without retrying.
+  attempt=0
+  while :; do
+    resp="$(curl -sS -w '\n%{http_code}' -H "X-API-Key: $INTERNAL_API_KEY" \
+      "$STREAM_SHARE_URL/api/internal/health" 2>"$errf")"
+    rc=$?
+    [ "$rc" -eq 0 ] && break
+
+    curlerr="$(tr '\n' ' ' < "$errf" | sed 's/  */ /g;s/ *$//')"
+    if [ "$attempt" -lt "$CONNECT_RETRIES" ]; then
+      attempt=$((attempt + 1))
+      log "stream-share unreachable (try $attempt/$CONNECT_RETRIES): ${curlerr:-connection failed}; retrying in ${CONNECT_RETRY_WAIT}s"
+      sleep "$CONNECT_RETRY_WAIT"
+      continue
+    fi
+    HEALTH_DETAIL="cannot reach $STREAM_SHARE_URL after $((CONNECT_RETRIES + 1)) attempt(s): ${curlerr:-connection failed}"
     rm -f "$errf"
     return
-  fi
+  done
   rm -f "$errf"
 
   code="$(printf '%s' "$resp" | tail -n1)"

@@ -70,6 +70,8 @@ services:
       CHECK_TIMES: "04:00,16:00"
       MAX_RECONNECTS: "5"
       RECONNECT_TIMEOUT: "45"              # per-cycle budget to reach a usable IP
+      CONNECT_RETRIES: "5"                 # retries when stream-share is unreachable (e.g. still starting)
+      CONNECT_RETRY_WAIT: "5"              # seconds between those retries
     volumes:
       - ./examples/vpn-watchdog/watchdog.sh:/watchdog.sh:ro
     entrypoint: ["sh", "/watchdog.sh"]

@@ -106,6 +106,38 @@ func TestRegisterVODView_appearsInStreams(t *testing.T) {
 	}
 }
 
+// TestRegisterVODView_adoptsResolvedTitle is the regression test for the bug
+// where a VOD view's title stayed pinned to the raw stream id: the very first
+// Range request can lose the race to resolve a real title (e.g. get_vod_info
+// is still in flight) and falls back to passing the stream id as the title.
+// A later call for the same view, now carrying the resolved title, must
+// still be adopted instead of being ignored because a title was already set.
+func TestRegisterVODView_adoptsResolvedTitle(t *testing.T) {
+	sm := newTestManager()
+	defer sm.Stop()
+
+	sm.RegisterUser("alice", "1.2.3.4", "")
+	sm.RegisterVODView("alice", "327914", "movie", "327914") // fallback: id used as title
+
+	info, ok := sm.GetStreamInfo("327914")
+	if !ok {
+		t.Fatal("stream not found after RegisterVODView")
+	}
+	if info.StreamTitle != "327914" {
+		t.Fatalf("expected fallback title 327914, got %q", info.StreamTitle)
+	}
+
+	sm.RegisterVODView("alice", "327914", "movie", "The Real Movie Title")
+
+	info, ok = sm.GetStreamInfo("327914")
+	if !ok {
+		t.Fatal("stream not found after second RegisterVODView")
+	}
+	if info.StreamTitle != "The Real Movie Title" {
+		t.Fatalf("expected resolved title to be adopted, got %q", info.StreamTitle)
+	}
+}
+
 func TestUnregisterVODView_removesSession(t *testing.T) {
 	sm := newTestManager()
 	defer sm.Stop()

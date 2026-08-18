@@ -20,7 +20,9 @@ package server
 
 import (
 	"fmt"
+	"math/rand"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -205,8 +207,14 @@ func (c *Config) resolveTitleAtStart(streamID, streamType string) (string, bool)
 		}
 	case "series":
 		// get_vod_info is keyed by a movie vod_id and cannot resolve a series
-		// episode id, so series rely on the cached VOD M3U title when available.
-		title = strings.TrimSpace(c.findVODTitleInCache("series", streamID))
+		// episode id. Try the cached VOD M3U first (cheap — a local file scan);
+		// providers that omit series from that M3U fall back to crawling the
+		// Xtream series catalogue itself.
+		if t := c.findVODTitleInCache("series", streamID); strings.TrimSpace(t) != "" {
+			title = strings.TrimSpace(t)
+		} else if name, ok := c.fetchSeriesEpisodeTitle(streamID); ok {
+			title = strings.TrimSpace(name)
+		}
 	}
 
 	titleResolvedStore(streamID, title)
@@ -250,4 +258,146 @@ func (c *Config) vodLabel(streamID string) string {
 		return fmt.Sprintf("%s (Stream %s)", strings.TrimSpace(name), id)
 	}
 	return fmt.Sprintf("Stream %s", id)
+}
+
+// seriesListEntry is one row of the Xtream get_series catalogue (id/name only —
+// episodes require a separate get_series_info call per series).
+type seriesListEntry struct {
+	ID   string
+	Name string
+}
+
+// seriesListTTL bounds how long the get_series listing is reused before being
+// refetched, so repeated episode-title lookups don't re-list the catalogue
+// every time.
+const seriesListTTL = 30 * time.Minute
+
+var (
+	seriesListMu    sync.Mutex
+	seriesListCache []seriesListEntry
+	seriesListAt    time.Time
+)
+
+// fetchSeriesList returns the cached get_series listing, refetching it once
+// seriesListTTL has elapsed.
+func (c *Config) fetchSeriesList(cli *xtreamapi.Client) ([]seriesListEntry, error) {
+	seriesListMu.Lock()
+	if seriesListCache != nil && time.Since(seriesListAt) < seriesListTTL {
+		list := seriesListCache
+		seriesListMu.Unlock()
+		return list, nil
+	}
+	seriesListMu.Unlock()
+
+	resp, _, _, err := cli.Action(c.ProxyConfig, "get_series", url.Values{})
+	if err != nil {
+		return nil, err
+	}
+	arr, ok := resp.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unexpected get_series format: %T", resp)
+	}
+	list := make([]seriesListEntry, 0, len(arr))
+	for _, item := range arr {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id := fmt.Sprintf("%v", m["series_id"])
+		name := fmt.Sprintf("%v", m["name"])
+		if id == "" || id == "<nil>" || name == "" {
+			continue
+		}
+		list = append(list, seriesListEntry{ID: id, Name: name})
+	}
+
+	seriesListMu.Lock()
+	seriesListCache = list
+	seriesListAt = time.Now()
+	seriesListMu.Unlock()
+	return list, nil
+}
+
+// seriesEpisodeCrawlBudget caps how long a single fetchSeriesEpisodeTitle call
+// is allowed to keep hitting get_series_info before giving up, so an episode
+// that can't be found (or a very large catalogue) doesn't stall the stream
+// start that's waiting on it.
+const seriesEpisodeCrawlBudget = 8 * time.Second
+
+// fetchSeriesEpisodeTitle resolves a series episode's title by crawling the
+// Xtream series catalogue: unlike movies (get_vod_info), there is no Xtream
+// endpoint that resolves a single episode id directly, so this lists every
+// series (get_series) and inspects each one's episodes (get_series_info)
+// until the id is found. The scan order is shuffled per call so a catalogue
+// too large to fully scan within the time budget still makes progress across
+// different series on successive (30-minute-apart, per titleResolvedStore)
+// retries. Every episode seen along the way — not just the target — is
+// cached via cacheVODName, so once a series has been scanned once, watching
+// its other episodes resolves instantly without another crawl.
+func (c *Config) fetchSeriesEpisodeTitle(streamID string) (string, bool) {
+	cli, err := xtreamapi.New(c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL, "")
+	if err != nil {
+		utils.WarnLog("Series title: failed to create Xtream client: %v", err)
+		return "", false
+	}
+	seriesList, err := c.fetchSeriesList(cli)
+	if err != nil {
+		utils.DebugLog("Series title: get_series failed: %v", err)
+		return "", false
+	}
+	order := rand.Perm(len(seriesList))
+
+	wantID := normalizeStreamID(streamID)
+	deadline := time.Now().Add(seriesEpisodeCrawlBudget)
+	found := ""
+	for _, idx := range order {
+		if time.Now().After(deadline) {
+			utils.DebugLog("Series title: crawl budget exceeded before finding vod_id=%s", streamID)
+			break
+		}
+		s := seriesList[idx]
+		infoResp, _, _, err := cli.Action(c.ProxyConfig, "get_series_info", url.Values{"series_id": {s.ID}})
+		if err != nil {
+			continue
+		}
+		im, ok := infoResp.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		epsBySeason, ok := im["episodes"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for seasonStr, epsV := range epsBySeason {
+			seasonNum, _ := strconv.Atoi(seasonStr)
+			eps, ok := epsV.([]interface{})
+			if !ok {
+				continue
+			}
+			for _, e := range eps {
+				em, ok := e.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				epID := fmt.Sprintf("%v", firstNonEmpty(em["id"], em["stream_id"]))
+				if epID == "" || epID == "<nil>" {
+					continue
+				}
+				epTitle := strings.TrimSpace(fmt.Sprintf("%v", em["title"]))
+				if epTitle == "" {
+					continue
+				}
+				epNum := toInt(em["episode_num"])
+				full := fmt.Sprintf("%s S%02dE%02d — %s", s.Name, seasonNum, epNum, epTitle)
+				c.cacheVODName(epID, full)
+				if normalizeStreamID(epID) == wantID {
+					found = full
+				}
+			}
+		}
+		if found != "" {
+			return found, true
+		}
+	}
+	return "", false
 }

@@ -1112,18 +1112,21 @@ func (sm *SessionManager) RegisterVODView(username, streamID, streamType, title 
 	sm.userLock.Unlock()
 
 	sm.streamLock.Lock()
-	defer sm.streamLock.Unlock()
+	resolvedTitle := ""
 	if ss, exists := sm.streamSessions[streamID]; exists {
 		ss.AddViewer(username)
 		ss.LastRequested = time.Now()
 		ss.Active = true
 		// The title passed on the very first request may have been an
-		// unresolved fallback (e.g. a transient lookup failure). Later calls
-		// (RegisterVODView runs on every Range request) can carry a properly
-		// resolved title, so adopt it once available instead of sticking with
-		// the initial fallback for the rest of the session.
+		// unresolved fallback (e.g. a transient lookup failure, or this
+		// request losing a race with a concurrent one that recorded the
+		// history row first). Later calls (RegisterVODView runs on every
+		// Range request) can carry a properly resolved title, so adopt it
+		// once available instead of sticking with the initial fallback for
+		// the rest of the session.
 		if (ss.StreamTitle == "" || ss.StreamTitle == streamID) && title != "" && title != streamID {
 			ss.StreamTitle = title
+			resolvedTitle = title
 		}
 	} else {
 		ss := &types.StreamSession{
@@ -1133,6 +1136,35 @@ func (sm *SessionManager) RegisterVODView(username, streamID, streamType, title 
 		}
 		ss.AddViewer(username)
 		sm.streamSessions[streamID] = ss
+	}
+	sm.streamLock.Unlock()
+
+	// The stream_history row for this view was already inserted (by whichever
+	// request got there first, possibly with the raw id as a fallback title).
+	// Now that a real title has resolved, correct that row too so /history
+	// does not stay pinned to the stream id for the rest of the view.
+	if resolvedTitle != "" {
+		sm.updateVODHistoryTitle(username, streamID, resolvedTitle)
+	}
+}
+
+// updateVODHistoryTitle corrects the title on an already-open stream_history
+// row for this (stream, user) view. Called once a request after the row was
+// created resolves a real title, so the persisted row does not stay stuck on
+// whatever fallback the first request recorded.
+func (sm *SessionManager) updateVODHistoryTitle(username, streamID, title string) {
+	if sm.db == nil {
+		return
+	}
+	key := streamUserKey(streamID, username)
+	sm.vodViewTimersMu.Lock()
+	id, ok := sm.vodHistoryIDs[key]
+	sm.vodViewTimersMu.Unlock()
+	if !ok || id <= 0 {
+		return
+	}
+	if err := sm.db.UpdateStreamHistoryTitle(id, title); err != nil {
+		utils.WarnLog("Failed to update VOD stream history title for %d: %v", id, err)
 	}
 }
 

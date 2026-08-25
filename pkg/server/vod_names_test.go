@@ -43,6 +43,7 @@ func resetSeriesCaches() {
 	seriesListMu.Lock()
 	seriesListCache = nil
 	seriesListAt = time.Time{}
+	seriesScanned = map[string]bool{}
 	seriesListMu.Unlock()
 
 	vodNameMu.Lock()
@@ -84,9 +85,9 @@ func TestFetchSeriesEpisodeTitle_findsAndCachesSiblings(t *testing.T) {
 
 	c := seriesTestConfig(srv.URL)
 
-	title, ok := c.fetchSeriesEpisodeTitle("502")
-	if !ok {
-		t.Fatal("expected episode 502 to resolve")
+	title, found, exhausted := c.fetchSeriesEpisodeTitle("502")
+	if !found {
+		t.Fatalf("expected episode 502 to resolve (exhausted=%v)", exhausted)
 	}
 	if want := "Show One S01E02 — Second Episode"; title != want {
 		t.Fatalf("title = %q, want %q", title, want)
@@ -100,8 +101,8 @@ func TestFetchSeriesEpisodeTitle_findsAndCachesSiblings(t *testing.T) {
 }
 
 // TestFetchSeriesEpisodeTitle_notFound covers an id that isn't in the
-// catalogue at all: the crawl must exhaust the series list and report a miss
-// rather than hang or error.
+// catalogue at all: the crawl must exhaust the series list and report a
+// confirmed miss (exhausted=true) rather than hang or error.
 func TestFetchSeriesEpisodeTitle_notFound(t *testing.T) {
 	resetSeriesCaches()
 	defer resetSeriesCaches()
@@ -119,7 +120,62 @@ func TestFetchSeriesEpisodeTitle_notFound(t *testing.T) {
 	defer srv.Close()
 
 	c := seriesTestConfig(srv.URL)
-	if _, ok := c.fetchSeriesEpisodeTitle("999999"); ok {
+	_, found, exhausted := c.fetchSeriesEpisodeTitle("999999")
+	if found {
 		t.Fatal("expected no match for an id absent from the catalogue")
+	}
+	if !exhausted {
+		t.Fatal("expected a full-catalogue miss to be reported as exhausted")
+	}
+}
+
+// TestFetchSeriesEpisodeTitle_budgetCutoffIsNotExhausted is the regression
+// test for the production bug: the first crawl for a large/slow catalogue
+// can run out of its time budget before scanning anything, and that must NOT
+// be reported as exhausted (resolveTitleAtStart only memoises an exhausted
+// miss — treating a budget cutoff as final would pin the raw stream id as
+// the title for titleMissRetryAfter, even though a retry moments later,
+// resuming from the same series-scanned progress, would have found it).
+func TestFetchSeriesEpisodeTitle_budgetCutoffIsNotExhausted(t *testing.T) {
+	resetSeriesCaches()
+	defer resetSeriesCaches()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "get_series":
+			_, _ = w.Write([]byte(`[{"series_id":"10","name":"Show One"}]`))
+		case "get_series_info":
+			_, _ = w.Write([]byte(`{"episodes":{"1":[{"id":"900","title":"Target Episode","episode_num":1}]}}`))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer srv.Close()
+
+	c := seriesTestConfig(srv.URL)
+
+	// An already-elapsed budget: the deadline check before the very first
+	// get_series_info call fails immediately, so nothing gets scanned.
+	orig := seriesEpisodeCrawlBudget
+	seriesEpisodeCrawlBudget = -1 * time.Millisecond
+	_, found, exhausted := c.fetchSeriesEpisodeTitle("900")
+	seriesEpisodeCrawlBudget = orig
+	if found {
+		t.Fatal("did not expect a match with a budget too small to make any request")
+	}
+	if exhausted {
+		t.Fatal("a budget cutoff must not be reported as an exhausted (confirmed) miss")
+	}
+
+	// A later call — e.g. the next Range request, now with a sane budget —
+	// must still be able to scan the series the first call never got to
+	// (seriesScanned tracking a budget-cut call as "done" would wrongly
+	// skip it forever) and find the id.
+	title, found, _ := c.fetchSeriesEpisodeTitle("900")
+	if !found {
+		t.Fatal("expected the id to resolve once the crawl actually gets to scan the series")
+	}
+	if want := "Show One S01E01 — Target Episode"; title != want {
+		t.Fatalf("title = %q, want %q", title, want)
 	}
 }

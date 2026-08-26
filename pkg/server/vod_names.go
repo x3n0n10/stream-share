@@ -212,8 +212,21 @@ func (c *Config) resolveTitleAtStart(streamID, streamType string) (string, bool)
 		// Xtream series catalogue itself.
 		if t := c.findVODTitleInCache("series", streamID); strings.TrimSpace(t) != "" {
 			title = strings.TrimSpace(t)
-		} else if name, ok := c.fetchSeriesEpisodeTitle(streamID); ok {
-			title = strings.TrimSpace(name)
+		} else {
+			name, found, exhausted := c.fetchSeriesEpisodeTitle(streamID)
+			if found {
+				title = strings.TrimSpace(name)
+			} else if !exhausted {
+				// The crawl's time budget ran out before every series had
+				// been scanned — this is not a confirmed miss, so don't
+				// memoise it as one (that would lock retries out for
+				// titleMissRetryAfter). A single playback issues many Range
+				// requests; fetchSeriesEpisodeTitle skips series it already
+				// scanned, so each of those requests makes further progress
+				// through the catalogue until the id is found or the whole
+				// catalogue has genuinely been ruled out.
+				return "", false
+			}
 		}
 	}
 
@@ -276,6 +289,12 @@ var (
 	seriesListMu    sync.Mutex
 	seriesListCache []seriesListEntry
 	seriesListAt    time.Time
+	// seriesScanned marks series (by series_id) whose get_series_info has
+	// already been fetched and indexed in the current catalogue generation.
+	// Reset whenever seriesListCache is actually refetched (see
+	// fetchSeriesList), so a stale scan doesn't linger past a catalogue
+	// refresh.
+	seriesScanned = map[string]bool{}
 )
 
 // fetchSeriesList returns the cached get_series listing, refetching it once
@@ -314,6 +333,7 @@ func (c *Config) fetchSeriesList(cli *xtreamapi.Client) ([]seriesListEntry, erro
 	seriesListMu.Lock()
 	seriesListCache = list
 	seriesListAt = time.Now()
+	seriesScanned = map[string]bool{}
 	seriesListMu.Unlock()
 	return list, nil
 }
@@ -321,83 +341,125 @@ func (c *Config) fetchSeriesList(cli *xtreamapi.Client) ([]seriesListEntry, erro
 // seriesEpisodeCrawlBudget caps how long a single fetchSeriesEpisodeTitle call
 // is allowed to keep hitting get_series_info before giving up, so an episode
 // that can't be found (or a very large catalogue) doesn't stall the stream
-// start that's waiting on it.
-const seriesEpisodeCrawlBudget = 8 * time.Second
+// start that's waiting on it. A single call rarely covers a large catalogue
+// within this budget, so the caller must not treat a budget cutoff as a
+// confirmed miss — see the exhausted return value. A var (not const) so
+// tests can shrink it instead of waiting out the real budget.
+var seriesEpisodeCrawlBudget = 8 * time.Second
 
 // fetchSeriesEpisodeTitle resolves a series episode's title by crawling the
 // Xtream series catalogue: unlike movies (get_vod_info), there is no Xtream
 // endpoint that resolves a single episode id directly, so this lists every
 // series (get_series) and inspects each one's episodes (get_series_info)
-// until the id is found. The scan order is shuffled per call so a catalogue
-// too large to fully scan within the time budget still makes progress across
-// different series on successive (30-minute-apart, per titleResolvedStore)
-// retries. Every episode seen along the way — not just the target — is
-// cached via cacheVODName, so once a series has been scanned once, watching
-// its other episodes resolves instantly without another crawl.
-func (c *Config) fetchSeriesEpisodeTitle(streamID string) (string, bool) {
+// until the id is found.
+//
+// Series already scanned in the current catalogue generation (tracked in
+// seriesScanned) are skipped, so repeated calls — one per Range request, of
+// which a single playback issues hundreds — make monotonic progress through
+// the catalogue instead of repeatedly resampling the same series within the
+// time budget. found is true only when the id was located; exhausted is true
+// only when every series has now been scanned without finding it (a genuine
+// miss, safe to memoise) — false means the budget ran out first and the
+// caller should retry rather than cache a miss. Every episode seen along the
+// way — not just the target — is cached via cacheVODName, so once a series
+// has been scanned, watching its other episodes resolves instantly.
+func (c *Config) fetchSeriesEpisodeTitle(streamID string) (title string, found bool, exhausted bool) {
 	cli, err := xtreamapi.New(c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL, "")
 	if err != nil {
 		utils.WarnLog("Series title: failed to create Xtream client: %v", err)
-		return "", false
+		return "", false, false
 	}
 	seriesList, err := c.fetchSeriesList(cli)
 	if err != nil {
 		utils.DebugLog("Series title: get_series failed: %v", err)
-		return "", false
+		return "", false, false
 	}
-	order := rand.Perm(len(seriesList))
+	if len(seriesList) == 0 {
+		return "", false, true
+	}
+
+	seriesListMu.Lock()
+	pending := make([]seriesListEntry, 0, len(seriesList))
+	for _, s := range seriesList {
+		if !seriesScanned[s.ID] {
+			pending = append(pending, s)
+		}
+	}
+	seriesListMu.Unlock()
+	if len(pending) == 0 {
+		// Every series has been scanned this generation and the id still
+		// wasn't among them: a confirmed miss.
+		return "", false, true
+	}
+	rand.Shuffle(len(pending), func(i, j int) { pending[i], pending[j] = pending[j], pending[i] })
 
 	wantID := normalizeStreamID(streamID)
 	deadline := time.Now().Add(seriesEpisodeCrawlBudget)
-	found := ""
-	for _, idx := range order {
+	for _, s := range pending {
 		if time.Now().After(deadline) {
 			utils.DebugLog("Series title: crawl budget exceeded before finding vod_id=%s", streamID)
-			break
+			return "", false, false
 		}
-		s := seriesList[idx]
 		infoResp, _, _, err := cli.Action(c.ProxyConfig, "get_series_info", url.Values{"series_id": {s.ID}})
 		if err != nil {
-			continue
+			continue // transient failure: leave unscanned for a future retry
 		}
-		im, ok := infoResp.(map[string]interface{})
+		matched := c.indexSeriesInfoEpisodes(infoResp, s, wantID)
+
+		seriesListMu.Lock()
+		seriesScanned[s.ID] = true
+		allScanned := len(seriesScanned) >= len(seriesList)
+		seriesListMu.Unlock()
+
+		if matched != "" {
+			return matched, true, false
+		}
+		if allScanned {
+			return "", false, true
+		}
+	}
+	return "", false, false
+}
+
+// indexSeriesInfoEpisodes caches every episode in a get_series_info response
+// (title formatted as "Series S01E02 — Episode Title") and returns the
+// formatted title for wantID, if present among them.
+func (c *Config) indexSeriesInfoEpisodes(infoResp interface{}, s seriesListEntry, wantID string) string {
+	im, ok := infoResp.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	epsBySeason, ok := im["episodes"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	matched := ""
+	for seasonStr, epsV := range epsBySeason {
+		seasonNum, _ := strconv.Atoi(seasonStr)
+		eps, ok := epsV.([]interface{})
 		if !ok {
 			continue
 		}
-		epsBySeason, ok := im["episodes"].(map[string]interface{})
-		if !ok {
-			continue
-		}
-		for seasonStr, epsV := range epsBySeason {
-			seasonNum, _ := strconv.Atoi(seasonStr)
-			eps, ok := epsV.([]interface{})
+		for _, e := range eps {
+			em, ok := e.(map[string]interface{})
 			if !ok {
 				continue
 			}
-			for _, e := range eps {
-				em, ok := e.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				epID := fmt.Sprintf("%v", firstNonEmpty(em["id"], em["stream_id"]))
-				if epID == "" || epID == "<nil>" {
-					continue
-				}
-				epTitle := strings.TrimSpace(fmt.Sprintf("%v", em["title"]))
-				if epTitle == "" {
-					continue
-				}
-				epNum := toInt(em["episode_num"])
-				full := fmt.Sprintf("%s S%02dE%02d — %s", s.Name, seasonNum, epNum, epTitle)
-				c.cacheVODName(epID, full)
-				if normalizeStreamID(epID) == wantID {
-					found = full
-				}
+			epID := fmt.Sprintf("%v", firstNonEmpty(em["id"], em["stream_id"]))
+			if epID == "" || epID == "<nil>" {
+				continue
+			}
+			epTitle := strings.TrimSpace(fmt.Sprintf("%v", em["title"]))
+			if epTitle == "" {
+				continue
+			}
+			epNum := toInt(em["episode_num"])
+			full := fmt.Sprintf("%s S%02dE%02d — %s", s.Name, seasonNum, epNum, epTitle)
+			c.cacheVODName(epID, full)
+			if normalizeStreamID(epID) == wantID {
+				matched = full
 			}
 		}
-		if found != "" {
-			return found, true
-		}
 	}
-	return "", false
+	return matched
 }

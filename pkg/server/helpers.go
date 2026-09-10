@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -112,22 +113,11 @@ func setNoBufferingHeaders(ctx *gin.Context, contentType string) {
 	ctx.Header("X-Accel-Buffering", "no")
 }
 
-type values []string
-
-func (vs values) contains(s string) bool {
-	for _, v := range vs {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}
-
 // mergeHttpHeader copies headers from src to dst without duplicating identical values.
 func mergeHttpHeader(dst, src http.Header) {
 	for k, vv := range src {
 		for _, v := range vv {
-			if values(dst.Values(k)).contains(v) {
+			if slices.Contains(dst.Values(k), v) {
 				continue
 			}
 			dst.Add(k, v)

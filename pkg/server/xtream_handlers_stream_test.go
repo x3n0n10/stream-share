@@ -22,8 +22,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/lucasduport/stream-share/pkg/config"
@@ -33,6 +36,64 @@ func resetHlsRedirectCache() {
 	hlsChannelsRedirectURLLock.Lock()
 	hlsChannelsRedirectURL = map[string]url.URL{}
 	hlsChannelsRedirectURLLock.Unlock()
+}
+
+// TestXtreamApiGetRewritesHostPerRequest mirrors
+// TestXtreamGetRewritesHostPerRequest in xtream_handlers_api_test.go: the
+// same cached file (populated via cacheXtreamM3u/marshallInto, containing
+// relative track URIs and tvg-logo values) is served through xtreamApiGet
+// to two different requesting hosts, and each response must carry its own
+// host prefix with no leakage from the other.
+func TestXtreamApiGetRewritesHostPerRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dir := t.TempDir()
+	cachedPath := filepath.Join(dir, "cached.m3u")
+	cachedBody := "#EXTM3U\n" +
+		`#EXTINF:-1 tvg-logo="/img?url=http%3A%2F%2Fupstream.example.com%2Flogo.png", Channel One` + "\n" +
+		"/anti/user/pass/0/stream1\n"
+	if err := os.WriteFile(cachedPath, []byte(cachedBody), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	c := &Config{ProxyConfig: &config.ProxyConfig{
+		M3UFileName:        "playlist.m3u",
+		M3UCacheExpiration: 24,
+	}}
+
+	xtreamM3uCacheLock.Lock()
+	xtreamM3uCache["apiget"] = cacheMeta{cachedPath, time.Now()}
+	xtreamM3uCacheLock.Unlock()
+	defer func() {
+		xtreamM3uCacheLock.Lock()
+		delete(xtreamM3uCache, "apiget")
+		xtreamM3uCacheLock.Unlock()
+	}()
+
+	call := func(host string) string {
+		w := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(w)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/xtream/apiget", nil)
+		ctx.Request.Host = host
+		c.xtreamApiGet(ctx)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+		}
+		return w.Body.String()
+	}
+
+	bodyA := call("host-a.example.com")
+	bodyB := call("host-b.example.com:9090")
+
+	if !strings.Contains(bodyA, "http://host-a.example.com/anti/user/pass/0/stream1") {
+		t.Errorf("bodyA %q does not use host-a", bodyA)
+	}
+	if !strings.Contains(bodyB, "http://host-b.example.com:9090/anti/user/pass/0/stream1") {
+		t.Errorf("bodyB %q does not use host-b", bodyB)
+	}
+	if strings.Contains(bodyA, "host-b") || strings.Contains(bodyB, "host-a") {
+		t.Errorf("the same cached file leaked the other request's host: bodyA=%q bodyB=%q", bodyA, bodyB)
+	}
 }
 
 func TestXtreamHlsStreamRewritesManifestHost(t *testing.T) {

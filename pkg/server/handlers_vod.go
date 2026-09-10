@@ -1010,7 +1010,7 @@ func findExtInM3U(filePath, basePath, streamID string) string {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if !strings.HasPrefix(line, "http://") && !strings.HasPrefix(line, "https://") {
+		if !strings.HasPrefix(line, "/") && !strings.HasPrefix(line, "http://") && !strings.HasPrefix(line, "https://") {
 			continue
 		}
 		// Quick path filter by basePath
@@ -1052,7 +1052,7 @@ func findTitleInM3U(filePath, basePath, streamID string) string {
 			}
 			continue
 		}
-		if !strings.HasPrefix(line, "http://") && !strings.HasPrefix(line, "https://") {
+		if !strings.HasPrefix(line, "/") && !strings.HasPrefix(line, "http://") && !strings.HasPrefix(line, "https://") {
 			continue
 		}
 		if !strings.Contains(line, "/"+basePath+"/") {

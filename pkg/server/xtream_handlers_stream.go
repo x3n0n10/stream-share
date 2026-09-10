@@ -74,10 +74,13 @@ func (c *Config) xtreamApiGet(ctx *gin.Context) {
 	xtreamM3uCacheLock.RLock()
 	path := xtreamM3uCache[cacheName].string
 	xtreamM3uCacheLock.RUnlock()
-	ctx.Header("Content-Type", "application/octet-stream")
 
-	ctx.File(path)
-
+	body, err := os.ReadFile(path)
+	if err != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+		return
+	}
+	ctx.Data(http.StatusOK, "application/octet-stream", c.rewritePlaylistHosts(ctx, body))
 }
 
 // xtreamStream proxies a live stream through the session manager, which shares a

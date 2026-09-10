@@ -18,7 +18,71 @@
 
 package server
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/lucasduport/stream-share/pkg/config"
+)
+
+// TestEnsureChannelIndexAcceptsRelativeTrackLines guards against the
+// channelIndex/epgIndex silently going empty: marshallInto now writes
+// relative track URIs (e.g. "/anti/user/pass/0/stream1") instead of
+// absolute http(s) URLs, so the line filter must still recognize them as
+// track lines rather than skipping every entry in the cached playlist.
+func TestEnsureChannelIndexAcceptsRelativeTrackLines(t *testing.T) {
+	channelIndexMu.Lock()
+	channelIndex = nil
+	channelIndexPath = ""
+	channelIndexMTime = time.Time{}
+	channelIndexMu.Unlock()
+	epgIndexMu.Lock()
+	epgIndex = nil
+	epgIndexMu.Unlock()
+	t.Cleanup(func() {
+		channelIndexMu.Lock()
+		channelIndex = nil
+		channelIndexPath = ""
+		channelIndexMTime = time.Time{}
+		channelIndexMu.Unlock()
+		epgIndexMu.Lock()
+		epgIndex = nil
+		epgIndexMu.Unlock()
+	})
+
+	dir := t.TempDir()
+	m3uPath := filepath.Join(dir, "playlist.m3u")
+	body := "#EXTM3U\n" +
+		`#EXTINF:-1 tvg-id="chan1.tv" tvg-logo="/img?url=x", Channel One` + "\n" +
+		"/anti/user/pass/0/stream1.ts\n"
+	if err := os.WriteFile(m3uPath, []byte(body), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	c := &Config{ProxyConfig: &config.ProxyConfig{}}
+	c.proxyfiedM3UPath = m3uPath
+
+	c.ensureChannelIndex()
+
+	channelIndexMu.RLock()
+	name, ok := channelIndex["stream1"]
+	channelIndexMu.RUnlock()
+	if !ok {
+		t.Fatalf("channelIndex is empty; relative track line was not indexed (channelIndex=%v)", channelIndex)
+	}
+	if name != "Channel One" {
+		t.Errorf("channelIndex[%q] = %q, want %q", "stream1", name, "Channel One")
+	}
+
+	epgIndexMu.RLock()
+	epgID, ok := epgIndex["stream1"]
+	epgIndexMu.RUnlock()
+	if !ok || epgID != "chan1.tv" {
+		t.Errorf("epgIndex[%q] = %q, ok=%v, want %q", "stream1", epgID, ok, "chan1.tv")
+	}
+}
 
 // TestStreamNamesHashStableAcrossIteration is the property the skip-unchanged
 // optimisation depends on: Go randomises map iteration order, so a hash that

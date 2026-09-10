@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -100,8 +101,13 @@ func (c *Config) xtreamGet(ctx *gin.Context) {
 	xtreamM3uCacheLock.RLock()
 	path := xtreamM3uCache[m3uURL.String()].string
 	xtreamM3uCacheLock.RUnlock()
-	ctx.Header("Content-Type", "application/octet-stream")
-	ctx.File(path)
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+		return
+	}
+	ctx.Data(http.StatusOK, "application/octet-stream", c.rewritePlaylistHosts(ctx, body))
 }
 
 // xtreamPlayerAPI proxies player_api actions with a local login path to avoid brittle unmarshaling differences.

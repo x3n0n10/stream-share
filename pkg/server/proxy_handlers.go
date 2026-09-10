@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -52,11 +53,16 @@ var streamTransport = &http.Transport{
 // streamHTTPClient has no global Timeout; streams run as long as the client stays connected.
 var streamHTTPClient = &http.Client{Transport: streamTransport}
 
-// getM3U sends the proxified M3U file generated during bootstrap.
+// getM3U sends the proxified M3U file generated during bootstrap, with
+// track URIs and tvg-logo values prefixed for the current request's host.
 func (c *Config) getM3U(ctx *gin.Context) {
+	body, err := os.ReadFile(c.proxyfiedM3UPath)
+	if err != nil {
+		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+		return
+	}
 	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, c.M3UFileName))
-	ctx.Header("Content-Type", "application/octet-stream")
-	ctx.File(c.proxyfiedM3UPath)
+	ctx.Data(http.StatusOK, "application/octet-stream", c.rewritePlaylistHosts(ctx, body))
 }
 
 // reverseProxy forwards a track request to the upstream using Xtream creds.

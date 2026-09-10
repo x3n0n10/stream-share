@@ -104,3 +104,49 @@ func TestM3U8ReverseProxyRewritesSegmentURIs(t *testing.T) {
 		t.Errorf("body %q does not contain rewritten segment URI %q", w.Body.String(), wantSegment)
 	}
 }
+
+func TestM3U8ReverseProxyRewritesAgainstPostRedirectURL(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	finalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("#EXTM3U\nsegment1.ts\n"))
+	}))
+	defer finalServer.Close()
+
+	redirectServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, finalServer.URL+"/playlist.m3u8", http.StatusFound)
+	}))
+	defer redirectServer.Close()
+
+	track := &m3u.Track{URI: redirectServer.URL + "/playlist.m3u8"}
+	c := &Config{
+		ProxyConfig: &config.ProxyConfig{
+			HostConfig:     &config.HostConfiguration{Hostname: "proxy.example.com"},
+			AdvertisedPort: 8080,
+			XtreamUser:     "upstreamuser",
+			XtreamPassword: "upstreampass",
+		},
+		track: track,
+	}
+
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/anti/upstreamuser/upstreampass/0/playlist.m3u8", nil)
+	ctx.Params = gin.Params{{Key: "id", Value: "playlist.m3u8"}}
+
+	c.m3u8ReverseProxy(ctx)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	wantSegment := "http://proxy.example.com:8080/img?url=" + url.QueryEscape(finalServer.URL+"/segment1.ts")
+	if !strings.Contains(w.Body.String(), wantSegment) {
+		t.Errorf("body %q does not contain segment URI resolved against the final URL %q", w.Body.String(), wantSegment)
+	}
+	wrongSegment := url.QueryEscape(redirectServer.URL + "/segment1.ts")
+	if strings.Contains(w.Body.String(), wrongSegment) {
+		t.Errorf("body %q resolved the segment against the pre-redirect URL instead of the final one", w.Body.String())
+	}
+}

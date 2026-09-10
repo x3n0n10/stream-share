@@ -247,4 +247,38 @@ func TestAssetProxy(t *testing.T) {
 			t.Errorf("body %q still contains the raw upstream segment URI", w.Body.String())
 		}
 	})
+
+	t.Run("rewrites segment URIs against the post-redirect URL, not the requested one", func(t *testing.T) {
+		finalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("#EXTM3U\nsegment1.ts\n"))
+		}))
+		defer finalServer.Close()
+
+		redirectServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, finalServer.URL+"/hls/channel1/index.m3u8", http.StatusFound)
+		}))
+		defer redirectServer.Close()
+
+		c := testImageProxyConfig()
+		w := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(w)
+		targetURL := redirectServer.URL + "/live/channel1.m3u8"
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/img?url="+url.QueryEscape(targetURL), nil)
+
+		c.assetProxy(ctx)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+		}
+		wantSegment := "http://proxy.example.com:8080/img?url=" + url.QueryEscape(finalServer.URL+"/hls/channel1/segment1.ts")
+		if !strings.Contains(w.Body.String(), wantSegment) {
+			t.Errorf("body %q does not contain segment URI resolved against the final URL %q", w.Body.String(), wantSegment)
+		}
+		wrongSegment := redirectServer.URL + "/live/segment1.ts"
+		if strings.Contains(w.Body.String(), url.QueryEscape(wrongSegment)) {
+			t.Errorf("body %q resolved the segment against the pre-redirect URL instead of the final one", w.Body.String())
+		}
+	})
 }

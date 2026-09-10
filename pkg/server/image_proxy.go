@@ -193,7 +193,11 @@ func (c *Config) assetProxy(ctx *gin.Context) {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
 		return
 	}
-	body = c.rewriteM3U8(target, body)
+	base := target
+	if resp.Request != nil && resp.Request.URL != nil {
+		base = resp.Request.URL
+	}
+	body = c.rewriteM3U8(base, body)
 	mergeHttpHeader(ctx.Writer.Header(), resp.Header)
 	// The rewritten body is a different length than upstream's; overwrite
 	// the Content-Length mergeHttpHeader just copied from upstream, or the

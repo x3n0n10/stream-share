@@ -113,7 +113,11 @@ func (c *Config) m3u8ReverseProxy(ctx *gin.Context) {
 		ctx.AbortWithError(http.StatusInternalServerError, err) // nolint: errcheck
 		return
 	}
-	body = c.rewriteM3U8(rpURL, body)
+	base := rpURL
+	if resp.Request != nil && resp.Request.URL != nil {
+		base = resp.Request.URL
+	}
+	body = c.rewriteM3U8(base, body)
 	contentType := resp.Header.Get("Content-Type")
 	mergeHttpHeader(ctx.Writer.Header(), resp.Header)
 	// The rewritten body is a different length than upstream's; overwrite

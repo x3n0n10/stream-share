@@ -19,10 +19,13 @@
 package server
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/lucasduport/stream-share/pkg/config"
 )
 
@@ -174,6 +177,74 @@ func TestRewriteM3U8(t *testing.T) {
 		}
 		if !strings.HasSuffix(out, `",IV=0x00000000000000000000000000000001`) {
 			t.Errorf("output %q lost the IV attribute suffix", out)
+		}
+	})
+}
+
+func TestAssetProxy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("rejects a non-http(s) scheme", func(t *testing.T) {
+		c := testImageProxyConfig()
+		w := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(w)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/img?url="+url.QueryEscape("file:///etc/passwd"), nil)
+
+		c.assetProxy(ctx)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("streams a plain image response unmodified", func(t *testing.T) {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "image/png")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("fake-png-bytes"))
+		}))
+		defer upstream.Close()
+
+		c := testImageProxyConfig()
+		w := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(w)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/img?url="+url.QueryEscape(upstream.URL+"/logo.png"), nil)
+
+		c.assetProxy(ctx)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", w.Code)
+		}
+		if w.Body.String() != "fake-png-bytes" {
+			t.Errorf("body = %q, want %q", w.Body.String(), "fake-png-bytes")
+		}
+	})
+
+	t.Run("rewrites nested segment URIs in an m3u8 manifest response", func(t *testing.T) {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("#EXTM3U\nsegment1.ts\n"))
+		}))
+		defer upstream.Close()
+
+		c := testImageProxyConfig()
+		w := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(w)
+		targetURL := upstream.URL + "/hls/channel1/index.m3u8"
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/img?url="+url.QueryEscape(targetURL), nil)
+
+		c.assetProxy(ctx)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+		}
+		wantSegment := "http://proxy.example.com:8080/img?url=" + url.QueryEscape(upstream.URL+"/hls/channel1/segment1.ts")
+		if !strings.Contains(w.Body.String(), wantSegment) {
+			t.Errorf("body %q does not contain rewritten segment URI %q", w.Body.String(), wantSegment)
+		}
+		if strings.Contains(w.Body.String(), upstream.URL+"/hls/channel1/segment1.ts\n") {
+			t.Errorf("body %q still contains the raw upstream segment URI", w.Body.String())
 		}
 	})
 }

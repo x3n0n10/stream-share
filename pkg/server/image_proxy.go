@@ -20,8 +20,14 @@ package server
 
 import (
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/lucasduport/stream-share/pkg/utils"
 )
 
 // proxyImageURL rewrites an absolute image/asset URL to point at this
@@ -142,4 +148,56 @@ func rewriteQuotedURI(line, key string, rewrite func(string) string) string {
 	end += start + 1
 	value := line[start+1 : end]
 	return line[:start+1] + rewrite(value) + line[end:]
+}
+
+// assetProxy fetches an arbitrary http(s) URL on behalf of an
+// authenticated client and streams it back, so upstream image/manifest
+// URLs never reach the client directly. There is deliberately no host
+// allowlist: the route sits behind c.authenticate, so only an already-
+// authenticated viewer can use it, at the known cost that such a viewer
+// could make the server fetch other http(s) URLs too.
+//
+// A response whose Content-Type or requested path indicates an HLS
+// manifest is buffered and run through rewriteM3U8 instead of streamed
+// raw, so nested sub-playlist/segment/key URIs get pointed back at this
+// same route — recursively, since a rewritten sub-playlist is fetched
+// through /img again and re-enters this same check.
+func (c *Config) assetProxy(ctx *gin.Context) {
+	target, err := url.Parse(ctx.Query("url"))
+	if err != nil || (target.Scheme != "http" && target.Scheme != "https") {
+		ctx.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+
+	req, err := c.buildUpstreamRequest(ctx, target)
+	if err != nil {
+		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+		return
+	}
+	resp, err := streamHTTPClient.Do(req)
+	if err != nil {
+		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	contentType := resp.Header.Get("Content-Type")
+	isManifest := strings.Contains(contentType, "mpegurl") || strings.HasSuffix(strings.ToLower(target.Path), ".m3u8")
+	if !isManifest {
+		writeUpstreamResponse(ctx, resp)
+		return
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+		return
+	}
+	body = c.rewriteM3U8(target, body)
+	mergeHttpHeader(ctx.Writer.Header(), resp.Header)
+	// The rewritten body is a different length than upstream's; overwrite
+	// the Content-Length mergeHttpHeader just copied from upstream, or the
+	// client gets a length that doesn't match the actual body.
+	ctx.Writer.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	ctx.Data(resp.StatusCode, contentType, body)
 }

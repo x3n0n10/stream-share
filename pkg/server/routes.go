@@ -31,6 +31,8 @@ import (
 func (c *Config) routes(r *gin.RouterGroup) {
 	r = r.Group(c.CustomEndpoint)
 
+	r.GET("/img", c.authenticate, c.assetProxy)
+
 	// Xtream service endpoints
 	if c.XtreamBaseURL != "" {
 		c.xtreamRoutes(r)

@@ -300,3 +300,9 @@ per-function suite:
   playlists never emit `catchup-source` themselves, so this only bites
   a raw-M3U provider whose file contains such a tag — not covered by
   this design; revisit if one is found in practice.
+- Caching `xtreamXMLTV`'s rewritten output: `/xmltv.php` has no caching
+  today (unlike M3U's `cacheXtreamM3u`), so every client request already
+  re-fetches and re-buffers the full upstream EPG XML; the new rewrite
+  pass adds a proportional, uncached cost on top of that per request.
+  Left as a follow-up, not folded into this design — revisit if it
+  measurably matters in practice.

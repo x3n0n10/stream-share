@@ -74,10 +74,13 @@ func (c *Config) xtreamApiGet(ctx *gin.Context) {
 	xtreamM3uCacheLock.RLock()
 	path := xtreamM3uCache[cacheName].string
 	xtreamM3uCacheLock.RUnlock()
-	ctx.Header("Content-Type", "application/octet-stream")
 
-	ctx.File(path)
-
+	body, err := os.ReadFile(path)
+	if err != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
+		return
+	}
+	ctx.Data(http.StatusOK, "application/octet-stream", c.rewritePlaylistHosts(ctx, body))
 }
 
 // xtreamStream proxies a live stream through the session manager, which shares a
@@ -102,7 +105,7 @@ func (c *Config) xtreamXMLTV(ctx *gin.Context) {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
 		return
 	}
-	ctx.Data(http.StatusOK, "application/xml", resp)
+	ctx.Data(http.StatusOK, "application/xml", c.rewriteXMLTVIcons(ctx, resp))
 }
 
 func (c *Config) xtreamStreamHandler(ctx *gin.Context) {
@@ -833,6 +836,7 @@ func (c *Config) xtreamHlsStream(ctx *gin.Context) {
 		return
 	}
 
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
 	req, reqErr := http.NewRequestWithContext(ctx.Request.Context(), "GET", fmt.Sprintf("%s://%s/hls/%s/%s", redirURL.Scheme, redirURL.Host, ctx.Param("token"), ctx.Param("chunk")), nil)
 	if reqErr != nil {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(reqErr))
@@ -841,7 +845,7 @@ func (c *Config) xtreamHlsStream(ctx *gin.Context) {
 
 	mergeHttpHeader(req.Header, ctx.Request.Header)
 
-	resp, doErr := http.DefaultClient.Do(req)
+	resp, doErr := client.Do(req)
 	if doErr != nil {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(doErr))
 		return
@@ -865,7 +869,7 @@ func (c *Config) xtreamHlsStream(ctx *gin.Context) {
 				return
 			}
 			mergeHttpHeader(hlsReq.Header, ctx.Request.Header)
-			hlsResp, hlsDoErr := http.DefaultClient.Do(hlsReq)
+			hlsResp, hlsDoErr := client.Do(hlsReq)
 			if hlsDoErr != nil {
 				_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(hlsDoErr))
 				return
@@ -877,11 +881,12 @@ func (c *Config) xtreamHlsStream(ctx *gin.Context) {
 				_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(readErr))
 				return
 			}
-			body := string(b)
-			body = strings.ReplaceAll(body, "/"+c.XtreamUser.String()+"/"+c.XtreamPassword.String()+"/", "/"+c.User.String()+"/"+c.Password.String()+"/")
-			utils.DebugLog("HLS stream response modified to use proxy credentials for client URLs")
+			b = c.rewriteM3U8(ctx, loc, b)
 			mergeHttpHeader(ctx.Writer.Header(), hlsResp.Header)
-			ctx.Data(http.StatusOK, hlsResp.Header.Get("Content-Type"), []byte(body))
+			// The rewritten body is a different length than upstream's; overwrite
+			// the Content-Length mergeHttpHeader just copied from upstream.
+			ctx.Writer.Header().Set("Content-Length", strconv.Itoa(len(b)))
+			ctx.Data(http.StatusOK, hlsResp.Header.Get("Content-Type"), b)
 			return
 		}
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(errors.New("unable to HLS stream")))
@@ -937,11 +942,12 @@ func (c *Config) hlsXtreamStream(ctx *gin.Context, oriURL *url.URL) {
 				_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(readErr))
 				return
 			}
-			body := string(b)
-			body = strings.ReplaceAll(body, "/"+c.XtreamUser.String()+"/"+c.XtreamPassword.String()+"/", "/"+c.User.String()+"/"+c.Password.String()+"/")
-			utils.DebugLog("HLS stream response modified to use proxy credentials for client URLs")
+			b = c.rewriteM3U8(ctx, loc, b)
 			mergeHttpHeader(ctx.Writer.Header(), hlsResp.Header)
-			ctx.Data(http.StatusOK, hlsResp.Header.Get("Content-Type"), []byte(body))
+			// The rewritten body is a different length than upstream's; overwrite
+			// the Content-Length mergeHttpHeader just copied from upstream.
+			ctx.Writer.Header().Set("Content-Length", strconv.Itoa(len(b)))
+			ctx.Data(http.StatusOK, hlsResp.Header.Get("Content-Type"), b)
 			return
 		}
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(errors.New("unable to HLS stream")))

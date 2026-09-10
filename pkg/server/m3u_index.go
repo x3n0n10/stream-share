@@ -225,7 +225,7 @@ func (c *Config) ensureChannelIndex() {
 			lastEPGID = extractM3UAttr(line, "tvg-id")
 			continue
 		}
-		if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
+		if strings.HasPrefix(line, "/") || strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
 			u, err := url.Parse(line)
 			if err == nil {
 				base := path.Base(u.Path)

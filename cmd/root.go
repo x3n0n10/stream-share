@@ -205,8 +205,8 @@ func init() {
 	rootCmd.Flags().StringP("custom-endpoint", "", "", "Custom endpoint path")
 	rootCmd.Flags().StringP("custom-id", "", "", "Custom anti-collision ID")
 	rootCmd.Flags().Int("port", 8080, "Listening port")
-	rootCmd.Flags().Int("advertised-port", 0, "Port to use in generated URLs (for reverse proxy)")
-	rootCmd.Flags().String("hostname", "", "Hostname to use in generated URLs")
+	rootCmd.Flags().Int("advertised-port", 0, "Deprecated, no longer used for generated URLs (derived from the request); kept for backward compatibility")
+	rootCmd.Flags().String("hostname", "", "Deprecated, no longer used for generated URLs (derived from the request); kept for backward compatibility")
 	rootCmd.Flags().BoolP("https-enabled", "", false, "Use HTTPS for generated URLs")
 	rootCmd.Flags().Int("m3u-cache-expiration-hours", 1, "M3U cache expiration in hours")
 

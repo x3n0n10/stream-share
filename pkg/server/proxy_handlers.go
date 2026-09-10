@@ -24,7 +24,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,11 +53,16 @@ var streamTransport = &http.Transport{
 // streamHTTPClient has no global Timeout; streams run as long as the client stays connected.
 var streamHTTPClient = &http.Client{Transport: streamTransport}
 
-// getM3U sends the proxified M3U file generated during bootstrap.
+// getM3U sends the proxified M3U file generated during bootstrap, with
+// track URIs and tvg-logo values prefixed for the current request's host.
 func (c *Config) getM3U(ctx *gin.Context) {
+	body, err := os.ReadFile(c.proxyfiedM3UPath)
+	if err != nil {
+		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+		return
+	}
 	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, c.M3UFileName))
-	ctx.Header("Content-Type", "application/octet-stream")
-	ctx.File(c.proxyfiedM3UPath)
+	ctx.Data(http.StatusOK, "application/octet-stream", c.rewritePlaylistHosts(ctx, body))
 }
 
 // reverseProxy forwards a track request to the upstream using Xtream creds.
@@ -95,31 +102,47 @@ func (c *Config) m3u8ReverseProxy(ctx *gin.Context) {
 	utils.DebugLog("-> Upstream username: %s", c.XtreamUser.String())
 	utils.DebugLog("-> Final upstream URL: %s", rpURL.String())
 
-	c.stream(ctx, rpURL)
-}
-
-// stream proxies the content from upstream to the client, preserving status
-// and most headers, while normalizing VOD header sets for stricter providers.
-func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
-	utils.DebugLog("-> Streaming request URL: %s", ctx.Request.URL)
-	utils.DebugLog("-> Proxying to upstream URL: %s", oriURL.String())
-
-	// Prepare the upstream request (bound to client context so it cancels if client disconnects)
-	req, err := http.NewRequestWithContext(ctx.Request.Context(), "GET", oriURL.String(), nil)
+	req, err := c.buildUpstreamRequest(ctx, rpURL)
 	if err != nil {
-		utils.ErrorLog("Failed to create request: %v", err)
-		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+		ctx.AbortWithError(http.StatusInternalServerError, err) // nolint: errcheck
 		return
 	}
+	resp, err := streamHTTPClient.Do(req)
+	if err != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, err) // nolint: errcheck
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
 
-	// For VOD endpoints, some providers are extremely strict: use a whitelist header set
-	p := oriURL.Path
-	isVOD := isVODPath(p)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, err) // nolint: errcheck
+		return
+	}
+	base := rpURL
+	if resp.Request != nil && resp.Request.URL != nil {
+		base = resp.Request.URL
+	}
+	body = c.rewriteM3U8(ctx, base, body)
+	contentType := resp.Header.Get("Content-Type")
+	mergeHttpHeader(ctx.Writer.Header(), resp.Header)
+	// The rewritten body is a different length than upstream's; overwrite
+	// the Content-Length mergeHttpHeader just copied from upstream.
+	ctx.Writer.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	ctx.Data(resp.StatusCode, contentType, body)
+}
 
-	if isVOD {
+// buildUpstreamRequest constructs the outbound request to oriURL, using the
+// strict VOD header whitelist for VOD-shaped paths and a minimal
+// passthrough header set otherwise.
+func (c *Config) buildUpstreamRequest(ctx *gin.Context, oriURL *url.URL) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx.Request.Context(), "GET", oriURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	if isVODPath(oriURL.Path) {
 		req.Header = prepareVODHeaders(ctx)
 	} else {
-		// Non-VOD: copy and normalize minimally
 		mergeHttpHeader(req.Header, ctx.Request.Header)
 		req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
 		req.Header.Del("Accept-Encoding")
@@ -131,22 +154,16 @@ func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
 			req.Header.Set("Connection", "keep-alive")
 		}
 	}
+	return req, nil
+}
 
-	// Execute the upstream request
-	resp, err := streamHTTPClient.Do(req)
-	if err != nil {
-		utils.DebugLog("-> Upstream request error: %v", err)
-		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
-		return
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	utils.DebugLog("-> Upstream response status: %d", resp.StatusCode)
+// writeUpstreamResponse copies resp's headers/status to ctx and streams its
+// body to the client with flushes, normalizing a Range-less 206 to 200.
+func writeUpstreamResponse(ctx *gin.Context, resp *http.Response) {
 	if resp.StatusCode == 461 {
-		utils.DebugLog("Upstream returned 461 (often blocks HEAD/Range or unexpected headers). UA=%q, AE=%q", req.Header.Get("User-Agent"), req.Header.Get("Accept-Encoding"))
+		utils.DebugLog("Upstream returned 461 (often blocks HEAD/Range or unexpected headers)")
 	}
 
-	// Copy response headers and status code
 	mergeHttpHeader(ctx.Writer.Header(), resp.Header)
 	status := resp.StatusCode
 	// If the client did not send a Range header but upstream returned 206, the player
@@ -165,12 +182,10 @@ func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
 	}
 	ctx.Status(status)
 
-	// Stream the response body to the client with flushes
 	w := ctx.Writer
 	buf := make([]byte, 64*1024)
 
 	for {
-		// Respect client cancellation
 		select {
 		case <-ctx.Request.Context().Done():
 			utils.DebugLog("Client cancelled stream for URL: %s", ctx.Request.URL)
@@ -195,4 +210,29 @@ func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
 			return
 		}
 	}
+}
+
+// stream proxies the content from upstream to the client, preserving status
+// and most headers, while normalizing VOD header sets for stricter providers.
+func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
+	utils.DebugLog("-> Streaming request URL: %s", ctx.Request.URL)
+	utils.DebugLog("-> Proxying to upstream URL: %s", oriURL.String())
+
+	req, err := c.buildUpstreamRequest(ctx, oriURL)
+	if err != nil {
+		utils.ErrorLog("Failed to create request: %v", err)
+		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+		return
+	}
+
+	resp, err := streamHTTPClient.Do(req)
+	if err != nil {
+		utils.DebugLog("-> Upstream request error: %v", err)
+		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	utils.DebugLog("-> Upstream response status: %d", resp.StatusCode)
+	writeUpstreamResponse(ctx, resp)
 }

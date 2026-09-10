@@ -23,8 +23,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -100,8 +102,13 @@ func (c *Config) xtreamGet(ctx *gin.Context) {
 	xtreamM3uCacheLock.RLock()
 	path := xtreamM3uCache[m3uURL.String()].string
 	xtreamM3uCacheLock.RUnlock()
-	ctx.Header("Content-Type", "application/octet-stream")
-	ctx.File(path)
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+		return
+	}
+	ctx.Data(http.StatusOK, "application/octet-stream", c.rewritePlaylistHosts(ctx, body))
 }
 
 // xtreamPlayerAPI proxies player_api actions with a local login path to avoid brittle unmarshaling differences.
@@ -112,9 +119,15 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 	}
 
 	if strings.TrimSpace(action) == "" {
-		protocol := "http"
-		if c.HTTPS {
-			protocol = "https"
+		base := c.requestBaseURL(ctx)
+		protocol, hostPort, _ := strings.Cut(base, "://")
+		host, portStr, err := net.SplitHostPort(hostPort)
+		if err != nil {
+			// hostPort had no ":port" (client connected on the scheme's
+			// default port, which the Host header omits) — fall back to the
+			// real listen port, the only value guaranteed to exist.
+			host = hostPort
+			portStr = strconv.Itoa(c.HostConfig.Port)
 		}
 		now := time.Now()
 		nowUnix := strconv.FormatInt(now.Unix(), 10)
@@ -135,11 +148,11 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 				"allowed_output_formats": []string{"m3u8", "ts"},
 			},
 			"server_info": map[string]interface{}{
-				"url":             fmt.Sprintf("%s://%s", protocol, c.HostConfig.Hostname),
-				"port":            strconv.Itoa(c.AdvertisedPort),
-				"https_port":      strconv.Itoa(c.AdvertisedPort),
+				"url":             fmt.Sprintf("%s://%s", protocol, host),
+				"port":            portStr,
+				"https_port":      portStr,
 				"server_protocol": protocol,
-				"rtmp_port":       strconv.Itoa(c.AdvertisedPort),
+				"rtmp_port":       portStr,
 				"timezone":        "UTC",
 				"timestamp_now":   nowUnix,
 				"time_now":        now.UTC().Format("2006-01-02 15:04:05"),
@@ -187,6 +200,8 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 			processedResp = c.injectCatchupFlags(processedResp)
 		}
 	}
+
+	processedResp = c.rewriteImageFields(ctx, processedResp)
 
 	if config.CacheFolder != "" && utils.IsDebugLogEnabled() {
 		readableJSON, _ := json.Marshal(processedResp)

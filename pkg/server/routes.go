@@ -31,6 +31,15 @@ import (
 func (c *Config) routes(r *gin.RouterGroup) {
 	r = r.Group(c.CustomEndpoint)
 
+	// No c.authenticate here: content reached via this route (image/manifest
+	// URLs already rewritten into player_api/xmltv/M3U responses) never
+	// carried proxy credentials to begin with -- players fetch it directly,
+	// with no way to attach username/password. The lost gate is the cost of
+	// the existing "no host allowlist" trade-off (see assetProxy's doc
+	// comment); this route was already effectively unauthenticated in
+	// practice since generated links never carried credentials.
+	r.GET("/img", c.assetProxy)
+
 	// Xtream service endpoints
 	if c.XtreamBaseURL != "" {
 		c.xtreamRoutes(r)

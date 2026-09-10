@@ -20,6 +20,7 @@ package server
 
 import (
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/lucasduport/stream-share/pkg/config"
@@ -122,4 +123,57 @@ func TestRewriteImageFields(t *testing.T) {
 	if epInfo["movie_image"] != wantEpImage {
 		t.Errorf("nested episode movie_image = %v, want %v", epInfo["movie_image"], wantEpImage)
 	}
+}
+
+func TestRewriteM3U8(t *testing.T) {
+	c := testImageProxyConfig()
+	base, err := url.Parse("http://upstream.example.com/live/channel1/index.m3u8")
+	if err != nil {
+		t.Fatalf("url.Parse base: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "bare relative segment line resolved against base and proxied",
+			in:   "segment1.ts",
+			want: "http://proxy.example.com:8080/img?url=" + url.QueryEscape("http://upstream.example.com/live/channel1/segment1.ts"),
+		},
+		{
+			name: "bare absolute segment line proxied as-is",
+			in:   "http://cdn.example.com/seg2.ts",
+			want: "http://proxy.example.com:8080/img?url=" + url.QueryEscape("http://cdn.example.com/seg2.ts"),
+		},
+		{
+			name: "comment line with no URI attribute passes through unchanged",
+			in:   "#EXTM3U",
+			want: "#EXTM3U",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := string(c.rewriteM3U8(base, []byte(tc.in)))
+			if out != tc.want {
+				t.Errorf("rewriteM3U8(%q) = %q, want %q", tc.in, out, tc.want)
+			}
+		})
+	}
+
+	t.Run("EXT-X-KEY URI attribute rewritten in place, rest of tag untouched", func(t *testing.T) {
+		in := `#EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x00000000000000000000000000000001`
+		out := string(c.rewriteM3U8(base, []byte(in)))
+		wantURI := "http://proxy.example.com:8080/img?url=" + url.QueryEscape("http://upstream.example.com/live/channel1/key.bin")
+		if !strings.Contains(out, wantURI) {
+			t.Errorf("output %q does not contain rewritten key URI %q", out, wantURI)
+		}
+		if !strings.HasPrefix(out, `#EXT-X-KEY:METHOD=AES-128,URI="`) {
+			t.Errorf("output %q lost the METHOD attribute prefix", out)
+		}
+		if !strings.HasSuffix(out, `",IV=0x00000000000000000000000000000001`) {
+			t.Errorf("output %q lost the IV attribute suffix", out)
+		}
+	})
 }

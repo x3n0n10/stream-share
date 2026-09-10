@@ -85,3 +85,61 @@ func (c *Config) rewriteImageFields(v interface{}) interface{} {
 		return v
 	}
 }
+
+// rewriteM3U8 rewrites every segment, key, and sub-playlist URI in an HLS
+// manifest body to point through this proxy instead of the upstream
+// provider. Each URI is resolved against base (the manifest's own fetch
+// URL) before being handed to proxyImageURL, so a manifest-relative URI
+// and an absolute one are handled identically.
+func (c *Config) rewriteM3U8(base *url.URL, body []byte) []byte {
+	lines := strings.Split(string(body), "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimRight(line, "\r")
+		switch {
+		case trimmed == "" || strings.HasPrefix(trimmed, "#") && !strings.Contains(trimmed, "URI="):
+			// comments/tags without a URI attribute pass through unchanged
+		case strings.Contains(trimmed, "URI="):
+			// #EXT-X-KEY / #EXT-X-MAP: rewrite the quoted URI= attribute in place
+			lines[i] = rewriteQuotedURI(trimmed, "URI=", func(raw string) string {
+				return c.proxyImageURL(resolveM3U8URI(base, raw))
+			})
+		default:
+			// a bare line is itself a segment or sub-playlist URI
+			lines[i] = c.proxyImageURL(resolveM3U8URI(base, trimmed))
+		}
+	}
+	return []byte(strings.Join(lines, "\n"))
+}
+
+// resolveM3U8URI resolves a manifest URI (relative or absolute) against
+// base, the manifest's own fetch URL. Left as-is if raw fails to parse;
+// proxyImageURL's own ParseRequestURI check will no-op it too.
+func resolveM3U8URI(base *url.URL, raw string) string {
+	ref, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	return base.ResolveReference(ref).String()
+}
+
+// rewriteQuotedURI finds the first key="..." attribute in line (e.g.
+// "URI=") and replaces its quoted value via rewrite, leaving the rest of
+// the line untouched. Returns line unchanged if the attribute isn't found
+// or its quote is unterminated.
+func rewriteQuotedURI(line, key string, rewrite func(string) string) string {
+	idx := strings.Index(line, key)
+	if idx == -1 {
+		return line
+	}
+	start := idx + len(key)
+	if start >= len(line) || line[start] != '"' {
+		return line
+	}
+	end := strings.IndexByte(line[start+1:], '"')
+	if end == -1 {
+		return line
+	}
+	end += start + 1
+	value := line[start+1 : end]
+	return line[:start+1] + rewrite(value) + line[end:]
+}

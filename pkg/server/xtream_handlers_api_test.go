@@ -19,6 +19,7 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -86,5 +87,61 @@ func TestXtreamGetRewritesHostPerRequest(t *testing.T) {
 	}
 	if strings.Contains(bodyA, "host-b") || strings.Contains(bodyB, "host-a") {
 		t.Errorf("the same cached file leaked the other request's host: bodyA=%q bodyB=%q", bodyA, bodyB)
+	}
+}
+
+func TestXtreamPlayerAPILoginUsesRequestHost(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	c := &Config{ProxyConfig: &config.ProxyConfig{HostConfig: &config.HostConfiguration{Port: 8080}}}
+
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/player_api.php", nil)
+	ctx.Request.Host = "viewer.example.com:9090"
+
+	c.xtreamPlayerAPI(ctx, url.Values{})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		ServerInfo struct {
+			URL  string `json:"url"`
+			Port string `json:"port"`
+		} `json:"server_info"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if resp.ServerInfo.URL != "http://viewer.example.com" {
+		t.Errorf("server_info.url = %q, want %q", resp.ServerInfo.URL, "http://viewer.example.com")
+	}
+	if resp.ServerInfo.Port != "9090" {
+		t.Errorf("server_info.port = %q, want %q", resp.ServerInfo.Port, "9090")
+	}
+}
+
+func TestXtreamPlayerAPILoginFallsBackToListenPortWhenHostHasNone(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c := &Config{ProxyConfig: &config.ProxyConfig{HostConfig: &config.HostConfiguration{Port: 8080}}}
+
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/player_api.php", nil)
+	ctx.Request.Host = "viewer.example.com"
+
+	c.xtreamPlayerAPI(ctx, url.Values{})
+
+	var resp struct {
+		ServerInfo struct {
+			Port string `json:"port"`
+		} `json:"server_info"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if resp.ServerInfo.Port != "8080" {
+		t.Errorf("server_info.port = %q, want fallback listen port %q", resp.ServerInfo.Port, "8080")
 	}
 }

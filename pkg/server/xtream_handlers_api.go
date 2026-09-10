@@ -188,6 +188,8 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 		}
 	}
 
+	processedResp = c.rewriteImageFields(processedResp)
+
 	if config.CacheFolder != "" && utils.IsDebugLogEnabled() {
 		readableJSON, _ := json.Marshal(processedResp)
 		filename := fmt.Sprintf("%s_%s.json", action, time.Now().Format("20060102_150405"))

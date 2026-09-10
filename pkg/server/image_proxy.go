@@ -44,3 +44,44 @@ func (c *Config) proxyImageURL(raw string) string {
 		protocol, c.HostConfig.Hostname, c.AdvertisedPort, customEnd,
 		url.QueryEscape(raw))
 }
+
+// rewriteImageFields walks a JSON-decoded player_api response (nested
+// map[string]interface{} / []interface{}) and rewrites every known
+// upstream-image field through proxyImageURL, in place, at any nesting
+// depth. direct_source is deleted rather than rewritten: a player that
+// uses it bypasses c.sessionManager's multiplexing entirely, and hiding
+// the URL wouldn't restore that, so it's dropped to force a fall back to
+// the session-managed stream_id play URL instead.
+func (c *Config) rewriteImageFields(v interface{}) interface{} {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		for key, fieldVal := range val {
+			switch key {
+			case "stream_icon", "cover", "movie_image":
+				if s, ok := fieldVal.(string); ok {
+					val[key] = c.proxyImageURL(s)
+				}
+			case "backdrop_path":
+				if arr, ok := fieldVal.([]interface{}); ok {
+					for i, item := range arr {
+						if s, ok := item.(string); ok {
+							arr[i] = c.proxyImageURL(s)
+						}
+					}
+				}
+			case "direct_source":
+				delete(val, key)
+			default:
+				val[key] = c.rewriteImageFields(fieldVal)
+			}
+		}
+		return val
+	case []interface{}:
+		for i, item := range val {
+			val[i] = c.rewriteImageFields(item)
+		}
+		return val
+	default:
+		return v
+	}
+}

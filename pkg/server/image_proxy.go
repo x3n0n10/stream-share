@@ -155,12 +155,13 @@ func rewriteQuotedURI(line, key string, rewrite func(string) string) string {
 	return line[:start+1] + rewrite(value) + line[end:]
 }
 
-// assetProxy fetches an arbitrary http(s) URL on behalf of an
-// authenticated client and streams it back, so upstream image/manifest
-// URLs never reach the client directly. There is deliberately no host
-// allowlist: the route sits behind c.authenticate, so only an already-
-// authenticated viewer can use it, at the known cost that such a viewer
-// could make the server fetch other http(s) URLs too.
+// assetProxy fetches an arbitrary http(s) URL and streams it back, so
+// upstream image/manifest URLs never reach the client directly. There is
+// deliberately no auth and no host allowlist: content reached via this
+// route (rewritten into player_api/xmltv/M3U responses) never carried
+// proxy credentials to begin with, since players fetch it directly with
+// no way to attach a username/password. The known cost: anyone who can
+// reach this server can make it fetch arbitrary http(s) URLs.
 //
 // A response whose Content-Type or requested path indicates an HLS
 // manifest is buffered and run through rewriteM3U8 instead of streamed

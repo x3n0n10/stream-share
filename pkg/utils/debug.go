@@ -19,16 +19,8 @@
 package utils
 
 import (
-	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
-	"time"
-)
-
-var (
-	// DebugLoggingEnabled controls whether debug logs are printed
-	DebugLoggingEnabled = false
 )
 
 // IsDebugLogEnabled returns whether debug logging is enabled
@@ -51,70 +43,19 @@ func WriteResponseToFile(filename string, data []byte, contentType string) {
 	}
 }
 
-// SaveRawResponse saves a raw API response to a file for debugging purposes
-// Returns the path to the saved file or empty string if the operation failed
+// SaveRawResponse saves a raw API response to a file for debugging purposes.
+// Returns the path to the saved file, or empty string if disabled/failed.
+//
+// ponytail: always disabled -- this used to gate on a var nothing ever set,
+// so it has always been a no-op. Kept as an explicit no-op (called from
+// pkg/server/xtream_generate.go via DumpStructToLog) rather than wired to a
+// real flag; do that if this data-dump capability is wanted.
 func SaveRawResponse(action string, data []byte) string {
-	// Skip if debug logging is disabled
-	if !DebugLoggingEnabled {
-		return ""
-	}
-
-	// Create debug directory under system temp
-	debugDir := filepath.Join(os.TempDir(), "stream-share-debug")
-	if err := os.MkdirAll(debugDir, 0755); err != nil {
-		ErrorLog("Failed to create debug directory: %v", err)
-		return ""
-	}
-
-	// Format filename with action and timestamp
-	timestamp := time.Now().Format("20060102_150405")
-	actionName := action
-	if actionName == "" {
-		actionName = "login"
-	}
-	filename := filepath.Join(debugDir, fmt.Sprintf("%s_%s.json", actionName, timestamp))
-
-	// Write data to file
-	if err := os.WriteFile(filename, data, 0644); err != nil {
-		ErrorLog("Failed to save debug data: %v", err)
-		return ""
-	}
-
-	// For JSON data, save a prettified version for easier inspection
-	var prettyData interface{}
-	if json.Unmarshal(data, &prettyData) == nil {
-		prettyBytes, err := json.MarshalIndent(prettyData, "", "  ")
-		if err == nil {
-			prettyFile := filename + ".pretty.json"
-			_ = os.WriteFile(prettyFile, prettyBytes, 0644)
-		}
-	}
-
-	return filename
+	return ""
 }
 
-// DumpStructToLog dumps the content of a struct to the debug log
+// DumpStructToLog dumps the content of a struct to the debug log.
+//
+// ponytail: always disabled, see SaveRawResponse.
 func DumpStructToLog(prefix string, v interface{}) {
-	if !DebugLoggingEnabled {
-		return
-	}
-
-	// Marshal to JSON for easy inspection
-	data, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		DebugLog("%s: [error marshaling: %v]", prefix, err)
-		return
-	}
-
-	// Log the first part (limited to avoid excessive logging)
-	maxLen := 500
-	strData := string(data)
-	if len(strData) > maxLen {
-		DebugLog("%s: %s... [truncated, full data in debug files]", prefix, strData[:maxLen])
-	} else {
-		DebugLog("%s: %s", prefix, strData)
-	}
-
-	// Also save to file for full inspection
-	SaveRawResponse(prefix, data)
 }

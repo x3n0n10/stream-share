@@ -118,9 +118,6 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		utils.InfoLog("Using custom endpoint ID: %s", customID)
 	}
 
-	// Initialize debug logging from environment variable
-	utils.Config.DebugLoggingEnabled = os.Getenv("LOG_DEBUG_ENABLED") == "true"
-
 	// Pin the internal API key from configuration if provided
 	SetAPIKey(config.InternalAPIKey)
 

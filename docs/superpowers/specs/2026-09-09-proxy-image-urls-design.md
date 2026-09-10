@@ -27,6 +27,15 @@ associated image URLs are not:
 - Generated M3U playlists (`xtreamGenerateM3u` for Xtream mode, and the
   bootstrap playlist for M3U-provider mode) set `tvg-logo` to the raw
   upstream `stream_icon`/source value.
+- HLS manifest (`.m3u8`) bodies leak the upstream host in their segment,
+  key, and sub-playlist URIs — a different surface from the JSON/XML/M3U-
+  tag fields above (playlist body content, not a discrete field). Two call
+  sites: `xtreamHlsStream`/`hlsXtreamStream` (`xtream_handlers_stream.go`)
+  currently only `strings.ReplaceAll` the credential path segment before
+  serving the fetched manifest, leaving every URI's scheme+host pointed at
+  upstream; `m3u8ReverseProxy` (`proxy_handlers.go`, non-Xtream M3U-provider
+  `.m3u8` tracks) does a raw `c.stream` byte copy with no body inspection
+  at all.
 
 Viewing clients resolve all of the above directly against the upstream
 provider instead of through stream-share, bypassing its proxying (and
@@ -39,7 +48,9 @@ and VOD/series covers and backdrops. Not just EPG + channel icons. Also
 `direct_source` — a stream URL rather than art, and handled differently
 (stripped, not rewritten — see below) because rewriting it through the
 generic image proxy would mask the URL but not restore the multiplexing
-that path bypasses.
+that path bypasses. Also HLS manifest body content (segment/key/sub-
+playlist URIs) — a body-content leak, not a field-level one, but the
+same underlying problem: an upstream host reaching the client unproxied.
 
 ## Design
 
@@ -153,16 +164,102 @@ fixed by one change:
   correctly, and the rest of the document — encoding, whitespace, other
   elements — passes through byte-identical.
 
+### 4. HLS manifest content rewriting
+
+Two call sites leak the upstream host through `.m3u8` body content
+rather than a discrete field, so they need a different mechanism than
+`rewriteImageFields`: a line-oriented manifest rewrite, built on top of
+the same `proxyImageURL` helper already used everywhere else.
+
+**New helper: `rewriteM3U8`** (`pkg/server/image_proxy.go`):
+
+```go
+func (c *Config) rewriteM3U8(base *url.URL, body []byte) []byte {
+    lines := strings.Split(string(body), "\n")
+    for i, line := range lines {
+        trimmed := strings.TrimRight(line, "\r")
+        switch {
+        case trimmed == "" || strings.HasPrefix(trimmed, "#") && !strings.Contains(trimmed, "URI="):
+            // comments/tags without a URI attribute pass through unchanged
+        case strings.Contains(trimmed, "URI="):
+            // #EXT-X-KEY / #EXT-X-MAP: rewrite the quoted URI= attribute in place
+            lines[i] = rewriteQuotedURI(trimmed, "URI=", func(raw string) string {
+                return c.proxyImageURL(resolveM3U8URI(base, raw))
+            })
+        default:
+            // a bare line is itself a segment or sub-playlist URI
+            lines[i] = c.proxyImageURL(resolveM3U8URI(base, trimmed))
+        }
+    }
+    return []byte(strings.Join(lines, "\n"))
+}
+
+func resolveM3U8URI(base *url.URL, raw string) string {
+    ref, err := url.Parse(raw)
+    if err != nil {
+        return raw // left as-is; proxyImageURL's own ParseRequestURI check will no-op it too
+    }
+    return base.ResolveReference(ref).String()
+}
+```
+
+(`rewriteQuotedURI` is a small string-splice helper: find `URI="..."`,
+replace the quoted contents via the callback, leave the rest of the tag
+untouched — no `encoding/xml`-style structure to lean on for M3U8, so a
+targeted string operation is the right size of tool here.)
+
+Resolving every URI against `base` (the manifest's own fetch URL) before
+handing it to `proxyImageURL` means a manifest-relative URI (the common
+case) and an absolute one are handled identically, and the resulting
+`/img?url=<full absolute URL>` closes the host leak regardless of which
+form the upstream sent.
+
+**`assetProxy` becomes manifest-aware** (`pkg/server/image_proxy.go`):
+after fetching the upstream body, if the response `Content-Type` is
+`application/vnd.apple.mpegurl` / `audio/mpegurl`, or the requested
+`url` param's path ends in `.m3u8` (some upstreams mislabel the
+content type), run the body through `c.rewriteM3U8(parsedTargetURL,
+body)` and serve that instead of the raw `c.stream` byte-copy. This
+makes the fix recursive for free: a master playlist's variant
+sub-playlists get pointed back at `/img?url=`, and when the client
+fetches one of those, the same content-type check fires again and
+rewrites its segment URIs too — no special-casing master vs. media
+playlists.
+
+**`xtreamHlsStream` / `hlsXtreamStream`** (`xtream_handlers_stream.go`):
+delete the existing `strings.ReplaceAll(body, "/"+c.XtreamUser...` credential-
+path-swap block; after reading the redirected response body, call
+`c.rewriteM3U8(loc, b)` and serve that instead. This is a net deletion —
+the swap was already a fragile string substitution that left the host
+untouched — not an addition on top of it.
+
+**`m3u8ReverseProxy`** (`pkg/server/proxy_handlers.go`, non-Xtream
+M3U-provider `.m3u8` tracks): currently a pure `c.stream` byte copy.
+Change it to fetch the body and run it through `c.rewriteM3U8` the same
+way, instead of streaming it unmodified.
+
+**Consequence, not a new requirement:** `/hlsr/:token/.../:chunk`
+(`xtreamHlsrStream`, `routes.go:69`) and the per-channel
+`hlsChannelsRedirectURL` cache exist only so a client's own follow-up
+chunk request can find its way back to the right upstream host without
+the manifest itself carrying that information. Once manifest URIs carry
+the full upstream URL inside `/img?url=`, that machinery is no longer
+exercised by freshly generated manifests. Left in place — removing it
+is a separate cleanup, not required to close this leak.
+
 ## Error handling
 
-- Malformed or relative URLs in any of the three call sites are left
-  as-is rather than dropped, so one bad string doesn't blank out a
-  channel's icon.
+- Malformed or relative URLs in any of the three player_api/M3U/xmltv
+  call sites are left as-is rather than dropped, so one bad string
+  doesn't blank out a channel's icon.
 - The `/img` route's fetch errors flow through the existing
   `c.stream` error handling — no new error path needed.
 - `rewriteXMLTVIcons` falls back to returning the original bytes
   unchanged if the XML fails to decode (e.g. a provider returning a
   non-XML error body) rather than erroring the whole EPG response.
+- `rewriteM3U8` leaves a line unchanged if it fails to parse as a URI
+  (relative or absolute), consistent with the "leave malformed values
+  as-is" policy used everywhere else in this design.
 
 ## Testing
 
@@ -179,7 +276,10 @@ per-function suite:
   (a `<channel>`-level `icon src="..."` and a `<programme>`-level one
   both get replaced, an entity-escaped URL survives, a `<url>` element
   is left untouched, and a document with no `icon` elements comes back
-  byte-identical).
+  byte-identical); and for `rewriteM3U8` (a bare relative segment line,
+  a bare absolute segment line, an `#EXT-X-KEY` line's `URI="..."`
+  attribute, and a comment line with no `URI=` all resolve/rewrite
+  correctly, each against a given `base` URL).
 
 ## Out of scope
 

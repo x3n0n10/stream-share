@@ -174,4 +174,3 @@ func levelToString(level LogLevel) string {
 		return "UNKNOWN"
 	}
 }
-

@@ -53,7 +53,7 @@ func TestMarshallIntoRewritesTvgLogo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTemp: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if err := c.marshallInto(f, true); err != nil {
 		t.Fatalf("marshallInto: %v", err)

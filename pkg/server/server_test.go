@@ -30,10 +30,7 @@ import (
 
 func TestMarshallIntoRewritesTvgLogo(t *testing.T) {
 	c := &Config{
-		ProxyConfig: &config.ProxyConfig{
-			HostConfig:     &config.HostConfiguration{Hostname: "proxy.example.com"},
-			AdvertisedPort: 8080,
-		},
+		ProxyConfig: &config.ProxyConfig{},
 		playlist: &m3u.Playlist{
 			Tracks: []m3u.Track{
 				{
@@ -65,14 +62,24 @@ func TestMarshallIntoRewritesTvgLogo(t *testing.T) {
 	}
 	out := string(data)
 
-	wantLogo := "http://proxy.example.com:8080/img?url=" + url.QueryEscape("http://upstream.example.com/logo1.png")
+	wantLogo := "/img?url=" + url.QueryEscape("http://upstream.example.com/logo1.png")
 	if !strings.Contains(out, wantLogo) {
-		t.Errorf("output %q does not contain rewritten tvg-logo %q", out, wantLogo)
+		t.Errorf("output %q does not contain relative rewritten tvg-logo %q", out, wantLogo)
 	}
 	if strings.Contains(out, `"http://upstream.example.com/logo1.png"`) {
 		t.Errorf("output %q still contains the raw upstream logo URL", out)
 	}
+	if strings.Contains(out, "://") && strings.Contains(out, "tvg-logo=") {
+		// crude guard: tvg-logo's value should never contain a scheme once
+		// rewritten — it must stay relative for rewritePlaylistHosts to prefix.
+		if idx := strings.Index(out, "tvg-logo="); idx != -1 && strings.Contains(out[idx:idx+200], "://") {
+			t.Errorf("output %q has an absolute tvg-logo value, want relative", out)
+		}
+	}
 	if !strings.Contains(out, `tvg-id="ch1"`) {
 		t.Errorf("output %q lost the untouched tvg-id tag", out)
+	}
+	if !strings.Contains(out, "\n/stream1\n") {
+		t.Errorf("output %q does not contain the relative track URI /stream1", out)
 	}
 }

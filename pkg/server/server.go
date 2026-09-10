@@ -863,7 +863,7 @@ func (c *Config) marshallInto(into *os.File, xtream bool) error {
 			fmt.Fprintf(&buffer, "%s=%q ", track.Tags[i].Name, tagValue)
 		}
 
-		uri, err := c.replaceURL(track.URI, i-ret, xtream)
+		uri, err := c.replacePath(track.URI, i-ret, xtream)
 		if err != nil {
 			ret++
 			log.Printf("ERROR: track: %s: %s", track.Name, err)
@@ -879,17 +879,22 @@ func (c *Config) marshallInto(into *os.File, xtream bool) error {
 	return into.Sync()
 }
 
-// ReplaceURL replace original playlist url by proxy url
-// replaceURL rewrites a track URI to point to this proxy with local credentials.
-func (c *Config) replaceURL(uri string, trackIndex int, xtream bool) (string, error) {
+// replacePath rewrites a track URI into the relative path this proxy will
+// serve it at — no scheme or host, since the same cached playlist may be
+// served to clients reaching this server via different hostnames; the
+// host gets prefixed at serve time by rewritePlaylistHosts.
+//
+// Known limitation: a track URI with embedded HTTP Basic Auth credentials
+// (rare; e.g. a raw M3U-provider URI shaped like http://user:pass@host/...)
+// previously carried those credentials into the generated proxy URL. That
+// is not preserved here — there is no existing test covering it, and
+// encoding it into a purely relative value that still resolves correctly
+// at serve time isn't worth the complexity for what appears to be an
+// unused path.
+func (c *Config) replacePath(uri string, trackIndex int, xtream bool) (string, error) {
 	oriURL, err := url.Parse(uri)
 	if err != nil {
 		return "", err
-	}
-
-	protocol := "http"
-	if c.HTTPS {
-		protocol = "https"
 	}
 
 	customEnd := strings.Trim(c.CustomEndpoint, "/")
@@ -914,27 +919,7 @@ func (c *Config) replaceURL(uri string, trackIndex int, xtream bool) (string, er
 		)
 	}
 
-	basicAuth := oriURL.User.String()
-	if basicAuth != "" {
-		basicAuth += "@"
-	}
-
-	newURI := fmt.Sprintf(
-		"%s://%s%s:%d%s%s",
-		protocol,
-		basicAuth,
-		c.HostConfig.Hostname,
-		c.AdvertisedPort,
-		customEnd,
-		uriPath,
-	)
-
-	newURL, err := url.Parse(newURI)
-	if err != nil {
-		return "", err
-	}
-
-	return newURL.String(), nil
+	return customEnd + uriPath, nil
 }
 
 // sanitiseFilename strips characters that are unsafe inside a quoted

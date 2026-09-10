@@ -30,25 +30,30 @@ import (
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
 
-// proxyImageURL rewrites an absolute image/asset URL to point at this
-// proxy's generic asset route instead of the upstream provider, so
-// clients never resolve icons/covers/manifests directly against the
-// provider. Empty, malformed, or relative values are returned unchanged.
-func (c *Config) proxyImageURL(raw string) string {
+// proxyImagePath returns the relative /img?url= path for raw, with no
+// scheme or host — for callers with no live request (see marshallInto).
+// Empty, malformed, or relative values are returned unchanged.
+func (c *Config) proxyImagePath(raw string) string {
 	if _, err := url.ParseRequestURI(raw); err != nil {
 		return raw
-	}
-	protocol := "http"
-	if c.HTTPS {
-		protocol = "https"
 	}
 	customEnd := strings.Trim(c.CustomEndpoint, "/")
 	if customEnd != "" {
 		customEnd = "/" + customEnd
 	}
-	return fmt.Sprintf("%s://%s:%d%s/img?url=%s",
-		protocol, c.HostConfig.Hostname, c.AdvertisedPort, customEnd,
-		url.QueryEscape(raw))
+	return fmt.Sprintf("%s/img?url=%s", customEnd, url.QueryEscape(raw))
+}
+
+// proxyImageURL rewrites an absolute image/asset URL to point at this
+// proxy's generic asset route instead of the upstream provider, so
+// clients never resolve icons/covers/manifests directly against the
+// provider.
+func (c *Config) proxyImageURL(ctx *gin.Context, raw string) string {
+	path := c.proxyImagePath(raw)
+	if path == raw {
+		return raw // proxyImagePath left it untouched (empty/malformed/relative)
+	}
+	return c.requestBaseURL(ctx) + path
 }
 
 // rewriteImageFields walks a JSON-decoded player_api response (nested
@@ -58,33 +63,33 @@ func (c *Config) proxyImageURL(raw string) string {
 // uses it bypasses c.sessionManager's multiplexing entirely, and hiding
 // the URL wouldn't restore that, so it's dropped to force a fall back to
 // the session-managed stream_id play URL instead.
-func (c *Config) rewriteImageFields(v interface{}) interface{} {
+func (c *Config) rewriteImageFields(ctx *gin.Context, v interface{}) interface{} {
 	switch val := v.(type) {
 	case map[string]interface{}:
 		for key, fieldVal := range val {
 			switch key {
 			case "stream_icon", "cover", "movie_image":
 				if s, ok := fieldVal.(string); ok {
-					val[key] = c.proxyImageURL(s)
+					val[key] = c.proxyImageURL(ctx, s)
 				}
 			case "backdrop_path":
 				if arr, ok := fieldVal.([]interface{}); ok {
 					for i, item := range arr {
 						if s, ok := item.(string); ok {
-							arr[i] = c.proxyImageURL(s)
+							arr[i] = c.proxyImageURL(ctx, s)
 						}
 					}
 				}
 			case "direct_source":
 				delete(val, key)
 			default:
-				val[key] = c.rewriteImageFields(fieldVal)
+				val[key] = c.rewriteImageFields(ctx, fieldVal)
 			}
 		}
 		return val
 	case []interface{}:
 		for i, item := range val {
-			val[i] = c.rewriteImageFields(item)
+			val[i] = c.rewriteImageFields(ctx, item)
 		}
 		return val
 	default:
@@ -97,7 +102,7 @@ func (c *Config) rewriteImageFields(v interface{}) interface{} {
 // provider. Each URI is resolved against base (the manifest's own fetch
 // URL) before being handed to proxyImageURL, so a manifest-relative URI
 // and an absolute one are handled identically.
-func (c *Config) rewriteM3U8(base *url.URL, body []byte) []byte {
+func (c *Config) rewriteM3U8(ctx *gin.Context, base *url.URL, body []byte) []byte {
 	lines := strings.Split(string(body), "\n")
 	for i, line := range lines {
 		trimmed := strings.TrimRight(line, "\r")
@@ -107,11 +112,11 @@ func (c *Config) rewriteM3U8(base *url.URL, body []byte) []byte {
 		case strings.Contains(trimmed, "URI="):
 			// #EXT-X-KEY / #EXT-X-MAP: rewrite the quoted URI= attribute in place
 			lines[i] = rewriteQuotedURI(trimmed, "URI=", func(raw string) string {
-				return c.proxyImageURL(resolveM3U8URI(base, raw))
+				return c.proxyImageURL(ctx, resolveM3U8URI(base, raw))
 			})
 		default:
 			// a bare line is itself a segment or sub-playlist URI
-			lines[i] = c.proxyImageURL(resolveM3U8URI(base, trimmed))
+			lines[i] = c.proxyImageURL(ctx, resolveM3U8URI(base, trimmed))
 		}
 	}
 	return []byte(strings.Join(lines, "\n"))
@@ -197,7 +202,7 @@ func (c *Config) assetProxy(ctx *gin.Context) {
 	if resp.Request != nil && resp.Request.URL != nil {
 		base = resp.Request.URL
 	}
-	body = c.rewriteM3U8(base, body)
+	body = c.rewriteM3U8(ctx, base, body)
 	mergeHttpHeader(ctx.Writer.Header(), resp.Header)
 	// The rewritten body is a different length than upstream's; overwrite
 	// the Content-Length mergeHttpHeader just copied from upstream, or the
@@ -216,6 +221,7 @@ func (c *Config) assetProxy(ctx *gin.Context) {
 //  3. The live request's own Host header (already includes a non-default
 //     port, e.g. under Docker port-mapping the client's Host header
 //     already reflects whatever external port they connected through).
+//
 // Protocol in cases 2-3 falls back to c.HTTPS when no forwarded-proto
 // header is present.
 func (c *Config) requestBaseURL(ctx *gin.Context) string {

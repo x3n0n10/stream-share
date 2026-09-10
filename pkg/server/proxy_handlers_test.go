@@ -92,6 +92,7 @@ func TestM3U8ReverseProxyRewritesSegmentURIs(t *testing.T) {
 	w := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(w)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/anti/upstreamuser/upstreampass/0/playlist.m3u8", nil)
+	ctx.Request.Host = "proxy.example.com:8080"
 	ctx.Params = gin.Params{{Key: "id", Value: "playlist.m3u8"}}
 
 	c.m3u8ReverseProxy(ctx)
@@ -134,6 +135,7 @@ func TestM3U8ReverseProxyRewritesAgainstPostRedirectURL(t *testing.T) {
 	w := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(w)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/anti/upstreamuser/upstreampass/0/playlist.m3u8", nil)
+	ctx.Request.Host = "proxy.example.com:8080"
 	ctx.Params = gin.Params{{Key: "id", Value: "playlist.m3u8"}}
 
 	c.m3u8ReverseProxy(ctx)

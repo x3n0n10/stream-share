@@ -22,6 +22,8 @@ import (
 	"bytes"
 	"encoding/xml"
 	"io"
+
+	"github.com/gin-gonic/gin"
 )
 
 // rewriteXMLTVIcons rewrites the src attribute of every <icon> element in
@@ -33,7 +35,7 @@ import (
 // are left untouched. Falls back to the original bytes unchanged if the
 // document fails to decode, so a non-XML upstream error body doesn't
 // error the whole EPG response.
-func (c *Config) rewriteXMLTVIcons(body []byte) []byte {
+func (c *Config) rewriteXMLTVIcons(ctx *gin.Context, body []byte) []byte {
 	dec := xml.NewDecoder(bytes.NewReader(body))
 	var out bytes.Buffer
 	enc := xml.NewEncoder(&out)
@@ -49,7 +51,7 @@ func (c *Config) rewriteXMLTVIcons(body []byte) []byte {
 		if se, ok := tok.(xml.StartElement); ok && se.Name.Local == "icon" {
 			for i, attr := range se.Attr {
 				if attr.Name.Local == "src" {
-					se.Attr[i].Value = c.proxyImageURL(attr.Value)
+					se.Attr[i].Value = c.proxyImageURL(ctx, attr.Value)
 				}
 			}
 			tok = se

@@ -76,6 +76,7 @@ func TestXtreamHlsStreamRewritesManifestHost(t *testing.T) {
 	w := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(w)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/hls/tok1/chan1_1", nil)
+	ctx.Request.Host = "proxy.example.com:8080"
 	ctx.Params = gin.Params{{Key: "token", Value: "tok1"}, {Key: "chunk", Value: "chan1_1"}, {Key: "id", Value: "chan1"}}
 
 	c.xtreamHlsStream(ctx)
@@ -125,6 +126,7 @@ func TestHlsXtreamStreamRewritesManifestHost(t *testing.T) {
 	w := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(w)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/hlsr/tok1/u/p/chan1/hash1/seg1.ts", nil)
+	ctx.Request.Host = "proxy.example.com:8080"
 	ctx.Params = gin.Params{{Key: "id", Value: ""}}
 
 	c.hlsXtreamStream(ctx, firstHopURL)

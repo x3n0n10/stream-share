@@ -102,7 +102,7 @@ func (c *Config) xtreamXMLTV(ctx *gin.Context) {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
 		return
 	}
-	ctx.Data(http.StatusOK, "application/xml", c.rewriteXMLTVIcons(resp))
+	ctx.Data(http.StatusOK, "application/xml", c.rewriteXMLTVIcons(ctx, resp))
 }
 
 func (c *Config) xtreamStreamHandler(ctx *gin.Context) {
@@ -878,7 +878,7 @@ func (c *Config) xtreamHlsStream(ctx *gin.Context) {
 				_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(readErr))
 				return
 			}
-			b = c.rewriteM3U8(loc, b)
+			b = c.rewriteM3U8(ctx, loc, b)
 			mergeHttpHeader(ctx.Writer.Header(), hlsResp.Header)
 			// The rewritten body is a different length than upstream's; overwrite
 			// the Content-Length mergeHttpHeader just copied from upstream.
@@ -939,7 +939,7 @@ func (c *Config) hlsXtreamStream(ctx *gin.Context, oriURL *url.URL) {
 				_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(readErr))
 				return
 			}
-			b = c.rewriteM3U8(loc, b)
+			b = c.rewriteM3U8(ctx, loc, b)
 			mergeHttpHeader(ctx.Writer.Header(), hlsResp.Header)
 			// The rewritten body is a different length than upstream's; overwrite
 			// the Content-Length mergeHttpHeader just copied from upstream.

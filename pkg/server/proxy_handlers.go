@@ -117,7 +117,7 @@ func (c *Config) m3u8ReverseProxy(ctx *gin.Context) {
 	if resp.Request != nil && resp.Request.URL != nil {
 		base = resp.Request.URL
 	}
-	body = c.rewriteM3U8(base, body)
+	body = c.rewriteM3U8(ctx, base, body)
 	contentType := resp.Header.Get("Content-Type")
 	mergeHttpHeader(ctx.Writer.Header(), resp.Header)
 	// The rewritten body is a different length than upstream's; overwrite

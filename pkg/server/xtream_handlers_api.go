@@ -188,7 +188,7 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 		}
 	}
 
-	processedResp = c.rewriteImageFields(processedResp)
+	processedResp = c.rewriteImageFields(ctx, processedResp)
 
 	if config.CacheFolder != "" && utils.IsDebugLogEnabled() {
 		readableJSON, _ := json.Marshal(processedResp)

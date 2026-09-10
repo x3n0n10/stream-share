@@ -854,7 +854,7 @@ func (c *Config) marshallInto(into *os.File, xtream bool) error {
 		for i := range track.Tags {
 			tagValue := track.Tags[i].Value
 			if track.Tags[i].Name == "tvg-logo" {
-				tagValue = c.proxyImageURL(tagValue)
+				tagValue = c.proxyImagePath(tagValue)
 			}
 			if i == len(track.Tags)-1 {
 				fmt.Fprintf(&buffer, "%s=%q", track.Tags[i].Name, tagValue)

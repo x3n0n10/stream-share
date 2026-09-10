@@ -36,8 +36,17 @@ func testImageProxyConfig() *Config {
 	}}
 }
 
+func testRequestContext() *gin.Context {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	ctx.Request.Host = "proxy.example.com:8080"
+	return ctx
+}
+
 func TestProxyImageURL(t *testing.T) {
 	c := testImageProxyConfig()
+	ctx := testRequestContext()
 	cases := []struct {
 		name string
 		in   string
@@ -53,8 +62,32 @@ func TestProxyImageURL(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := c.proxyImageURL(tc.in); got != tc.want {
+			if got := c.proxyImageURL(ctx, tc.in); got != tc.want {
 				t.Errorf("proxyImageURL(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProxyImagePath(t *testing.T) {
+	c := testImageProxyConfig()
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty input passes through unchanged", "", ""},
+		{"bare relative input passes through unchanged", "logo.png", "logo.png"},
+		{
+			"absolute url gets wrapped, no host or scheme",
+			"http://upstream.example.com/logo.png?x=1&y=2",
+			"/img?url=" + url.QueryEscape("http://upstream.example.com/logo.png?x=1&y=2"),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := c.proxyImagePath(tc.in); got != tc.want {
+				t.Errorf("proxyImagePath(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -62,6 +95,7 @@ func TestProxyImageURL(t *testing.T) {
 
 func TestRewriteImageFields(t *testing.T) {
 	c := testImageProxyConfig()
+	ctx := testRequestContext()
 	input := map[string]interface{}{
 		"movie_image":   "http://upstream.example.com/cover.jpg",
 		"direct_source": "http://upstream.example.com/stream.mp4",
@@ -82,7 +116,7 @@ func TestRewriteImageFields(t *testing.T) {
 		},
 	}
 
-	got, ok := c.rewriteImageFields(input).(map[string]interface{})
+	got, ok := c.rewriteImageFields(ctx, input).(map[string]interface{})
 	if !ok {
 		t.Fatalf("rewriteImageFields did not return a map[string]interface{}")
 	}
@@ -130,6 +164,7 @@ func TestRewriteImageFields(t *testing.T) {
 
 func TestRewriteM3U8(t *testing.T) {
 	c := testImageProxyConfig()
+	ctx := testRequestContext()
 	base, err := url.Parse("http://upstream.example.com/live/channel1/index.m3u8")
 	if err != nil {
 		t.Fatalf("url.Parse base: %v", err)
@@ -158,7 +193,7 @@ func TestRewriteM3U8(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := string(c.rewriteM3U8(base, []byte(tc.in)))
+			out := string(c.rewriteM3U8(ctx, base, []byte(tc.in)))
 			if out != tc.want {
 				t.Errorf("rewriteM3U8(%q) = %q, want %q", tc.in, out, tc.want)
 			}
@@ -167,7 +202,7 @@ func TestRewriteM3U8(t *testing.T) {
 
 	t.Run("EXT-X-KEY URI attribute rewritten in place, rest of tag untouched", func(t *testing.T) {
 		in := `#EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x00000000000000000000000000000001`
-		out := string(c.rewriteM3U8(base, []byte(in)))
+		out := string(c.rewriteM3U8(ctx, base, []byte(in)))
 		wantURI := "http://proxy.example.com:8080/img?url=" + url.QueryEscape("http://upstream.example.com/live/channel1/key.bin")
 		if !strings.Contains(out, wantURI) {
 			t.Errorf("output %q does not contain rewritten key URI %q", out, wantURI)
@@ -189,6 +224,7 @@ func TestAssetProxy(t *testing.T) {
 		w := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(w)
 		ctx.Request = httptest.NewRequest(http.MethodGet, "/img?url="+url.QueryEscape("file:///etc/passwd"), nil)
+		ctx.Request.Host = "proxy.example.com:8080"
 
 		c.assetProxy(ctx)
 
@@ -209,6 +245,7 @@ func TestAssetProxy(t *testing.T) {
 		w := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(w)
 		ctx.Request = httptest.NewRequest(http.MethodGet, "/img?url="+url.QueryEscape(upstream.URL+"/logo.png"), nil)
+		ctx.Request.Host = "proxy.example.com:8080"
 
 		c.assetProxy(ctx)
 
@@ -233,6 +270,7 @@ func TestAssetProxy(t *testing.T) {
 		ctx, _ := gin.CreateTestContext(w)
 		targetURL := upstream.URL + "/hls/channel1/index.m3u8"
 		ctx.Request = httptest.NewRequest(http.MethodGet, "/img?url="+url.QueryEscape(targetURL), nil)
+		ctx.Request.Host = "proxy.example.com:8080"
 
 		c.assetProxy(ctx)
 
@@ -266,6 +304,7 @@ func TestAssetProxy(t *testing.T) {
 		ctx, _ := gin.CreateTestContext(w)
 		targetURL := redirectServer.URL + "/live/channel1.m3u8"
 		ctx.Request = httptest.NewRequest(http.MethodGet, "/img?url="+url.QueryEscape(targetURL), nil)
+		ctx.Request.Host = "proxy.example.com:8080"
 
 		c.assetProxy(ctx)
 

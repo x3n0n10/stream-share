@@ -852,11 +852,15 @@ func (c *Config) marshallInto(into *os.File, xtream bool) error {
 		buffer.WriteString("#EXTINF:") // nolint: errcheck
 		fmt.Fprintf(&buffer, "%d ", track.Length)
 		for i := range track.Tags {
+			tagValue := track.Tags[i].Value
+			if track.Tags[i].Name == "tvg-logo" {
+				tagValue = c.proxyImageURL(tagValue)
+			}
 			if i == len(track.Tags)-1 {
-				fmt.Fprintf(&buffer, "%s=%q", track.Tags[i].Name, track.Tags[i].Value)
+				fmt.Fprintf(&buffer, "%s=%q", track.Tags[i].Name, tagValue)
 				continue
 			}
-			fmt.Fprintf(&buffer, "%s=%q ", track.Tags[i].Name, track.Tags[i].Value)
+			fmt.Fprintf(&buffer, "%s=%q ", track.Tags[i].Name, tagValue)
 		}
 
 		uri, err := c.replaceURL(track.URI, i-ret, xtream)

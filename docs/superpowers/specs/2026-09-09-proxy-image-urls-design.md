@@ -10,7 +10,17 @@ associated image URLs are not:
 - `player_api.php` actions (`get_live_streams`, `get_vod_streams`,
   `get_series`, `get_series_info`, `get_vod_info`) return the upstream
   JSON untouched by `xproc.ProcessResponse`, so `stream_icon`, `cover`,
-  `movie_image`, and `backdrop_path` all point at upstream.
+  `movie_image`, and `backdrop_path` all point at upstream. `xtreamPlayerAPI`
+  does a raw `json.Decode` into `interface{}` — `ProcessResponse` only
+  special-cases typed `xtream` structs, which this untyped path never
+  produces, so every upstream field reaches the client verbatim, whatever
+  a given provider happens to include.
+- `direct_source` — present on live/VOD stream-list items, on
+  `movie_data.direct_source`, and on each series episode — commonly holds
+  the provider's raw playable URL directly, which some players use in
+  preference to constructing a play URL from `stream_id`. It rides inside
+  the same JSON bodies above and is a distinct leak from the ones above:
+  the leaked value is a stream URL, not cosmetic art.
 - Generated M3U playlists (`xtreamGenerateM3u` for Xtream mode, and the
   bootstrap playlist for M3U-provider mode) set `tvg-logo` to the raw
   upstream `stream_icon`/source value.
@@ -22,7 +32,9 @@ VPN egress).
 ## Scope
 
 All image/icon URLs surfaced to clients: EPG icons, live channel icons,
-and VOD/series covers and backdrops. Not just EPG + channel icons.
+and VOD/series covers and backdrops. Not just EPG + channel icons. Also
+`direct_source`, which is a stream URL rather than art, but leaks upstream
+the same way and is fixed by the same rewrite mechanism.
 
 ## Design
 
@@ -93,22 +105,33 @@ fixed by one change:
   `processedResp := xproc.ProcessResponse(resp)`, add
   `processedResp = c.rewriteImageFields(processedResp)` before
   `ctx.JSON`. `rewriteImageFields` (new, `pkg/server/image_proxy.go`)
-  recursively walks `map[string]interface{}` / `[]interface{}` and,
-  for the keys `stream_icon`, `cover`, `movie_image`, rewrites a
+  recursively walks `map[string]interface{}` / `[]interface{}` — the walk
+  must be generic over the whole tree, not per-action shape patches,
+  because the same key can appear at different nesting depths across
+  actions (e.g. `get_vod_info`'s top-level `info.movie_image` vs.
+  `get_series_info`'s per-episode `episodes[season][i].info.movie_image`);
+  a walk keyed only by field name catches both for free. For the keys
+  `stream_icon`, `cover`, `movie_image`, `direct_source`, rewrite a
   string value via `proxyImageURL`; for `backdrop_path` (an array of
-  strings), rewrites each element. Unknown keys/types pass through
-  unchanged — this only ever touches known image fields.
+  strings), rewrite each element. Unknown keys/types pass through
+  unchanged — this only ever touches known fields.
 
-- **`xtreamXMLTV`** (`pkg/server/xtream_handlers_stream.go`): after
-  `resp, err := client.GetXMLTV()`, pass `resp` through a new
-  `rewriteXMLTVIcons(resp []byte) []byte` (new file) before
+- **`xtreamXMLTV`** (`pkg/server/xtream_handlers_stream.go`): today this
+  is zero-parsing passthrough (`resp, _ := client.GetXMLTV(); ctx.Data(...)`),
+  so this call site is new implementation, not a tweak to an existing
+  rewrite. After `resp, err := client.GetXMLTV()`, pass `resp` through a
+  new `rewriteXMLTVIcons(resp []byte) []byte` (new file) before
   `ctx.Data`. Implemented with `encoding/xml`'s `Decoder`/`Encoder`
   token copy (not regex): copy every token verbatim, except when a
   `StartElement` is named `icon`, in which case its `src` attribute
-  value is rewritten via `proxyImageURL`. Using the token stream
-  (rather than string/regex matching) means entity-escaped characters
-  in the URL (e.g. `&amp;` in a query string) round-trip correctly,
-  and the rest of the document — encoding, whitespace, other
+  value is rewritten via `proxyImageURL`. Per the XMLTV DTD, `icon` is
+  legal on both `<channel>` and `<programme>` elements — rewrite both;
+  do not special-case which parent element the `icon` is under.
+  `<url>` elements (a separate tag, also legal on both `<channel>` and
+  `<programme>`) are left untouched — see "Out of scope". Using the
+  token stream (rather than string/regex matching) means entity-escaped
+  characters in the URL (e.g. `&amp;` in a query string) round-trip
+  correctly, and the rest of the document — encoding, whitespace, other
   elements — passes through byte-identical.
 
 ## Error handling
@@ -129,14 +152,31 @@ per-function suite:
 
 - `pkg/server/image_proxy_test.go`: table test for `proxyImageURL`
   (empty input, relative/malformed input passes through, absolute
-  URL gets wrapped and query-escaped) and for `rewriteXMLTVIcons`
-  (an `icon src="..."` gets replaced, an entity-escaped URL survives,
-  and a document with no `icon` elements comes back byte-identical).
+  URL gets wrapped and query-escaped); for `rewriteImageFields`
+  (top-level `movie_image`, a nested per-episode `movie_image` several
+  levels deep, `direct_source`, and a `backdrop_path` array all get
+  rewritten; unknown keys pass through); and for `rewriteXMLTVIcons`
+  (a `<channel>`-level `icon src="..."` and a `<programme>`-level one
+  both get replaced, an entity-escaped URL survives, a `<url>` element
+  is left untouched, and a document with no `icon` elements comes back
+  byte-identical).
 
 ## Out of scope
 
 - Restricting the image proxy to the configured provider's own host
   (considered, explicitly declined — see "No host allowlist" above).
-- Rewriting anything inside `<programme>` EPG entries beyond `icon`
-  (xmltv programme-level artwork isn't used by this provider's EPG
-  today; add if a provider is found that sends it).
+- `youtube_trailer` (`get_series`/`get_series_info`/`get_vod_info`):
+  typically points at youtube.com, not the provider's own infrastructure,
+  so it isn't the kind of upstream-provider leak this spec targets.
+  Explicitly excluded rather than silently missed.
+- `<url>` elements in xmltv output (channel/programme "more info"
+  links): a separate tag from `icon`, not rewritten.
+- Non-Xtream raw-M3U-provider mode (`playlistInitialization` →
+  `marshallInto(f, false)`): this mode round-trips whatever tags the
+  upstream M3U file happens to contain, with no allowlist, so a
+  provider that includes e.g. its own `catchup-source` tag would leak
+  through untouched. Only `tvg-logo` is rewritten. This proxy has its
+  own `/timeshift/...` catchup implementation and Xtream-generated
+  playlists never emit `catchup-source` themselves, so this only bites
+  a raw-M3U provider whose file contains such a tag — not covered by
+  this design; revisit if one is found in practice.

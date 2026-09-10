@@ -205,3 +205,38 @@ func (c *Config) assetProxy(ctx *gin.Context) {
 	ctx.Writer.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	ctx.Data(resp.StatusCode, contentType, body)
 }
+
+// requestBaseURL returns the "scheme://host[:port]" a client should use to
+// reach this server, with no trailing slash. Priority:
+//  1. PublicBaseURL, if the operator set one explicitly.
+//  2. X-Forwarded-Proto/X-Forwarded-Host, but only when ReverseProxyEnabled
+//     is on — an unset flag means untrusted client-supplied headers are
+//     ignored, since any direct client could otherwise spoof the host used
+//     in URLs handed back to itself.
+//  3. The live request's own Host header (already includes a non-default
+//     port, e.g. under Docker port-mapping the client's Host header
+//     already reflects whatever external port they connected through).
+// Protocol in cases 2-3 falls back to c.HTTPS when no forwarded-proto
+// header is present.
+func (c *Config) requestBaseURL(ctx *gin.Context) string {
+	if base := strings.TrimRight(strings.TrimSpace(c.PublicBaseURL), "/"); base != "" {
+		return base
+	}
+
+	protocol := "http"
+	if c.HTTPS {
+		protocol = "https"
+	}
+	host := ctx.Request.Host
+
+	if c.ReverseProxyEnabled {
+		if fh := ctx.Request.Header.Get("X-Forwarded-Host"); fh != "" {
+			host = fh
+		}
+		if fp := ctx.Request.Header.Get("X-Forwarded-Proto"); fp != "" {
+			protocol = fp
+		}
+	}
+
+	return fmt.Sprintf("%s://%s", protocol, host)
+}

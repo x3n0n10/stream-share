@@ -282,3 +282,70 @@ func TestAssetProxy(t *testing.T) {
 		}
 	})
 }
+
+func TestRequestBaseURL(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	newCtx := func(host string, headers map[string]string) *gin.Context {
+		w := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(w)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/player_api.php", nil)
+		ctx.Request.Host = host
+		for k, v := range headers {
+			ctx.Request.Header.Set(k, v)
+		}
+		return ctx
+	}
+
+	t.Run("PublicBaseURL wins over everything else", func(t *testing.T) {
+		c := &Config{ProxyConfig: &config.ProxyConfig{
+			PublicBaseURL:       "https://public.example.com/",
+			ReverseProxyEnabled: true,
+		}}
+		ctx := newCtx("ignored.example.com", map[string]string{
+			"X-Forwarded-Host":  "also-ignored.example.com",
+			"X-Forwarded-Proto": "https",
+		})
+		if got := c.requestBaseURL(ctx); got != "https://public.example.com" {
+			t.Errorf("requestBaseURL = %q, want %q", got, "https://public.example.com")
+		}
+	})
+
+	t.Run("reverse-proxy-enabled with forwarded headers wins over raw Host", func(t *testing.T) {
+		c := &Config{ProxyConfig: &config.ProxyConfig{ReverseProxyEnabled: true}}
+		ctx := newCtx("internal.example.com:8080", map[string]string{
+			"X-Forwarded-Host":  "public.example.com",
+			"X-Forwarded-Proto": "https",
+		})
+		if got := c.requestBaseURL(ctx); got != "https://public.example.com" {
+			t.Errorf("requestBaseURL = %q, want %q", got, "https://public.example.com")
+		}
+	})
+
+	t.Run("reverse-proxy-enabled but no forwarded headers falls back to raw Host", func(t *testing.T) {
+		c := &Config{ProxyConfig: &config.ProxyConfig{ReverseProxyEnabled: true}}
+		ctx := newCtx("direct.example.com:8080", nil)
+		if got := c.requestBaseURL(ctx); got != "http://direct.example.com:8080" {
+			t.Errorf("requestBaseURL = %q, want %q", got, "http://direct.example.com:8080")
+		}
+	})
+
+	t.Run("reverse-proxy-enabled false ignores forwarded headers even if a client sends them", func(t *testing.T) {
+		c := &Config{ProxyConfig: &config.ProxyConfig{ReverseProxyEnabled: false}}
+		ctx := newCtx("direct.example.com:8080", map[string]string{
+			"X-Forwarded-Host":  "spoofed.example.com",
+			"X-Forwarded-Proto": "https",
+		})
+		if got := c.requestBaseURL(ctx); got != "http://direct.example.com:8080" {
+			t.Errorf("requestBaseURL = %q, want %q", got, "http://direct.example.com:8080")
+		}
+	})
+
+	t.Run("HTTPS flag selects protocol when no forwarded-proto header", func(t *testing.T) {
+		c := &Config{ProxyConfig: &config.ProxyConfig{HTTPS: true}}
+		ctx := newCtx("direct.example.com", nil)
+		if got := c.requestBaseURL(ctx); got != "https://direct.example.com" {
+			t.Errorf("requestBaseURL = %q, want %q", got, "https://direct.example.com")
+		}
+	})
+}

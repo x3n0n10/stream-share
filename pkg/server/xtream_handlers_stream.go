@@ -102,7 +102,7 @@ func (c *Config) xtreamXMLTV(ctx *gin.Context) {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
 		return
 	}
-	ctx.Data(http.StatusOK, "application/xml", resp)
+	ctx.Data(http.StatusOK, "application/xml", c.rewriteXMLTVIcons(resp))
 }
 
 func (c *Config) xtreamStreamHandler(ctx *gin.Context) {

@@ -388,3 +388,47 @@ func TestRequestBaseURL(t *testing.T) {
 		}
 	})
 }
+
+func TestRewritePlaylistHosts(t *testing.T) {
+	c := testImageProxyConfig()
+	ctx := testRequestContext()
+
+	t.Run("track URI and tvg-logo both get the base prefixed", func(t *testing.T) {
+		in := "#EXTM3U\n" +
+			`#EXTINF:-1 tvg-id="ch1" tvg-logo="/img?url=http%3A%2F%2Fupstream.example.com%2Flogo.png", Channel One` + "\n" +
+			"/anti/user/pass/0/stream1\n"
+
+		out := string(c.rewritePlaylistHosts(ctx, []byte(in)))
+
+		wantLogo := `tvg-logo="http://proxy.example.com:8080/img?url=http%3A%2F%2Fupstream.example.com%2Flogo.png"`
+		if !strings.Contains(out, wantLogo) {
+			t.Errorf("output %q does not contain prefixed tvg-logo %q", out, wantLogo)
+		}
+		wantTrack := "http://proxy.example.com:8080/anti/user/pass/0/stream1"
+		if !strings.Contains(out, wantTrack) {
+			t.Errorf("output %q does not contain prefixed track URI %q", out, wantTrack)
+		}
+		if !strings.Contains(out, "#EXTM3U") {
+			t.Errorf("output %q lost the #EXTM3U header", out)
+		}
+	})
+
+	t.Run("EXTINF line with no tvg-logo attribute is left alone apart from its track line", func(t *testing.T) {
+		in := `#EXTINF:-1 tvg-id="ch2", Channel Two` + "\n" + "/anti/user/pass/1/stream2\n"
+		out := string(c.rewritePlaylistHosts(ctx, []byte(in)))
+		if !strings.HasPrefix(out, `#EXTINF:-1 tvg-id="ch2", Channel Two`) {
+			t.Errorf("output %q changed the untouched EXTINF line", out)
+		}
+		if !strings.Contains(out, "http://proxy.example.com:8080/anti/user/pass/1/stream2") {
+			t.Errorf("output %q does not contain prefixed track URI", out)
+		}
+	})
+
+	t.Run("a non-# line not starting with / is left alone", func(t *testing.T) {
+		in := "not-a-path-or-comment"
+		out := string(c.rewritePlaylistHosts(ctx, []byte(in)))
+		if out != in {
+			t.Errorf("output = %q, want unchanged %q", out, in)
+		}
+	})
+}

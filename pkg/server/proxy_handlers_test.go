@@ -23,9 +23,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jamesnetherton/m3u"
 	"github.com/lucasduport/stream-share/pkg/config"
 )
 
@@ -63,5 +65,42 @@ func TestStreamProxiesUpstreamBody(t *testing.T) {
 	}
 	if got := w.Header().Get("Content-Type"); got != "video/mp2t" {
 		t.Errorf("Content-Type = %q, want %q", got, "video/mp2t")
+	}
+}
+
+func TestM3U8ReverseProxyRewritesSegmentURIs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("#EXTM3U\nsegment1.ts\n"))
+	}))
+	defer upstream.Close()
+
+	track := &m3u.Track{URI: upstream.URL + "/playlist.m3u8"}
+	c := &Config{
+		ProxyConfig: &config.ProxyConfig{
+			HostConfig:     &config.HostConfiguration{Hostname: "proxy.example.com"},
+			AdvertisedPort: 8080,
+			XtreamUser:     "upstreamuser",
+			XtreamPassword: "upstreampass",
+		},
+		track: track,
+	}
+
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/anti/upstreamuser/upstreampass/0/playlist.m3u8", nil)
+	ctx.Params = gin.Params{{Key: "id", Value: "playlist.m3u8"}}
+
+	c.m3u8ReverseProxy(ctx)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	wantSegment := "http://proxy.example.com:8080/img?url=" + url.QueryEscape(upstream.URL+"/segment1.ts")
+	if !strings.Contains(w.Body.String(), wantSegment) {
+		t.Errorf("body %q does not contain rewritten segment URI %q", w.Body.String(), wantSegment)
 	}
 }

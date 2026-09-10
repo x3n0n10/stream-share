@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -95,7 +96,30 @@ func (c *Config) m3u8ReverseProxy(ctx *gin.Context) {
 	utils.DebugLog("-> Upstream username: %s", c.XtreamUser.String())
 	utils.DebugLog("-> Final upstream URL: %s", rpURL.String())
 
-	c.stream(ctx, rpURL)
+	req, err := c.buildUpstreamRequest(ctx, rpURL)
+	if err != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, err) // nolint: errcheck
+		return
+	}
+	resp, err := streamHTTPClient.Do(req)
+	if err != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, err) // nolint: errcheck
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, err) // nolint: errcheck
+		return
+	}
+	body = c.rewriteM3U8(rpURL, body)
+	contentType := resp.Header.Get("Content-Type")
+	mergeHttpHeader(ctx.Writer.Header(), resp.Header)
+	// The rewritten body is a different length than upstream's; overwrite
+	// the Content-Length mergeHttpHeader just copied from upstream.
+	ctx.Writer.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	ctx.Data(resp.StatusCode, contentType, body)
 }
 
 // buildUpstreamRequest constructs the outbound request to oriURL, using the

@@ -20,7 +20,10 @@ associated image URLs are not:
   the provider's raw playable URL directly, which some players use in
   preference to constructing a play URL from `stream_id`. It rides inside
   the same JSON bodies above and is a distinct leak from the ones above:
-  the leaked value is a stream URL, not cosmetic art.
+  the leaked value is a stream URL, not cosmetic art. Worse than a leak —
+  a player that uses it bypasses `c.sessionManager` entirely (no
+  multiplexing, no dedup, no VOD caching/resume), which is stream-share's
+  core anti-ban mechanism for shared accounts.
 - Generated M3U playlists (`xtreamGenerateM3u` for Xtream mode, and the
   bootstrap playlist for M3U-provider mode) set `tvg-logo` to the raw
   upstream `stream_icon`/source value.
@@ -33,8 +36,10 @@ VPN egress).
 
 All image/icon URLs surfaced to clients: EPG icons, live channel icons,
 and VOD/series covers and backdrops. Not just EPG + channel icons. Also
-`direct_source`, which is a stream URL rather than art, but leaks upstream
-the same way and is fixed by the same rewrite mechanism.
+`direct_source` — a stream URL rather than art, and handled differently
+(stripped, not rewritten — see below) because rewriting it through the
+generic image proxy would mask the URL but not restore the multiplexing
+that path bypasses.
 
 ## Design
 
@@ -111,10 +116,24 @@ fixed by one change:
   actions (e.g. `get_vod_info`'s top-level `info.movie_image` vs.
   `get_series_info`'s per-episode `episodes[season][i].info.movie_image`);
   a walk keyed only by field name catches both for free. For the keys
-  `stream_icon`, `cover`, `movie_image`, `direct_source`, rewrite a
-  string value via `proxyImageURL`; for `backdrop_path` (an array of
-  strings), rewrite each element. Unknown keys/types pass through
-  unchanged — this only ever touches known fields.
+  `stream_icon`, `cover`, `movie_image`, rewrite a string value via
+  `proxyImageURL`; for `backdrop_path` (an array of strings), rewrite
+  each element. `direct_source` is deleted from the map instead of
+  rewritten — see "`direct_source`: strip, don't rewrite" below.
+  Unknown keys/types pass through unchanged — this only ever touches
+  known fields.
+
+  **`direct_source`: strip, don't rewrite.** Routing it through the
+  generic `/img` proxy would hide the upstream URL but keep the same
+  bypass of `c.sessionManager` (multiplexing, dedup, VOD caching/resume)
+  that using this field at all causes — masking the leak without fixing
+  the underlying behavior. Deleting the key instead forces any player
+  that would have preferred `direct_source` to fall back to the
+  `stream_id`-built play URL, which already goes through the normal
+  session-managed path. Safe to drop: the field is `omitempty` on the
+  live/VOD list struct already (many providers already omit it, so
+  players already tolerate its absence), and nothing in this codebase
+  reads or depends on it.
 
 - **`xtreamXMLTV`** (`pkg/server/xtream_handlers_stream.go`): today this
   is zero-parsing passthrough (`resp, _ := client.GetXMLTV(); ctx.Data(...)`),
@@ -154,8 +173,9 @@ per-function suite:
   (empty input, relative/malformed input passes through, absolute
   URL gets wrapped and query-escaped); for `rewriteImageFields`
   (top-level `movie_image`, a nested per-episode `movie_image` several
-  levels deep, `direct_source`, and a `backdrop_path` array all get
-  rewritten; unknown keys pass through); and for `rewriteXMLTVIcons`
+  levels deep, and a `backdrop_path` array all get rewritten;
+  `direct_source` is absent from the output map; unknown keys pass
+  through); and for `rewriteXMLTVIcons`
   (a `<channel>`-level `icon src="..."` and a `<programme>`-level one
   both get replaced, an entity-escaped URL survives, a `<url>` element
   is left untouched, and a document with no `icon` elements comes back

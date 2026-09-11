@@ -24,9 +24,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jamesnetherton/m3u"
 	"github.com/lucasduport/stream-share/pkg/utils"
-	uuid "github.com/satori/go.uuid"
 )
 
 type cacheMeta struct {
@@ -47,7 +47,7 @@ func (c *Config) cacheXtreamM3u(playlist *m3u.Playlist, cacheName string) error 
 	c.playlist = playlist
 	defer func() { c.playlist = origPlaylist }()
 
-	path := filepath.Join(os.TempDir(), uuid.NewV4().String()+".stream-share.m3u")
+	path := filepath.Join(os.TempDir(), uuid.New().String()+".stream-share.m3u")
 	f, err := os.Create(path)
 	if err != nil {
 		return err

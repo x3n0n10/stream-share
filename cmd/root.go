@@ -83,8 +83,9 @@ It supports:
 			}
 		}
 
-		// Initialize debug logging and cache folder
-		config.DebugLoggingEnabled = viper.GetBool("log-debug-enabled")
+		// Initialize cache folder. Debug logging itself is controlled by the
+		// LOG_DEBUG_ENABLED env var directly (see pkg/utils/logging.go's
+		// init()) -- there's no dedicated CLI flag for it.
 		config.CacheFolder = viper.GetString("cache-folder")
 		if config.CacheFolder != "" && !strings.HasSuffix(config.CacheFolder, "/") {
 			config.CacheFolder += "/"

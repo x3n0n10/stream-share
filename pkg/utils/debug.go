@@ -26,82 +26,9 @@ import (
 	"time"
 )
 
-var (
-	// DebugLoggingEnabled controls whether debug logs are printed
-	DebugLoggingEnabled = false
-)
-
 // IsDebugLogEnabled returns whether debug logging is enabled
 func IsDebugLogEnabled() bool {
 	return os.Getenv("LOG_DEBUG_ENABLED") == "true"
-}
-
-// HexDump creates a hex dump of the given data for debugging purposes
-func HexDump(data []byte, maxBytes int) string {
-	if len(data) == 0 {
-		return "[empty]"
-	}
-
-	// Limit to maxBytes
-	if len(data) > maxBytes {
-		data = data[:maxBytes]
-	}
-
-	var result string
-	result = fmt.Sprintf("Hex dump of %d bytes:\n", len(data))
-
-	for i := 0; i < len(data); i += 16 {
-		// Print offset
-		result += fmt.Sprintf("%04x: ", i)
-
-		// Print hex representation
-		hexPart := ""
-		for j := 0; j < 16; j++ {
-			if i+j < len(data) {
-				hexPart += fmt.Sprintf("%02x ", data[i+j])
-			} else {
-				hexPart += "   " // 3 spaces to align
-			}
-
-			// Extra space after 8 bytes
-			if j == 7 {
-				hexPart += " "
-			}
-		}
-		result += hexPart
-
-		// Print ASCII representation
-		result += "  |"
-		for j := 0; j < 16; j++ {
-			if i+j < len(data) {
-				b := data[i+j]
-				if b >= 32 && b <= 126 { // Printable ASCII
-					result += string(b)
-				} else {
-					result += "." // Non-printable
-				}
-			} else {
-				result += " " // Padding
-			}
-		}
-		result += "|\n"
-	}
-
-	return result
-}
-
-// PrettyPrintJSON returns a nicely formatted JSON string for debugging
-func PrettyPrintJSON(data interface{}) string {
-	if data == nil {
-		return "null"
-	}
-
-	jsonBytes, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("Error marshaling JSON: %v", err)
-	}
-
-	return string(jsonBytes)
 }
 
 // WriteResponseToFile writes the response to a file for debugging
@@ -119,11 +46,11 @@ func WriteResponseToFile(filename string, data []byte, contentType string) {
 	}
 }
 
-// SaveRawResponse saves a raw API response to a file for debugging purposes
-// Returns the path to the saved file or empty string if the operation failed
+// SaveRawResponse saves a raw API response to a file for debugging purposes.
+// Returns the path to the saved file, or empty string if disabled/failed.
 func SaveRawResponse(action string, data []byte) string {
 	// Skip if debug logging is disabled
-	if !DebugLoggingEnabled {
+	if !Config.DebugLoggingEnabled {
 		return ""
 	}
 
@@ -161,9 +88,9 @@ func SaveRawResponse(action string, data []byte) string {
 	return filename
 }
 
-// DumpStructToLog dumps the content of a struct to the debug log
+// DumpStructToLog dumps the content of a struct to the debug log.
 func DumpStructToLog(prefix string, v interface{}) {
-	if !DebugLoggingEnabled {
+	if !Config.DebugLoggingEnabled {
 		return
 	}
 

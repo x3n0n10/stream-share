@@ -22,9 +22,6 @@ import (
 	"net/url"
 )
 
-// Add Debugging Logging option
-var DebugLoggingEnabled bool
-
 // Set a Cache Folder to save responses into
 var CacheFolder string
 

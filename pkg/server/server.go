@@ -43,9 +43,9 @@ import (
 	"github.com/lucasduport/stream-share/pkg/slate"
 	"github.com/lucasduport/stream-share/pkg/utils"
 	xtreamapi "github.com/lucasduport/stream-share/pkg/xtream"
-	uuid "github.com/satori/go.uuid"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // upstreamReadyTimeout bounds how long a viewer waits for the provider to
@@ -54,8 +54,8 @@ import (
 // when the provider is slow.
 const upstreamReadyTimeout = 8 * time.Second
 
-var defaultProxyfiedM3UPath = filepath.Join(os.TempDir(), uuid.NewV4().String()+".stream-share.m3u")
-var endpointAntiColision = strings.Split(uuid.NewV4().String(), "-")[0]
+var defaultProxyfiedM3UPath = filepath.Join(os.TempDir(), uuid.New().String()+".stream-share.m3u")
+var endpointAntiColision = strings.Split(uuid.New().String(), "-")[0]
 
 // Config represents all server dependencies and runtime configuration.
 type Config struct {
@@ -117,9 +117,6 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		customID = trimmedCustomId
 		utils.InfoLog("Using custom endpoint ID: %s", customID)
 	}
-
-	// Initialize debug logging from environment variable
-	utils.Config.DebugLoggingEnabled = os.Getenv("LOG_DEBUG_ENABLED") == "true"
 
 	// Pin the internal API key from configuration if provided
 	SetAPIKey(config.InternalAPIKey)

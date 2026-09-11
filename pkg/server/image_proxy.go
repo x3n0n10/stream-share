@@ -157,11 +157,14 @@ func rewriteQuotedURI(line, key string, rewrite func(string) string) string {
 
 // assetProxy fetches an arbitrary http(s) URL and streams it back, so
 // upstream image/manifest URLs never reach the client directly. There is
-// deliberately no auth and no host allowlist: content reached via this
-// route (rewritten into player_api/xmltv/M3U responses) never carried
-// proxy credentials to begin with, since players fetch it directly with
-// no way to attach a username/password. The known cost: anyone who can
-// reach this server can make it fetch arbitrary http(s) URLs.
+// deliberately no host allowlist and no per-request credentials: content
+// reached via this route (rewritten into player_api/xmltv/M3U responses)
+// never carried proxy credentials to begin with, since players fetch it
+// directly with no way to attach a username/password. The route is
+// instead guarded by requireRecentAuth (see routes.go), which requires
+// the calling IP to have authenticated successfully elsewhere recently.
+// The known cost: within that window, anyone sharing the IP can make
+// this server fetch arbitrary http(s) URLs.
 //
 // A response whose Content-Type or requested path indicates an HLS
 // manifest is buffered and run through rewriteM3U8 instead of streamed

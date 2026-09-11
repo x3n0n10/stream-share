@@ -28,6 +28,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -90,6 +91,49 @@ type authRequest struct {
 	Password string `form:"password" binding:"required"`
 }
 
+// recentlyAuthenticated tracks client IPs that have successfully
+// authenticated recently, so /img (whose rewritten links never carry
+// credentials -- players fetch them directly with no way to attach a
+// username/password) can require some prior proof of access instead of
+// being fully open to any request.
+var (
+	recentlyAuthenticated   = map[string]time.Time{}
+	recentlyAuthenticatedMu sync.Mutex
+)
+
+// recentAuthTTL is how long a client IP stays trusted after its last
+// successful authentication against authenticate or appAuthenticate.
+const recentAuthTTL = 24 * time.Hour
+
+// recordRecentAuth marks ctx's client IP as recently authenticated.
+func recordRecentAuth(ctx *gin.Context) {
+	recentlyAuthenticatedMu.Lock()
+	recentlyAuthenticated[ctx.ClientIP()] = time.Now()
+	recentlyAuthenticatedMu.Unlock()
+}
+
+// requireRecentAuth guards routes (like /img) that can never carry
+// credentials themselves, by requiring the calling IP to have
+// authenticated successfully elsewhere within recentAuthTTL. This is
+// IP-based, not per-viewer: a client sharing a NAT/office IP with someone
+// who just authenticated gets the same trust window. Weaker than real
+// credentials, but far narrower than accepting every request.
+func requireRecentAuth(ctx *gin.Context) {
+	ip := ctx.ClientIP()
+
+	recentlyAuthenticatedMu.Lock()
+	last, ok := recentlyAuthenticated[ip]
+	if ok && time.Since(last) > recentAuthTTL {
+		delete(recentlyAuthenticated, ip)
+		ok = false
+	}
+	recentlyAuthenticatedMu.Unlock()
+
+	if !ok {
+		ctx.AbortWithStatus(http.StatusForbidden)
+	}
+}
+
 // authenticate validates form/query credentials using LDAP (if enabled) or
 // local credentials. Used for GET/POST endpoints.
 func (c *Config) authenticate(ctx *gin.Context) {
@@ -111,6 +155,7 @@ func (c *Config) authenticate(ctx *gin.Context) {
 			return
 		}
 		utils.DebugLog("LDAP authentication succeeded for user: %s", authReq.Username)
+		recordRecentAuth(ctx)
 		return
 	}
 
@@ -121,7 +166,9 @@ func (c *Config) authenticate(ctx *gin.Context) {
 	if userMatch&passMatch != 1 {
 		utils.DebugLog("Local authentication failed for user: %s", authReq.Username)
 		ctx.AbortWithStatus(http.StatusUnauthorized)
+		return
 	}
+	recordRecentAuth(ctx)
 }
 
 // appAuthenticate validates credentials for application/x-www-form-urlencoded
@@ -166,6 +213,7 @@ func (c *Config) appAuthenticate(ctx *gin.Context) {
 		}
 	}
 
+	recordRecentAuth(ctx)
 	ctx.Request.Body = io.NopCloser(bytes.NewReader(contents))
 }
 

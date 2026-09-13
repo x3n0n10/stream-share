@@ -20,7 +20,6 @@ package discord
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -32,11 +31,16 @@ import (
 func (b *Bot) commandSpecs() []*discordgo.ApplicationCommand {
 	return []*discordgo.ApplicationCommand{
 		{
-			Name:        "vod",
-			Description: "Search movies and shows; pick from a dropdown",
+			Name:        "watch",
+			Description: "Search movies and shows; pick to get a link and auto-cache",
 			Options: []*discordgo.ApplicationCommandOption{
 				{Type: discordgo.ApplicationCommandOptionString, Name: "query", Description: "Title to search (supports S01E02)", Required: true},
+				{Type: discordgo.ApplicationCommandOptionInteger, Name: "days", Description: "Days to keep cached (1–14; default 7)", Required: false, MinValue: floatPtr(1), MaxValue: 14},
 			},
+		},
+		{
+			Name:        "library",
+			Description: "List cached items and when they expire",
 		},
 		{
 			Name:        "help",
@@ -48,18 +52,6 @@ func (b *Bot) commandSpecs() []*discordgo.ApplicationCommand {
 			Options: []*discordgo.ApplicationCommandOption{
 				{Type: discordgo.ApplicationCommandOptionString, Name: "username", Description: "Your LDAP username", Required: true},
 			},
-		},
-		{
-			Name:        "cache",
-			Description: "Cache a movie/episode on the server (max 14 days)",
-			Options: []*discordgo.ApplicationCommandOption{
-				{Type: discordgo.ApplicationCommandOptionString, Name: "title", Description: "Movie or series title (supports S01E02)", Required: true},
-				{Type: discordgo.ApplicationCommandOptionInteger, Name: "days", Description: "Days to keep cached (1–14)", Required: true, MinValue: floatPtr(1), MaxValue: 14},
-			},
-		},
-		{
-			Name:        "cached",
-			Description: "List cached items and when they expire",
 		},
 		{
 			Name:                     "linkadmin",
@@ -234,21 +226,18 @@ func (b *Bot) handleApplicationCommand(s *discordgo.Session, i *discordgo.Intera
 		mc := toMessageCreateFromInteraction(i, "")
 		b.linkDiscordAdmin(s, mc, []string{discordID, ldapUser})
 
-	case "vod":
+	case "watch":
 		query := optString(i, "query")
+		days := int(optInt(i, "days"))
+		if days <= 0 {
+			days = 7
+		}
 		ackEphemeral(s, i, "Searching…")
 		mc := toMessageCreateFromInteraction(i, "")
-		b.handleVOD(s, mc, strings.Fields(query))
+		b.handleVOD(s, mc, strings.Fields(query), days)
 
-	case "cache":
-		title := optString(i, "title")
-		days := int(optInt(i, "days"))
-		ackEphemeral(s, i, "Preparing cache…")
-		mc := toMessageCreateFromInteraction(i, "")
-		b.handleCache(s, mc, append(strings.Fields(title), strconv.Itoa(days)))
-
-	case "cached":
-		ackEphemeral(s, i, "Fetching cached list…")
+	case "library":
+		ackEphemeral(s, i, "Fetching library…")
 		mc := toMessageCreateFromInteraction(i, "")
 		b.handleCachedList(s, mc)
 

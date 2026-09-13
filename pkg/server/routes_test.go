@@ -59,12 +59,17 @@ func TestImgRouteRequiresRecentAuth(t *testing.T) {
 
 	c := &Config{
 		ProxyConfig: &config.ProxyConfig{
-			User:        "testuser",
-			Password:    "testpass",
-			M3UFileName: "playlist.m3u",
+			User:           "testuser",
+			Password:       "testpass",
+			XtreamUser:     "testuser",
+			XtreamPassword: "testpass",
+			M3UFileName:    "playlist.m3u",
 		},
-		playlist:         &m3u.Playlist{},
-		proxyfiedM3UPath: m3uFile.Name(),
+		playlist: &m3u.Playlist{
+			Tracks: []m3u.Track{{Name: "Test Channel", URI: upstream.URL + "/stream.ts"}},
+		},
+		proxyfiedM3UPath:     m3uFile.Name(),
+		endpointAntiColision: "anticol",
 	}
 
 	router := gin.New()
@@ -104,6 +109,27 @@ func TestImgRouteRequiresRecentAuth(t *testing.T) {
 		}
 		if w.Body.String() != "fake-png-bytes" {
 			t.Errorf("body = %q, want %q", w.Body.String(), "fake-png-bytes")
+		}
+	})
+
+	t.Run("allows a client after it hits a direct stream route with no auth middleware", func(t *testing.T) {
+		clientAddr := "203.0.113.3:1234"
+
+		streamReq := httptest.NewRequest(http.MethodGet, "/anticol/testuser/testpass/0/stream.ts", nil)
+		streamReq.RemoteAddr = clientAddr
+		streamW := httptest.NewRecorder()
+		router.ServeHTTP(streamW, streamReq)
+		if streamW.Code == http.StatusForbidden {
+			t.Fatalf("direct stream route: status = %d, want not-403; body=%s", streamW.Code, streamW.Body.String())
+		}
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, imgURL, nil)
+		req.RemoteAddr = clientAddr
+		router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 		}
 	})
 }

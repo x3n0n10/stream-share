@@ -130,9 +130,10 @@ StreamShare includes a powerful Discord bot for content discovery and streaming.
 | Command | Description |
 |---------|-------------|
 | `/link <ldap_username>` | Link your Discord account with your LDAP username |
-| `/vod <query>` | Search movies and series; supports queries like `show s02e04` |
-| `/cache <title> <days>` | Cache a movie or episode on the server for 1–14 days |
-| `/cached` | List cached items and expiration times |
+| `/linkadmin <discord_id> <ldap_username>` | Link any Discord user to an LDAP account (admin only) |
+| `/watch <query> [days]` | Search movies and series; pick from a dropdown to get a download link. The item is cached automatically for 1–14 days (default 7). Supports queries like `show s02e04` |
+| `/library` | List cached items and expiration times |
+| `/help` | Show all available commands and usage |
 | `/status` | Show server status — active streams, viewers, and your provider subscription's state (admin only) |
 | `/history [username] [period]` | Watch history timeline for live and VOD (admin only). Omit `username` for a feed across all clients; `period` selects the window (24h, 7d, 30d, 90d, all time) |
 | `/disconnect <ldap_username>` | Disconnect a user from the stream |
@@ -140,7 +141,9 @@ StreamShare includes a powerful Discord bot for content discovery and streaming.
 
 Tips:
 - Link your account first with `/link <ldap_user>`.
+- Use `/watch` to search, download, and cache in one step — you get a link immediately while caching runs in the background.
 - Use specific queries to find episodes, e.g. `game of thrones s02e04` or `S1E1`.
+- Check `/library` to see what's cached and when items expire.
 
 ---
 
@@ -187,7 +190,7 @@ Everything above is machine-readable JSON (`{success, data, error}`) and is enou
 
 - **Active streams**: `/api/internal/streams` or `/api/internal/status` for live sessions and viewers. Each stream item includes a display-resolved `stream_title` (never blank — falls back through the channel/VOD name index to the raw stream ID) and, for live channels, an optional `tech` object with audio/video technical info (see below).
 - **Watch history**: `/api/internal/history` (global) or `/api/internal/history/:username`, both paginated with `limit`/`offset` and filterable with `hours`.
-- **VOD search**: `/api/internal/vod/search` — the same live provider search used by the `/vod` Discord command.
+- **VOD search**: `/api/internal/vod/search` — the same live provider search used by the `/watch` Discord command.
 - **Overview stats**: `/api/internal/stats` for counts and leaderboards to show on a summary page.
 - **Subscription**: `/api/internal/provider` for how long the upstream subscription still has to run and how much of its connection allowance is in use.
 - **Multi-instance**: this API has no built-in concept of "instance" or "tenant" — each deployment is independent, with its own database and API key. Call `/api/internal/instance` on each one to fetch a stable display name (set via `INSTANCE_NAME`, see below) and combine results client-side by polling each instance's base URL with its own API key.
@@ -359,8 +362,8 @@ Temporary links are perfect for sharing VOD content with users who don't have St
 
 Cache movies or episodes to disk for faster start times and to reduce upstream usage:
 
-- Start a cache from Discord with `/cache <title> <days>` (1–14 days).
-- Track progress and list items with `/cached`.
+- Start a cache from Discord with `/watch <query> [days]` (1–14 days, default 7). Picking a result gives you a download link and starts caching in the background.
+- Track progress and list items with `/library`.
 - Cached items automatically serve for both downloads and VOD/series streaming endpoints when available.
 
 Configuration:

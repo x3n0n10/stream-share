@@ -20,7 +20,6 @@ package discord
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -32,11 +31,20 @@ import (
 func (b *Bot) commandSpecs() []*discordgo.ApplicationCommand {
 	return []*discordgo.ApplicationCommand{
 		{
-			Name:        "vod",
-			Description: "Search movies and shows; pick from a dropdown",
+			Name:        "watch",
+			Description: "Search movies and shows; pick to get a link and auto-cache",
 			Options: []*discordgo.ApplicationCommandOption{
 				{Type: discordgo.ApplicationCommandOptionString, Name: "query", Description: "Title to search (supports S01E02)", Required: true},
+				{Type: discordgo.ApplicationCommandOptionInteger, Name: "days", Description: "Days to keep cached (1–14; default 7)", Required: false, MinValue: floatPtr(1), MaxValue: 14},
 			},
+		},
+		{
+			Name:        "library",
+			Description: "List cached items and when they expire",
+		},
+		{
+			Name:        "help",
+			Description: "Show all available commands and usage",
 		},
 		{
 			Name:        "link",
@@ -46,16 +54,13 @@ func (b *Bot) commandSpecs() []*discordgo.ApplicationCommand {
 			},
 		},
 		{
-			Name:        "cache",
-			Description: "Cache a movie/episode on the server (max 14 days)",
+			Name:                     "linkadmin",
+			Description:              "Link any Discord user to an LDAP account (admin only)",
+			DefaultMemberPermissions: int64Ptr(discordgo.PermissionManageGuild),
 			Options: []*discordgo.ApplicationCommandOption{
-				{Type: discordgo.ApplicationCommandOptionString, Name: "title", Description: "Movie or series title (supports S01E02)", Required: true},
-				{Type: discordgo.ApplicationCommandOptionInteger, Name: "days", Description: "Days to keep cached (1–14)", Required: true, MinValue: floatPtr(1), MaxValue: 14},
+				{Type: discordgo.ApplicationCommandOptionString, Name: "discord_id", Description: "Discord user ID to link", Required: true},
+				{Type: discordgo.ApplicationCommandOptionString, Name: "ldap_username", Description: "LDAP username to link to", Required: true},
 			},
-		},
-		{
-			Name:        "cached",
-			Description: "List cached items and when they expire",
 		},
 		{
 			Name:                     "status",
@@ -200,95 +205,77 @@ func (b *Bot) handleApplicationCommand(s *discordgo.Session, i *discordgo.Intera
 	name := i.ApplicationCommandData().Name
 
 	switch name {
+	case "help":
+		ackEphemeral(s, i, "Loading commands…")
+		mc := toMessageCreateFromInteraction(i, "")
+		b.handleHelp(s, mc)
+
 	case "link":
 		username := optString(i, "username")
-		// Immediate ephemeral ack to avoid spinner
-		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Content: "Linking…"}})
-		// Reuse existing handler via a minimal MessageCreate without legacy prefix
+		ackEphemeral(s, i, "Linking…")
 		mc := toMessageCreateFromInteraction(i, "")
 		b.handleLink(s, mc, []string{username})
 
-	case "vod":
+	case "linkadmin":
+		if !b.requireAdmin(s, i) {
+			return
+		}
+		discordID := optString(i, "discord_id")
+		ldapUser := optString(i, "ldap_username")
+		ackEphemeral(s, i, "Linking…")
+		mc := toMessageCreateFromInteraction(i, "")
+		b.linkDiscordAdmin(s, mc, []string{discordID, ldapUser})
+
+	case "watch":
 		query := optString(i, "query")
-		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Content: "Searching…"}})
-		mc := toMessageCreateFromInteraction(i, "")
-		b.handleVOD(s, mc, strings.Fields(query))
-
-	case "cache":
-		title := optString(i, "title")
 		days := int(optInt(i, "days"))
-		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Content: "Preparing cache…"}})
+		if days <= 0 {
+			days = 7
+		}
+		ackEphemeral(s, i, "Searching…")
 		mc := toMessageCreateFromInteraction(i, "")
-		b.handleCache(s, mc, append(strings.Fields(title), strconv.Itoa(days)))
+		b.handleVOD(s, mc, strings.Fields(query), days)
 
-	case "cached":
-		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Content: "Fetching cached list…"}})
+	case "library":
+		ackEphemeral(s, i, "Fetching library…")
 		mc := toMessageCreateFromInteraction(i, "")
 		b.handleCachedList(s, mc)
 
 	case "status":
-		if !b.isAdmin(i.Member) {
-			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Flags:   discordgo.MessageFlagsEphemeral,
-					Content: "You don't have permission to use this command.",
-				},
-			})
+		if !b.requireAdmin(s, i) {
 			return
 		}
-		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Content: "Getting status…"}})
+		ackEphemeral(s, i, "Getting status…")
 		mc := toMessageCreateFromInteraction(i, "")
 		b.handleStatus(s, mc, nil)
 
 	case "history":
-		if !b.isAdmin(i.Member) {
-			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Flags:   discordgo.MessageFlagsEphemeral,
-					Content: "You don't have permission to use this command.",
-				},
-			})
+		if !b.requireAdmin(s, i) {
 			return
 		}
 		username := optString(i, "username")
 		alias := optString(i, "alias")
 		hours := periodToHours(optString(i, "period"))
-		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Content: "Fetching history…"}})
+		ackEphemeral(s, i, "Fetching history…")
 		mc := toMessageCreateFromInteraction(i, "")
 		b.handleHistory(s, mc, username, alias, hours)
 
 	case "disconnect":
-		if !b.isAdmin(i.Member) {
-			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Flags:   discordgo.MessageFlagsEphemeral,
-					Content: "You don't have permission to use this command.",
-				},
-			})
+		if !b.requireAdmin(s, i) {
 			return
 		}
 		username := optString(i, "username")
-		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Content: "Disconnecting…"}})
+		ackEphemeral(s, i, "Disconnecting…")
 		mc := toMessageCreateFromInteraction(i, "")
 		b.handleDisconnect(s, mc, []string{username})
 
 	case "timeout":
-		if !b.isAdmin(i.Member) {
-			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Flags:   discordgo.MessageFlagsEphemeral,
-					Content: "You don't have permission to use this command.",
-				},
-			})
+		if !b.requireAdmin(s, i) {
 			return
 		}
 		username := optString(i, "username")
 		minutes := int(optInt(i, "minutes"))
-		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral, Content: "Applying timeout…"}})
+		ackEphemeral(s, i, "Applying timeout…")
 		mc := toMessageCreateFromInteraction(i, "")
 		b.handleTimeout(s, mc, []string{username, fmt.Sprintf("%d", minutes)})
 	}
@@ -310,6 +297,28 @@ func optInt(i *discordgo.InteractionCreate, name string) int64 {
 		}
 	}
 	return 0
+}
+
+// requireAdmin checks the caller's admin role and, on failure, replies with an
+// ephemeral permission-denied message. Returns true when access is granted, so
+// callers can write `if !b.requireAdmin(s, i) { return }`.
+func (b *Bot) requireAdmin(s *discordgo.Session, i *discordgo.InteractionCreate) bool {
+	if b.isAdmin(i.Member) {
+		return true
+	}
+	ackEphemeral(s, i, "You don't have permission to use this command.")
+	return false
+}
+
+// ackEphemeral sends an ephemeral "working on it" reply to clear Discord's spinner.
+func ackEphemeral(s *discordgo.Session, i *discordgo.InteractionCreate, content string) {
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Flags:   discordgo.MessageFlagsEphemeral,
+			Content: content,
+		},
+	})
 }
 
 // toMessageCreateFromInteraction builds a minimal MessageCreate to reuse legacy handlers

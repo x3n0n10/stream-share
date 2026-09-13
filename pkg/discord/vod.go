@@ -32,7 +32,7 @@ import (
 func (b *Bot) handleVOD(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
 	query := strings.TrimSpace(strings.Join(args, " "))
 	if query == "" {
-		b.info(m.ChannelID, "🎬 VOD Search", "Usage: `!vod <query>`\n\nSearches movies and shows. Use the dropdown to choose.")
+		b.info(m.ChannelID, "🎬 VOD Search", "Usage: `/vod <query>`\n\nSearches movies and shows. Use the dropdown to choose.")
 		return
 	}
 
@@ -48,13 +48,13 @@ func (b *Bot) handleVOD(s *discordgo.Session, m *discordgo.MessageCreate, args [
 	// Resolve LDAP
 	ok, resp, err := b.makeAPIRequest("GET", "/discord/"+m.Author.ID+"/ldap", nil)
 	if err != nil || !ok {
-		_ = editEmbed(s, loading, colorWarn, "🔗 Linking Required", "Your Discord account isn't linked. Use `!link <ldap_username>`. ")
+		_ = editEmbed(s, loading, colorWarn, "🔗 Linking Required", "Your Discord account isn't linked. Use `/link <ldap_username>`. ")
 		return
 	}
 	dmap, _ := resp.(map[string]interface{})
 	ldapUser := getString(dmap, "ldap_user")
 	if ldapUser == "" {
-		_ = editEmbed(s, loading, colorWarn, "🔗 Linking Required", "Link your account with `!link <ldap_username>`. ")
+		_ = editEmbed(s, loading, colorWarn, "🔗 Linking Required", "Link your account with `/link <ldap_username>`. ")
 		return
 	}
 

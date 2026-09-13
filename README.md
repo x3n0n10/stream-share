@@ -133,6 +133,7 @@ StreamShare includes a powerful Discord bot for content discovery and streaming.
 | `/vod <query>` | Search movies and series; supports queries like `show s02e04` |
 | `/cache <title> <days>` | Cache a movie or episode on the server for 1–14 days |
 | `/cached` | List cached items and expiration times |
+| `/help` | Show all available commands and usage |
 | `/status` | Show server status — active streams, viewers, and your provider subscription's state (admin only) |
 | `/history [username] [period]` | Watch history timeline for live and VOD (admin only). Omit `username` for a feed across all clients; `period` selects the window (24h, 7d, 30d, 90d, all time) |
 | `/disconnect <ldap_username>` | Disconnect a user from the stream |
@@ -141,6 +142,7 @@ StreamShare includes a powerful Discord bot for content discovery and streaming.
 Tips:
 - Link your account first with `/link <ldap_user>`.
 - Use specific queries to find episodes, e.g. `game of thrones s02e04` or `S1E1`.
+- Check `/cached` to see what's cached and when items expire.
 
 ---
 

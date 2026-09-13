@@ -297,16 +297,12 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		// Get API URL from config, defaulting to host/port, but honor reverse proxy
 		apiURL := config.DiscordAPIURL
 		if apiURL == "" {
-			protocol := "http"
-			if config.HTTPS {
-				protocol = "https"
-			}
-			hostPart := fmt.Sprintf("%s:%d", config.HostConfig.Hostname, config.HostConfig.Port)
-			if config.ReverseProxyEnabled {
-				// Behind reverse proxy: use hostname without port by default
-				hostPart = config.HostConfig.Hostname
-			}
-			apiURL = fmt.Sprintf("%s://%s", protocol, hostPart)
+			// The bot runs in this same process and calls the local API, which only
+			// serves plain HTTP on the listening port. Default to loopback so it
+			// works regardless of the public scheme/host: a TLS-terminating proxy
+			// in front would make a public HTTPS URL unreachable from here. Set
+			// DISCORD_API_URL to override (e.g. when the bot runs elsewhere).
+			apiURL = fmt.Sprintf("http://127.0.0.1:%d", config.HostConfig.Port)
 		}
 		utils.InfoLog("Discord API URL used by bot: %s", apiURL)
 		utils.InfoLog("Reminder: Ensure 'MESSAGE CONTENT INTENT' is enabled in Discord Developer Portal for this bot.")
@@ -697,22 +693,17 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	utils.DebugLog("Multiplexed stream request: user=%s, id=%s, type=%s, title=%s, upstream=%s",
 		username, streamID, streamType, streamTitle, targetURL.String())
 
-	// If VOD and cached locally, serve from disk to avoid upstream connection
+	// If VOD and cached locally, serve from disk to avoid upstream connection.
+	// Register a synthetic VOD view so /status and watch history reflect this
+	// playback — without it, cached VOD served through the multiplexed path
+	// (e.g. the generic /:user/:pass/:id route) would be invisible.
 	if c.db != nil && (streamType == "movie" || streamType == "series") {
 		if entry, err := c.db.GetVODCache(streamIDRaw); err == nil && entry != nil && entry.Status == "ready" {
 			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
 				utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, c.streamLabel(streamIDRaw), entry.FilePath)
-				// Content-Type based on file extension
-				var ct string
-				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" {
-					ct = "video/mp2t"
-				} else if ext == ".mkv" {
-					ct = "video/x-matroska"
-				} else {
-					ct = "video/mp4"
-				}
+				defer c.registerVODView(username, streamIDRaw, streamType, streamTitle)()
 				c.touchVODCache(streamIDRaw)
-				serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
+				serveLocalFileRange(ctx, entry.FilePath, contentTypeForPath(entry.FilePath), "", false)
 				return
 			}
 			utils.WarnLog("Multiplex: cached %s missing on disk for %s at %s; falling back to upstream", streamType, c.streamLabel(streamIDRaw), entry.FilePath)

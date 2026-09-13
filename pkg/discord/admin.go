@@ -21,13 +21,14 @@ package discord
 import (
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/bwmarrin/discordgo"
 )
 
 func (b *Bot) isAdmin(member *discordgo.Member) bool {
 	if b.adminRoleID == "" {
-		return true // no admin role configured — allow anyone (backwards compat)
+		return true // no admin role configured - allow anyone (backwards compat)
 	}
 	if member == nil {
 		return false
@@ -43,7 +44,7 @@ func (b *Bot) isAdmin(member *discordgo.Member) bool {
 // handleDisconnect forcibly disconnects a user (admin only).
 func (b *Bot) handleDisconnect(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
 	if len(args) != 1 {
-		b.info(m.ChannelID, "🔌 Disconnect User", "Usage: `!disconnect <username>`")
+		b.info(m.ChannelID, "🔌 Disconnect User", "Usage: `/disconnect <username>`")
 		return
 	}
 	username := args[0]
@@ -58,7 +59,7 @@ func (b *Bot) handleDisconnect(s *discordgo.Session, m *discordgo.MessageCreate,
 // handleTimeout temporarily blocks a user (admin only).
 func (b *Bot) handleTimeout(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
 	if len(args) != 2 {
-		b.info(m.ChannelID, "⏳ Timeout User", "Usage: `!timeout <username> <minutes>`")
+		b.info(m.ChannelID, "⏳ Timeout User", "Usage: `/timeout <username> <minutes>`")
 		return
 	}
 	username := args[0]
@@ -74,4 +75,22 @@ func (b *Bot) handleTimeout(s *discordgo.Session, m *discordgo.MessageCreate, ar
 		return
 	}
 	b.success(m.ChannelID, "✅ Timeout Applied", fmt.Sprintf("User **%s** has been timed out for **%d** minutes.", username, minutes))
+}
+
+// linkDiscordAdmin links an arbitrary Discord user to an LDAP account (admin only).
+func (b *Bot) linkDiscordAdmin(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
+	if len(args) != 2 {
+		b.info(m.ChannelID, "🔗 Link User (Admin)", "Usage: `/linkadmin <discord_id> <ldap_username>`\n\nThis links any Discord user to an LDAP account (admin only).")
+		return
+	}
+
+	discordID := strings.TrimSpace(args[0])
+	ldapUser := strings.TrimSpace(args[1])
+
+	if discordID == "" || ldapUser == "" {
+		b.fail(m.ChannelID, "❌ Link Failed", "Both Discord ID and LDAP username are required.")
+		return
+	}
+
+	b.linkDiscord(s, m.ChannelID, discordID, resolveDiscordName(s, m.GuildID, discordID), ldapUser, false)
 }

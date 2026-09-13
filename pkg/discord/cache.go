@@ -29,11 +29,11 @@ import (
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
 
-// handleCache implements: !cache <vod_name> <number_of_days>
+// handleCache implements: /cache <vod_name> <number_of_days>
 func (b *Bot) handleCache(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
 	if len(args) < 2 {
 		b.info(m.ChannelID, "💾 Cache VOD",
-			"Usage: `!cache <vod_name> <number_of_days>`\nExample: `!cache The Matrix 3` or `!cache Game of Thrones S08E03 5`\nNote: days must be < 15.")
+			"Usage: `/cache <vod_name> <number_of_days>`\nExample: `/cache The Matrix 3` or `/cache Game of Thrones S08E03 5`\nNote: days must be < 15.")
 		return
 	}
 	// Extract days (last arg) and query (preceding)
@@ -55,13 +55,13 @@ func (b *Bot) handleCache(s *discordgo.Session, m *discordgo.MessageCreate, args
 	// Resolve user
 	ok, resp, err := b.makeAPIRequest("GET", "/discord/"+m.Author.ID+"/ldap", nil)
 	if err != nil || !ok {
-		_ = editEmbed(s, loading, colorWarn, "🔗 Linking Required", "Link your account with `!link <ldap_username>`. ")
+		_ = editEmbed(s, loading, colorWarn, "🔗 Linking Required", "Link your account with `/link <ldap_username>`. ")
 		return
 	}
 	data, _ := resp.(map[string]interface{})
 	ldapUser := getString(data, "ldap_user")
 	if ldapUser == "" {
-		_ = editEmbed(s, loading, colorWarn, "🔗 Linking Required", "Link your account with `!link <ldap_username>`. ")
+		_ = editEmbed(s, loading, colorWarn, "🔗 Linking Required", "Link your account with `/link <ldap_username>`. ")
 		return
 	}
 
@@ -155,7 +155,7 @@ func (b *Bot) startVODCacheFromSelection(s *discordgo.Session, channelID, userID
 	data, _ := resp.(map[string]interface{})
 	ldapUser := getString(data, "ldap_user")
 	if ldapUser == "" {
-		b.warn(channelID, "🔗 Linking Required", "Link your account with `!link <ldap_username>`. ")
+		b.warn(channelID, "🔗 Linking Required", "Link your account with `/link <ldap_username>`. ")
 		return
 	}
 

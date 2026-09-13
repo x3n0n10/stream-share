@@ -286,6 +286,8 @@ func (c *Config) streamFileSegment(ctx *gin.Context, filePath string, startOffse
 
 	readBuf := make([]byte, 64*1024)
 	clientGone := ctx.Request.Context().Done()
+	pollTimer := time.NewTimer(200 * time.Millisecond)
+	defer pollTimer.Stop()
 	for {
 		select {
 		case <-clientGone:
@@ -302,6 +304,13 @@ func (c *Config) streamFileSegment(ctx *gin.Context, filePath string, startOffse
 			}
 		}
 		if rerr == io.EOF {
+			if !pollTimer.Stop() {
+				select {
+				case <-pollTimer.C:
+				default:
+				}
+			}
+			pollTimer.Reset(200 * time.Millisecond)
 			select {
 			case <-drainDone:
 				// All writes are on disk. Flush any bytes written between our last
@@ -323,7 +332,7 @@ func (c *Config) streamFileSegment(ctx *gin.Context, filePath string, startOffse
 				}
 			case <-clientGone:
 				return
-			case <-time.After(200 * time.Millisecond):
+			case <-pollTimer.C:
 			}
 			continue
 		}

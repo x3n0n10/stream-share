@@ -70,12 +70,19 @@ func (c *Config) xtreamRoutes(r *gin.RouterGroup) {
 	r.GET("/player_api.php", c.authenticate, c.xtreamPlayerAPIGET)
 	r.POST("/player_api.php", c.appAuthenticate, c.xtreamPlayerAPIPOST)
 	r.GET("/xmltv.php", c.authenticate, c.xtreamXMLTV)
-	r.GET(fmt.Sprintf("/%s/%s/:id", c.XtreamUser.String(), c.XtreamPassword.String()), c.xtreamStreamHandler)
-	r.GET(fmt.Sprintf("/live/%s/%s/:id", c.XtreamUser.String(), c.XtreamPassword.String()), c.xtreamStreamLive)
-	r.GET(fmt.Sprintf("/timeshift/%s/%s/:duration/:start/:id", c.XtreamUser.String(), c.XtreamPassword.String()), c.xtreamStreamTimeshift)
-	r.GET(fmt.Sprintf("/movie/%s/%s/:id", c.XtreamUser.String(), c.XtreamPassword.String()), c.xtreamStreamMovie)
-	r.GET(fmt.Sprintf("/series/%s/%s/:id", c.XtreamUser.String(), c.XtreamPassword.String()), c.xtreamStreamSeries)
-	r.GET(fmt.Sprintf("/hlsr/:token/%s/%s/:channel/:hash/:chunk", c.XtreamUser.String(), c.XtreamPassword.String()), c.xtreamHlsrStream)
+	// These direct stream routes have no c.authenticate middleware: gin's own
+	// path matching against the literal XtreamUser/XtreamPassword segments IS
+	// the auth check (a request that doesn't have the right credentials in
+	// its path never reaches the handler at all). Some clients call these
+	// straight away without ever hitting player_api.php first, so
+	// recordRecentAuth needs to run here too -- otherwise /img stays locked
+	// for them even though they've proven valid credentials.
+	r.GET(fmt.Sprintf("/%s/%s/:id", c.XtreamUser.String(), c.XtreamPassword.String()), recordRecentAuth, c.xtreamStreamHandler)
+	r.GET(fmt.Sprintf("/live/%s/%s/:id", c.XtreamUser.String(), c.XtreamPassword.String()), recordRecentAuth, c.xtreamStreamLive)
+	r.GET(fmt.Sprintf("/timeshift/%s/%s/:duration/:start/:id", c.XtreamUser.String(), c.XtreamPassword.String()), recordRecentAuth, c.xtreamStreamTimeshift)
+	r.GET(fmt.Sprintf("/movie/%s/%s/:id", c.XtreamUser.String(), c.XtreamPassword.String()), recordRecentAuth, c.xtreamStreamMovie)
+	r.GET(fmt.Sprintf("/series/%s/%s/:id", c.XtreamUser.String(), c.XtreamPassword.String()), recordRecentAuth, c.xtreamStreamSeries)
+	r.GET(fmt.Sprintf("/hlsr/:token/%s/%s/:channel/:hash/:chunk", c.XtreamUser.String(), c.XtreamPassword.String()), recordRecentAuth, c.xtreamHlsrStream)
 	r.GET("/hls/:token/:chunk", c.xtreamHlsStream)
 	r.GET("/play/:token/:type", c.xtreamStreamPlay)
 }
@@ -92,10 +99,14 @@ func (c *Config) m3uRoutes(r *gin.RouterGroup) {
 			track:       &c.playlist.Tracks[i],
 		}
 
+		// Same reasoning as the direct Xtream stream routes above: no
+		// c.authenticate here, path matching against the literal
+		// XtreamUser/XtreamPassword segments is the auth check, and a
+		// client reaching this handler at all has already proven it.
 		if strings.HasSuffix(track.URI, ".m3u8") {
-			r.GET(fmt.Sprintf("/%s/%s/%s/%d/:id", c.endpointAntiColision, c.XtreamUser.String(), c.XtreamPassword.String(), i), trackConfig.m3u8ReverseProxy)
+			r.GET(fmt.Sprintf("/%s/%s/%s/%d/:id", c.endpointAntiColision, c.XtreamUser.String(), c.XtreamPassword.String(), i), recordRecentAuth, trackConfig.m3u8ReverseProxy)
 		} else {
-			r.GET(fmt.Sprintf("/%s/%s/%s/%d/%s", c.endpointAntiColision, c.XtreamUser.String(), c.XtreamPassword.String(), i, path.Base(track.URI)), trackConfig.reverseProxy)
+			r.GET(fmt.Sprintf("/%s/%s/%s/%d/%s", c.endpointAntiColision, c.XtreamUser.String(), c.XtreamPassword.String(), i, path.Base(track.URI)), recordRecentAuth, trackConfig.reverseProxy)
 		}
 	}
 }

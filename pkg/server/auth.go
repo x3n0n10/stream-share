@@ -102,10 +102,15 @@ var (
 )
 
 // recentAuthTTL is how long a client IP stays trusted after its last
-// successful authentication against authenticate or appAuthenticate.
+// successful authentication.
 const recentAuthTTL = 24 * time.Hour
 
-// recordRecentAuth marks ctx's client IP as recently authenticated.
+// recordRecentAuth marks ctx's client IP as recently authenticated. Called
+// from authenticate/appAuthenticate on a successful check, and chained
+// directly onto the Xtream direct-stream and M3U-track routes in
+// routes.go, which have no c.authenticate of their own -- reaching those
+// handlers at all already proves gin matched the request's path against
+// the literal configured credentials.
 func recordRecentAuth(ctx *gin.Context) {
 	recentlyAuthenticatedMu.Lock()
 	recentlyAuthenticated[ctx.ClientIP()] = time.Now()

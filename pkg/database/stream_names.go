@@ -163,6 +163,20 @@ func escapeLikePattern(s string) string {
 	return strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(s)
 }
 
+// stripStreamIDExtension trims a trailing file extension the same way
+// normalizeStreamID (pkg/server/m3u_index.go) does when a channel is
+// harvested — the stored stream_id never carries one, so a query that
+// pastes one in (e.g. "12345.ts", copied straight out of the probe-channel
+// field, which itself now fills from a picked suggestion the same way) must
+// have it stripped too, or an id lookup that should be an exact prefix
+// match silently returns nothing.
+func stripStreamIDExtension(id string) string {
+	if i := strings.Index(id, "."); i > 0 {
+		return id[:i]
+	}
+	return id
+}
+
 // SearchStreamNames returns up to limit channels whose name matches query
 // (case-insensitive substring) or whose stream_id starts with it. The same
 // stream_id can be indexed from more than one source (api and m3u both run
@@ -183,7 +197,8 @@ func (m *DBManager) SearchStreamNames(query string, limit int) ([]types.ChannelM
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	escaped := escapeLikePattern(query)
+	nameQuery := escapeLikePattern(query)
+	idQuery := escapeLikePattern(stripStreamIDExtension(query))
 
 	// Leading-wildcard ILIKE is a sequential scan — measured ~67ms worst case
 	// at 40k rows, fine at today's scale. Add a trigram index (pg_trgm) on
@@ -192,12 +207,12 @@ func (m *DBManager) SearchStreamNames(query string, limit int) ([]types.ChannelM
 		SELECT stream_id, name, category FROM (
 			SELECT DISTINCT ON (stream_id) stream_id, name, category
 			FROM stream_names
-			WHERE name ILIKE '%' || $1 || '%' ESCAPE '\' OR stream_id LIKE $1 || '%' ESCAPE '\'
+			WHERE name ILIKE '%' || $1 || '%' ESCAPE '\' OR stream_id LIKE $2 || '%' ESCAPE '\'
 			ORDER BY stream_id, CASE source WHEN 'api' THEN 0 WHEN 'm3u' THEN 1 ELSE 2 END
 		) deduped
 		ORDER BY name
-		LIMIT $2`,
-		escaped, limit,
+		LIMIT $3`,
+		nameQuery, idQuery, limit,
 	)
 	if err != nil {
 		return nil, err

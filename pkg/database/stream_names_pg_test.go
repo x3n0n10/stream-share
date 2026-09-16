@@ -257,6 +257,26 @@ func TestSearchStreamNamesMatchesNameOrID(t *testing.T) {
 	}
 }
 
+// TestSearchStreamNamesStripsExtensionFromIDQuery is the regression test for
+// pasting a probe-channel value straight back into search: stored stream_ids
+// never carry an extension, but the wizard's field (and a picked suggestion)
+// does, e.g. "101.ts" — that suffix must be stripped before the id-prefix
+// match, or a query that should be an exact hit returns nothing.
+func TestSearchStreamNamesStripsExtensionFromIDQuery(t *testing.T) {
+	m := testDB(t)
+	if err := m.UpsertStreamNames(map[string]string{"101": "BBC One"}, nil, nil, "api"); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := m.SearchStreamNames("101.ts", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].StreamID != "101" {
+		t.Fatalf("got %+v, want one match for stream_id 101 (extension stripped)", results)
+	}
+}
+
 // TestSearchStreamNamesEmptyQueryReturnsNothing guards against ever dumping
 // the full table — this backs a type-to-search picker, not a listing.
 func TestSearchStreamNamesEmptyQueryReturnsNothing(t *testing.T) {

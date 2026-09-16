@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
 
@@ -37,9 +38,16 @@ const upsertBatchRows = 500
 // cannot pin a connection indefinitely.
 const upsertStreamNamesTimeout = 30 * time.Second
 
+// category uses CASE WHEN rather than a plain overwrite: resolveCategoryName
+// (pkg/server/xtream_handlers_api.go) returns "" whenever the in-memory
+// category index is cold, and a plain EXCLUDED.category would wipe a
+// previously-persisted category on every such harvest. name/epg_channel_id
+// still overwrite unconditionally — a channel rename should always win.
 const upsertStreamNamesSuffix = `
     ON CONFLICT (stream_id, source) DO UPDATE
-        SET name = EXCLUDED.name, epg_channel_id = EXCLUDED.epg_channel_id, updated_at = EXCLUDED.updated_at`
+        SET name = EXCLUDED.name, epg_channel_id = EXCLUDED.epg_channel_id,
+            category = CASE WHEN EXCLUDED.category = '' THEN stream_names.category ELSE EXCLUDED.category END,
+            updated_at = EXCLUDED.updated_at`
 
 // UpsertStreamName upserts a single stream name with an optional EPG channel ID.
 func (m *DBManager) UpsertStreamName(streamID, source, name, epgChannelID string) error {
@@ -47,17 +55,17 @@ func (m *DBManager) UpsertStreamName(streamID, source, name, epgChannelID string
 	if epgChannelID != "" {
 		epgIDs[streamID] = epgChannelID
 	}
-	return m.UpsertStreamNames(map[string]string{streamID: name}, epgIDs, source)
+	return m.UpsertStreamNames(map[string]string{streamID: name}, epgIDs, nil, source)
 }
 
-// UpsertStreamNames batch-upserts id→name pairs (and optional EPG channel IDs)
-// for the given source.
+// UpsertStreamNames batch-upserts id→name pairs (with optional EPG channel
+// IDs and categories) for the given source.
 //
 // Rows are written in multi-row batches rather than one statement per name: a
 // full channel list runs to thousands of entries, and a per-row loop meant
 // thousands of sequential round trips, which is slow enough to stall whatever
 // called it and to tie up a pooled connection for minutes.
-func (m *DBManager) UpsertStreamNames(names map[string]string, epgIDs map[string]string, source string) error {
+func (m *DBManager) UpsertStreamNames(names map[string]string, epgIDs map[string]string, categories map[string]string, source string) error {
 	if m == nil || m.db == nil || len(names) == 0 {
 		return nil
 	}
@@ -69,14 +77,18 @@ func (m *DBManager) UpsertStreamNames(names map[string]string, epgIDs map[string
 	started := now
 
 	// Flatten to a stable slice so batching is straightforward.
-	type row struct{ id, name, epgID string }
+	type row struct{ id, name, epgID, category string }
 	rows := make([]row, 0, len(names))
 	for id, name := range names {
 		epgID := ""
 		if epgIDs != nil {
 			epgID = epgIDs[id]
 		}
-		rows = append(rows, row{id: id, name: name, epgID: epgID})
+		category := ""
+		if categories != nil {
+			category = categories[id]
+		}
+		rows = append(rows, row{id: id, name: name, epgID: epgID, category: category})
 	}
 
 	for start := 0; start < len(rows); start += upsertBatchRows {
@@ -87,15 +99,15 @@ func (m *DBManager) UpsertStreamNames(names map[string]string, epgIDs map[string
 		batch := rows[start:end]
 
 		var sb strings.Builder
-		sb.WriteString("INSERT INTO stream_names (stream_id, source, name, epg_channel_id, updated_at) VALUES ")
-		args := make([]interface{}, 0, len(batch)*5)
+		sb.WriteString("INSERT INTO stream_names (stream_id, source, name, epg_channel_id, category, updated_at) VALUES ")
+		args := make([]interface{}, 0, len(batch)*6)
 		for i, r := range batch {
 			if i > 0 {
 				sb.WriteString(",")
 			}
-			n := i * 5
-			fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d)", n+1, n+2, n+3, n+4, n+5)
-			args = append(args, r.id, source, r.name, r.epgID, now)
+			n := i * 6
+			fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d,$%d)", n+1, n+2, n+3, n+4, n+5, n+6)
+			args = append(args, r.id, source, r.name, r.epgID, r.category, now)
 		}
 		sb.WriteString(upsertStreamNamesSuffix)
 
@@ -141,4 +153,77 @@ func (m *DBManager) LoadStreamNames() (map[string]map[string]string, map[string]
 		}
 	}
 	return bySource, epgIndex, rows.Err()
+}
+
+// escapeLikePattern escapes LIKE/ILIKE metacharacters (and the escape
+// character itself) in s so it can be safely embedded as a literal substring
+// in a pattern built with ESCAPE '\'. Without this, a query of e.g. "%" or
+// "_" would match every row instead of being searched for literally.
+func escapeLikePattern(s string) string {
+	return strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(s)
+}
+
+// stripStreamIDExtension trims a trailing file extension the same way
+// normalizeStreamID (pkg/server/m3u_index.go) does when a channel is
+// harvested — the stored stream_id never carries one, so a query that
+// pastes one in (e.g. "12345.ts", copied straight out of the probe-channel
+// field, which itself now fills from a picked suggestion the same way) must
+// have it stripped too, or an id lookup that should be an exact prefix
+// match silently returns nothing.
+func stripStreamIDExtension(id string) string {
+	if i := strings.Index(id, "."); i > 0 {
+		return id[:i]
+	}
+	return id
+}
+
+// SearchStreamNames returns up to limit channels whose name matches query
+// (case-insensitive substring) or whose stream_id starts with it. The same
+// stream_id can be indexed from more than one source (api and m3u both run
+// their own harvest); a match is deduplicated to one row, preferring api
+// (the only source with a resolved category) over m3u over anything else —
+// same preference order as "API is authoritative" elsewhere in this file.
+//
+// An empty query or an uninitialized database return no rows rather than an
+// error: this backs a type-to-search picker in a wizard step that must never
+// surface a scary failure just because the index isn't warm yet.
+func (m *DBManager) SearchStreamNames(query string, limit int) ([]types.ChannelMatch, error) {
+	results := make([]types.ChannelMatch, 0)
+	query = strings.TrimSpace(query)
+	if m == nil || m.db == nil || query == "" {
+		return results, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	nameQuery := escapeLikePattern(query)
+	idQuery := escapeLikePattern(stripStreamIDExtension(query))
+
+	// Leading-wildcard ILIKE is a sequential scan — measured ~67ms worst case
+	// at 40k rows, fine at today's scale. Add a trigram index (pg_trgm) on
+	// name if stream_names grows past roughly 10x that.
+	rows, err := m.db.QueryContext(ctx, `
+		SELECT stream_id, name, category FROM (
+			SELECT DISTINCT ON (stream_id) stream_id, name, category
+			FROM stream_names
+			WHERE name ILIKE '%' || $1 || '%' ESCAPE '\' OR stream_id LIKE $2 || '%' ESCAPE '\'
+			ORDER BY stream_id, CASE source WHEN 'api' THEN 0 WHEN 'm3u' THEN 1 ELSE 2 END
+		) deduped
+		ORDER BY name
+		LIMIT $3`,
+		nameQuery, idQuery, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var match types.ChannelMatch
+		if err := rows.Scan(&match.StreamID, &match.Name, &match.Category); err != nil {
+			return nil, err
+		}
+		results = append(results, match)
+	}
+	return results, rows.Err()
 }

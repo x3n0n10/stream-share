@@ -133,6 +133,14 @@ type APIResponse struct {
 	Error   string      `json:"error,omitempty"`
 }
 
+// ChannelMatch is one live-channel suggestion for the health-check probe
+// picker: a name (and, when known, its provider category) for a stream_id.
+type ChannelMatch struct {
+	StreamID string
+	Name     string
+	Category string
+}
+
 // VODCacheEntry tracks cached VOD or series episode stored on disk
 type VODCacheEntry struct {
 	StreamID    string `json:"stream_id"`

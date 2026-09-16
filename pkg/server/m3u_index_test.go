@@ -96,9 +96,9 @@ func TestStreamNamesHashStableAcrossIteration(t *testing.T) {
 		epg[id] = id + ".tv"
 	}
 
-	want := streamNamesHash(names, epg)
+	want := streamNamesHash(names, epg, nil)
 	for i := 0; i < 20; i++ {
-		if got := streamNamesHash(names, epg); got != want {
+		if got := streamNamesHash(names, epg, nil); got != want {
 			t.Fatalf("hash changed between calls on identical input: %s != %s", got, want)
 		}
 	}
@@ -107,22 +107,26 @@ func TestStreamNamesHashStableAcrossIteration(t *testing.T) {
 func TestStreamNamesHashDetectsChanges(t *testing.T) {
 	base := map[string]string{"1": "One", "2": "Two"}
 	baseEPG := map[string]string{"1": "one.tv"}
-	want := streamNamesHash(base, baseEPG)
+	baseCategories := map[string]string{"1": "News"}
+	want := streamNamesHash(base, baseEPG, baseCategories)
 
 	cases := []struct {
-		name  string
-		names map[string]string
-		epg   map[string]string
+		name       string
+		names      map[string]string
+		epg        map[string]string
+		categories map[string]string
 	}{
-		{"renamed channel", map[string]string{"1": "Uno", "2": "Two"}, baseEPG},
-		{"added channel", map[string]string{"1": "One", "2": "Two", "3": "Three"}, baseEPG},
-		{"removed channel", map[string]string{"1": "One"}, baseEPG},
-		{"changed epg id", base, map[string]string{"1": "uno.tv"}},
-		{"removed epg id", base, map[string]string{}},
+		{"renamed channel", map[string]string{"1": "Uno", "2": "Two"}, baseEPG, baseCategories},
+		{"added channel", map[string]string{"1": "One", "2": "Two", "3": "Three"}, baseEPG, baseCategories},
+		{"removed channel", map[string]string{"1": "One"}, baseEPG, baseCategories},
+		{"changed epg id", base, map[string]string{"1": "uno.tv"}, baseCategories},
+		{"removed epg id", base, map[string]string{}, baseCategories},
+		{"changed category", base, baseEPG, map[string]string{"1": "Sports"}},
+		{"removed category", base, baseEPG, map[string]string{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := streamNamesHash(tc.names, tc.epg); got == want {
+			if got := streamNamesHash(tc.names, tc.epg, tc.categories); got == want {
 				t.Fatal("hash did not change, so a real update would be skipped")
 			}
 		})
@@ -133,8 +137,8 @@ func TestStreamNamesHashDetectsChanges(t *testing.T) {
 // separators, {"ab":"c"} and {"a":"bc"} would hash identically and a rename
 // could be silently skipped.
 func TestStreamNamesHashNoFieldBleed(t *testing.T) {
-	a := streamNamesHash(map[string]string{"ab": "c"}, nil)
-	b := streamNamesHash(map[string]string{"a": "bc"}, nil)
+	a := streamNamesHash(map[string]string{"ab": "c"}, nil, nil)
+	b := streamNamesHash(map[string]string{"a": "bc"}, nil, nil)
 	if a == b {
 		t.Fatal("adjacent fields collide; separators are not doing their job")
 	}

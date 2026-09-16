@@ -81,6 +81,10 @@ func (c *Config) setupInternalAPI(r *gin.Engine) {
 	api.POST("/vod/download", c.createVODDownload)
 	api.GET("/vod/status/:requestid", c.getVODRequestStatus)
 
+	// Channel search for the health-check wizard's probe-channel picker —
+	// reads the name/category index warmed at startup, never the provider.
+	api.GET("/channels", c.searchChannels)
+
 	// Caching endpoints (used by Discord)
 	api.POST("/cache/start", c.startCache)
 	api.GET("/cache/by-stream/:streamid", c.getCacheByStream)

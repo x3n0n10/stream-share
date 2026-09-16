@@ -107,6 +107,7 @@ func (m *DBManager) initSchema() error {
             source         TEXT NOT NULL,
             name           TEXT NOT NULL,
             epg_channel_id TEXT NOT NULL DEFAULT '',
+            category       TEXT NOT NULL DEFAULT '',
             updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (stream_id, source)
         )
@@ -118,6 +119,14 @@ func (m *DBManager) initSchema() error {
 	// Migration: add epg_channel_id column to existing stream_names tables.
 	if _, err := m.db.Exec(`ALTER TABLE stream_names ADD COLUMN IF NOT EXISTS epg_channel_id TEXT NOT NULL DEFAULT ''`); err != nil {
 		return fmt.Errorf("failed to add epg_channel_id to stream_names: %w", err)
+	}
+
+	// Migration: add category column to existing stream_names tables — the
+	// human-readable live-stream category (e.g. "Sports"), resolved at
+	// harvest time from get_live_categories. Empty for rows harvested before
+	// this migration or from a source that never had one (m3u, vod).
+	if _, err := m.db.Exec(`ALTER TABLE stream_names ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("failed to add category to stream_names: %w", err)
 	}
 
 	// ip_aliases lets a friendly name be assigned to a client IP address — useful

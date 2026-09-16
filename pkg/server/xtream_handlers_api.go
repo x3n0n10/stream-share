@@ -216,8 +216,9 @@ func (c *Config) xtreamPlayerAPIGET(ctx *gin.Context) {
 	c.xtreamPlayerAPI(ctx, ctx.Request.URL.Query())
 }
 
-// harvestChannelNames extracts stream_id → name pairs and EPG channel IDs from a get_live_streams
-// response and refreshes the API channel name index used by /status and logs.
+// harvestChannelNames extracts stream_id → name pairs, EPG channel IDs, and
+// resolved categories from a get_live_streams response and refreshes the API
+// channel name index used by /status and logs.
 // It returns the number of channel names indexed.
 func (c *Config) harvestChannelNames(resp interface{}) int {
 	streams, ok := resp.([]interface{})
@@ -226,6 +227,7 @@ func (c *Config) harvestChannelNames(resp interface{}) int {
 	}
 	names := make(map[string]string, len(streams))
 	epgIDs := make(map[string]string, len(streams))
+	categories := make(map[string]string, len(streams))
 	for _, item := range streams {
 		m, ok := item.(map[string]interface{})
 		if !ok {
@@ -239,9 +241,25 @@ func (c *Config) harvestChannelNames(resp interface{}) int {
 		if epgID, _ := m["epg_channel_id"].(string); strings.TrimSpace(epgID) != "" {
 			epgIDs[id] = strings.TrimSpace(epgID)
 		}
+		if category := resolveCategoryName(m); category != "" {
+			categories[id] = category
+		}
 	}
-	c.updateAPIChannelIndex(names, epgIDs)
+	c.updateAPIChannelIndex(names, epgIDs, categories)
 	return len(names)
+}
+
+// resolveCategoryName looks up the human-readable category for a
+// get_live_streams item's category_id, using the index warmed by
+// warmCategoryNameIndex. Returns "" if the item has no usable category_id or
+// it isn't in the index (map miss, or the warm-up hasn't run/failed yet).
+func resolveCategoryName(m map[string]interface{}) string {
+	id := fmt.Sprintf("%v", m["category_id"])
+	if id == "" || id == "<nil>" {
+		return ""
+	}
+	name, _ := lookupCategoryName(id)
+	return name
 }
 
 // warmChannelNameIndex fetches get_live_streams once so channel names can be
@@ -254,6 +272,9 @@ func (c *Config) warmChannelNameIndex() {
 		utils.WarnLog("Channel name warm-up: failed to create Xtream client: %v", err)
 		return
 	}
+
+	c.warmCategoryNameIndex(client)
+
 	resp, _, _, err := client.Action(c.ProxyConfig, "get_live_streams", nil)
 	if err != nil {
 		utils.WarnLog("Channel name warm-up: get_live_streams failed: %v", err)
@@ -264,6 +285,40 @@ func (c *Config) warmChannelNameIndex() {
 	} else {
 		utils.WarnLog("Channel name warm-up: get_live_streams returned no usable channel names")
 	}
+}
+
+// warmCategoryNameIndex fetches get_live_categories once so harvestChannelNames
+// can resolve a stream's category_id to a name without a per-item or
+// per-category network call — unlike xtreamGenerateM3u's per-category
+// get_live_streams loop (pkg/server/xtream_generate.go), which exists to
+// build a categorized M3U and would multiply provider calls needlessly here.
+// Best-effort: a failure just means channels are indexed without a category
+// label until the next successful warm-up.
+func (c *Config) warmCategoryNameIndex(client *xtreamapi.Client) {
+	resp, _, _, err := client.Action(c.ProxyConfig, "get_live_categories", nil)
+	if err != nil {
+		utils.WarnLog("Channel name warm-up: get_live_categories failed: %v", err)
+		return
+	}
+	categories, ok := xtreamapi.ProcessResponse(resp).([]interface{})
+	if !ok {
+		utils.WarnLog("Channel name warm-up: unexpected get_live_categories format: %T", resp)
+		return
+	}
+	names := make(map[string]string, len(categories))
+	for _, item := range categories {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id := fmt.Sprintf("%v", m["category_id"])
+		name := strings.TrimSpace(fmt.Sprintf("%v", m["category_name"]))
+		if id != "" && id != "<nil>" && name != "" {
+			names[id] = name
+		}
+	}
+	updateCategoryNameIndex(names)
+	utils.InfoLog("Channel name warm-up: indexed %d live categories", len(names))
 }
 
 func (c *Config) injectCatchupFlags(resp interface{}) interface{} {

@@ -145,3 +145,32 @@ func TestXtreamPlayerAPILoginFallsBackToListenPortWhenHostHasNone(t *testing.T) 
 		t.Errorf("server_info.port = %q, want fallback listen port %q", resp.ServerInfo.Port, "8080")
 	}
 }
+
+func TestResolveCategoryNameUsesWarmedIndex(t *testing.T) {
+	categoryNameIndexMu.Lock()
+	prev := categoryNameIndex
+	categoryNameIndex = map[string]string{"7": "Sports"}
+	categoryNameIndexMu.Unlock()
+	t.Cleanup(func() {
+		categoryNameIndexMu.Lock()
+		categoryNameIndex = prev
+		categoryNameIndexMu.Unlock()
+	})
+
+	cases := []struct {
+		name string
+		item map[string]interface{}
+		want string
+	}{
+		{"known category", map[string]interface{}{"category_id": "7"}, "Sports"},
+		{"unknown category", map[string]interface{}{"category_id": "999"}, ""},
+		{"missing field", map[string]interface{}{}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveCategoryName(tc.item); got != tc.want {
+				t.Errorf("resolveCategoryName(%v) = %q, want %q", tc.item, got, tc.want)
+			}
+		})
+	}
+}

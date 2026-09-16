@@ -50,6 +50,16 @@ var (
 	// epgIndex maps normalized stream IDs to EPG channel IDs (tvg-id / epg_channel_id).
 	epgIndexMu sync.RWMutex
 	epgIndex   map[string]string // normalized stream_id → tvg-id
+
+	// categoryNameIndex maps a live-stream category_id to its human-readable
+	// name, harvested once from get_live_categories at startup (see
+	// warmCategoryNameIndex in xtream_handlers_api.go) — live-stream items
+	// only carry the id, not the name. Deliberately not refreshed on every
+	// get_live_streams harvest: categories change far less often than channel
+	// names, and refetching on every player list request would multiply
+	// provider calls for no benefit.
+	categoryNameIndexMu sync.RWMutex
+	categoryNameIndex   map[string]string
 )
 
 // persistInFlight tracks which sources currently have a persist running.
@@ -61,7 +71,7 @@ var lastPersisted sync.Map // source -> string
 
 // streamNamesHash fingerprints the exact content that would be written. Keys are
 // sorted so the hash is stable across map iteration order.
-func streamNamesHash(names map[string]string, epgIDs map[string]string) string {
+func streamNamesHash(names map[string]string, epgIDs map[string]string, categories map[string]string) string {
 	ids := make([]string, 0, len(names))
 	for id := range names {
 		ids = append(ids, id)
@@ -76,6 +86,8 @@ func streamNamesHash(names map[string]string, epgIDs map[string]string) string {
 		h.Write([]byte{0})
 		h.Write([]byte(epgIDs[id]))
 		h.Write([]byte{1})
+		h.Write([]byte(categories[id]))
+		h.Write([]byte{2})
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -96,12 +108,12 @@ func streamNamesHash(names map[string]string, epgIDs map[string]string) string {
 // refresher runs on a timer, but the names themselves change rarely — so the
 // common case is rewriting thousands of identical rows for nothing. Hashing a
 // few thousand entries costs microseconds against the round trips it saves.
-func (c *Config) persistStreamNamesAsync(names map[string]string, epgIDs map[string]string, source string) {
+func (c *Config) persistStreamNamesAsync(names map[string]string, epgIDs map[string]string, categories map[string]string, source string) {
 	if c.db == nil || len(names) == 0 {
 		return
 	}
 
-	hash := streamNamesHash(names, epgIDs)
+	hash := streamNamesHash(names, epgIDs, categories)
 	if prev, ok := lastPersisted.Load(source); ok && prev.(string) == hash {
 		utils.DebugLog("stream_names: %s index unchanged (%d entries); skipping write", source, len(names))
 		return
@@ -113,7 +125,7 @@ func (c *Config) persistStreamNamesAsync(names map[string]string, epgIDs map[str
 	}
 	go func() {
 		defer persistInFlight.Delete(source)
-		if err := c.db.UpsertStreamNames(names, epgIDs, source); err != nil {
+		if err := c.db.UpsertStreamNames(names, epgIDs, categories, source); err != nil {
 			utils.WarnLog("stream_names: failed to persist %s channel index: %v", source, err)
 			return
 		}
@@ -123,8 +135,9 @@ func (c *Config) persistStreamNamesAsync(names map[string]string, epgIDs map[str
 	}()
 }
 
-// updateAPIChannelIndex replaces the API-sourced name index with id→name pairs and optional EPG IDs.
-func (c *Config) updateAPIChannelIndex(names map[string]string, epgIDs map[string]string) {
+// updateAPIChannelIndex replaces the API-sourced name index with id→name
+// pairs, optional EPG IDs, and optional categories.
+func (c *Config) updateAPIChannelIndex(names map[string]string, epgIDs map[string]string, categories map[string]string) {
 	if len(names) == 0 {
 		return
 	}
@@ -138,7 +151,7 @@ func (c *Config) updateAPIChannelIndex(names map[string]string, epgIDs map[strin
 		epgIndexMu.Unlock()
 	}
 
-	c.persistStreamNamesAsync(names, epgIDs, "api")
+	c.persistStreamNamesAsync(names, epgIDs, categories, "api")
 }
 
 // lookupEPGChannelID returns the EPG channel ID (tvg-id) for a normalized stream ID.
@@ -160,6 +173,28 @@ func lookupAPIChannelName(normalizedID string) (string, bool) {
 		return "", false
 	}
 	name, ok := apiChannelIndex[normalizedID]
+	return name, ok
+}
+
+// updateCategoryNameIndex replaces the category id→name index, harvested
+// once at startup (see warmCategoryNameIndex).
+func updateCategoryNameIndex(names map[string]string) {
+	if len(names) == 0 {
+		return
+	}
+	categoryNameIndexMu.Lock()
+	categoryNameIndex = names
+	categoryNameIndexMu.Unlock()
+}
+
+// lookupCategoryName returns the human-readable name for a live-stream category_id.
+func lookupCategoryName(categoryID string) (string, bool) {
+	categoryNameIndexMu.RLock()
+	defer categoryNameIndexMu.RUnlock()
+	if categoryNameIndex == nil {
+		return "", false
+	}
+	name, ok := categoryNameIndex[categoryID]
 	return name, ok
 }
 
@@ -250,7 +285,7 @@ func (c *Config) ensureChannelIndex() {
 	// Write to DB off this goroutine (best-effort, non-fatal). ensureChannelIndex
 	// runs under the channelIndex write lock and is reached from name lookups on
 	// hot paths, so the write must not block it.
-	c.persistStreamNamesAsync(newIndex, newEPGIndex, "m3u")
+	c.persistStreamNamesAsync(newIndex, newEPGIndex, nil, "m3u")
 
 	channelIndex = newIndex
 	channelIndexPath = m3uPath

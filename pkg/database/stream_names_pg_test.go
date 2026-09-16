@@ -58,7 +58,7 @@ func TestUpsertStreamNamesBatchLarge(t *testing.T) {
 	}
 
 	start := time.Now()
-	if err := m.UpsertStreamNames(names, epg, "api"); err != nil {
+	if err := m.UpsertStreamNames(names, epg, nil, "api"); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 	elapsed := time.Since(start)
@@ -96,10 +96,10 @@ func TestUpsertStreamNamesBatchLarge(t *testing.T) {
 // rather than erroring or duplicating.
 func TestUpsertStreamNamesConflictUpdates(t *testing.T) {
 	m := testDB(t)
-	if err := m.UpsertStreamNames(map[string]string{"1": "Old"}, map[string]string{"1": "old.tv"}, "api"); err != nil {
+	if err := m.UpsertStreamNames(map[string]string{"1": "Old"}, map[string]string{"1": "old.tv"}, nil, "api"); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.UpsertStreamNames(map[string]string{"1": "New"}, map[string]string{"1": "new.tv"}, "api"); err != nil {
+	if err := m.UpsertStreamNames(map[string]string{"1": "New"}, map[string]string{"1": "new.tv"}, nil, "api"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -127,7 +127,7 @@ func TestUpsertStreamNamesExactBatchBoundary(t *testing.T) {
 		for i := 0; i < n; i++ {
 			names[fmt.Sprintf("%d", i)] = fmt.Sprintf("C%d", i)
 		}
-		if err := m.UpsertStreamNames(names, nil, "m3u"); err != nil {
+		if err := m.UpsertStreamNames(names, nil, nil, "m3u"); err != nil {
 			t.Fatalf("n=%d: %v", n, err)
 		}
 		var count int
@@ -143,10 +143,10 @@ func TestUpsertStreamNamesExactBatchBoundary(t *testing.T) {
 // TestLoadStreamNamesRoundTrip verifies the read path still matches the write.
 func TestLoadStreamNamesRoundTrip(t *testing.T) {
 	m := testDB(t)
-	if err := m.UpsertStreamNames(map[string]string{"7": "Seven"}, map[string]string{"7": "seven.tv"}, "api"); err != nil {
+	if err := m.UpsertStreamNames(map[string]string{"7": "Seven"}, map[string]string{"7": "seven.tv"}, nil, "api"); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.UpsertStreamNames(map[string]string{"8": "Eight"}, nil, "m3u"); err != nil {
+	if err := m.UpsertStreamNames(map[string]string{"8": "Eight"}, nil, nil, "m3u"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -162,5 +162,66 @@ func TestLoadStreamNamesRoundTrip(t *testing.T) {
 	}
 	if epg["7"] != "seven.tv" {
 		t.Fatalf("epg index = %#v", epg)
+	}
+}
+
+// TestUpsertStreamNamesPersistsCategory guards the column this whole feature
+// depends on: a category with no way to be written back would silently
+// break the search picker's category label.
+func TestUpsertStreamNamesPersistsCategory(t *testing.T) {
+	m := testDB(t)
+	if err := m.UpsertStreamNames(
+		map[string]string{"1": "One"}, nil, map[string]string{"1": "News"}, "api",
+	); err != nil {
+		t.Fatal(err)
+	}
+	var category string
+	if err := m.db.QueryRow("SELECT category FROM stream_names WHERE stream_id='1'").Scan(&category); err != nil {
+		t.Fatal(err)
+	}
+	if category != "News" {
+		t.Fatalf("category = %q, want %q", category, "News")
+	}
+}
+
+// TestUpsertStreamNamesConflictUpdatesCategory is TestUpsertStreamNamesConflictUpdates'
+// sibling for the new column: a re-run must replace the category, not leave
+// a stale one from before a provider renamed it.
+func TestUpsertStreamNamesConflictUpdatesCategory(t *testing.T) {
+	m := testDB(t)
+	if err := m.UpsertStreamNames(
+		map[string]string{"1": "One"}, nil, map[string]string{"1": "News"}, "api",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.UpsertStreamNames(
+		map[string]string{"1": "One"}, nil, map[string]string{"1": "Sports"}, "api",
+	); err != nil {
+		t.Fatal(err)
+	}
+	var category string
+	if err := m.db.QueryRow("SELECT category FROM stream_names WHERE stream_id='1'").Scan(&category); err != nil {
+		t.Fatal(err)
+	}
+	if category != "Sports" {
+		t.Fatalf("category = %q, want %q (conflict update should replace it)", category, "Sports")
+	}
+}
+
+// TestUpsertStreamNamesMissingCategoryStoresEmpty mirrors the existing "odd
+// ids have no EPG id" spot-check in TestUpsertStreamNamesBatchLarge: a
+// channel harvested with no resolved category must store empty, not NULL or
+// an error.
+func TestUpsertStreamNamesMissingCategoryStoresEmpty(t *testing.T) {
+	m := testDB(t)
+	if err := m.UpsertStreamNames(map[string]string{"1": "One"}, nil, nil, "api"); err != nil {
+		t.Fatal(err)
+	}
+	var category string
+	if err := m.db.QueryRow("SELECT category FROM stream_names WHERE stream_id='1'").Scan(&category); err != nil {
+		t.Fatal(err)
+	}
+	if category != "" {
+		t.Fatalf("category = %q, want empty", category)
 	}
 }

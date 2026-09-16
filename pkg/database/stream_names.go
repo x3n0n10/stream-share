@@ -39,7 +39,8 @@ const upsertStreamNamesTimeout = 30 * time.Second
 
 const upsertStreamNamesSuffix = `
     ON CONFLICT (stream_id, source) DO UPDATE
-        SET name = EXCLUDED.name, epg_channel_id = EXCLUDED.epg_channel_id, updated_at = EXCLUDED.updated_at`
+        SET name = EXCLUDED.name, epg_channel_id = EXCLUDED.epg_channel_id,
+            category = EXCLUDED.category, updated_at = EXCLUDED.updated_at`
 
 // UpsertStreamName upserts a single stream name with an optional EPG channel ID.
 func (m *DBManager) UpsertStreamName(streamID, source, name, epgChannelID string) error {
@@ -47,17 +48,17 @@ func (m *DBManager) UpsertStreamName(streamID, source, name, epgChannelID string
 	if epgChannelID != "" {
 		epgIDs[streamID] = epgChannelID
 	}
-	return m.UpsertStreamNames(map[string]string{streamID: name}, epgIDs, source)
+	return m.UpsertStreamNames(map[string]string{streamID: name}, epgIDs, nil, source)
 }
 
-// UpsertStreamNames batch-upserts id→name pairs (and optional EPG channel IDs)
-// for the given source.
+// UpsertStreamNames batch-upserts id→name pairs (with optional EPG channel
+// IDs and categories) for the given source.
 //
 // Rows are written in multi-row batches rather than one statement per name: a
 // full channel list runs to thousands of entries, and a per-row loop meant
 // thousands of sequential round trips, which is slow enough to stall whatever
 // called it and to tie up a pooled connection for minutes.
-func (m *DBManager) UpsertStreamNames(names map[string]string, epgIDs map[string]string, source string) error {
+func (m *DBManager) UpsertStreamNames(names map[string]string, epgIDs map[string]string, categories map[string]string, source string) error {
 	if m == nil || m.db == nil || len(names) == 0 {
 		return nil
 	}
@@ -69,14 +70,18 @@ func (m *DBManager) UpsertStreamNames(names map[string]string, epgIDs map[string
 	started := now
 
 	// Flatten to a stable slice so batching is straightforward.
-	type row struct{ id, name, epgID string }
+	type row struct{ id, name, epgID, category string }
 	rows := make([]row, 0, len(names))
 	for id, name := range names {
 		epgID := ""
 		if epgIDs != nil {
 			epgID = epgIDs[id]
 		}
-		rows = append(rows, row{id: id, name: name, epgID: epgID})
+		category := ""
+		if categories != nil {
+			category = categories[id]
+		}
+		rows = append(rows, row{id: id, name: name, epgID: epgID, category: category})
 	}
 
 	for start := 0; start < len(rows); start += upsertBatchRows {
@@ -87,15 +92,15 @@ func (m *DBManager) UpsertStreamNames(names map[string]string, epgIDs map[string
 		batch := rows[start:end]
 
 		var sb strings.Builder
-		sb.WriteString("INSERT INTO stream_names (stream_id, source, name, epg_channel_id, updated_at) VALUES ")
-		args := make([]interface{}, 0, len(batch)*5)
+		sb.WriteString("INSERT INTO stream_names (stream_id, source, name, epg_channel_id, category, updated_at) VALUES ")
+		args := make([]interface{}, 0, len(batch)*6)
 		for i, r := range batch {
 			if i > 0 {
 				sb.WriteString(",")
 			}
-			n := i * 5
-			fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d)", n+1, n+2, n+3, n+4, n+5)
-			args = append(args, r.id, source, r.name, r.epgID, now)
+			n := i * 6
+			fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d,$%d)", n+1, n+2, n+3, n+4, n+5, n+6)
+			args = append(args, r.id, source, r.name, r.epgID, r.category, now)
 		}
 		sb.WriteString(upsertStreamNamesSuffix)
 

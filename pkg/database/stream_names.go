@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
 
@@ -146,4 +147,49 @@ func (m *DBManager) LoadStreamNames() (map[string]map[string]string, map[string]
 		}
 	}
 	return bySource, epgIndex, rows.Err()
+}
+
+// SearchStreamNames returns up to limit channels whose name matches query
+// (case-insensitive substring) or whose stream_id starts with it. The same
+// stream_id can be indexed from more than one source (api and m3u both run
+// their own harvest); a match is deduplicated to one row, preferring api
+// (the only source with a resolved category) over m3u over anything else —
+// same preference order as "API is authoritative" elsewhere in this file.
+//
+// An empty query or an uninitialized database return no rows rather than an
+// error: this backs a type-to-search picker in a wizard step that must never
+// surface a scary failure just because the index isn't warm yet.
+func (m *DBManager) SearchStreamNames(query string, limit int) ([]types.ChannelMatch, error) {
+	results := make([]types.ChannelMatch, 0)
+	query = strings.TrimSpace(query)
+	if m == nil || m.db == nil || query == "" {
+		return results, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rows, err := m.db.QueryContext(ctx, `
+		SELECT stream_id, name, category FROM (
+			SELECT DISTINCT ON (stream_id) stream_id, name, category
+			FROM stream_names
+			WHERE name ILIKE '%' || $1 || '%' OR stream_id LIKE $1 || '%'
+			ORDER BY stream_id, CASE source WHEN 'api' THEN 0 WHEN 'm3u' THEN 1 ELSE 2 END
+		) deduped
+		ORDER BY name
+		LIMIT $2`,
+		query, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var match types.ChannelMatch
+		if err := rows.Scan(&match.StreamID, &match.Name, &match.Category); err != nil {
+			return nil, err
+		}
+		results = append(results, match)
+	}
+	return results, rows.Err()
 }

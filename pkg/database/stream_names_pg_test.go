@@ -225,3 +225,98 @@ func TestUpsertStreamNamesMissingCategoryStoresEmpty(t *testing.T) {
 		t.Fatalf("category = %q, want empty", category)
 	}
 }
+
+// TestSearchStreamNamesMatchesNameOrID covers both ways an operator finds a
+// channel: typing a name fragment, or typing the id directly (e.g. pasting
+// one they already half-remember).
+func TestSearchStreamNamesMatchesNameOrID(t *testing.T) {
+	m := testDB(t)
+	if err := m.UpsertStreamNames(
+		map[string]string{"101": "BBC One", "102": "BBC Two", "200": "CNN"},
+		nil,
+		map[string]string{"101": "UK", "102": "UK", "200": "News"},
+		"api",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	byName, err := m.SearchStreamNames("bbc", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byName) != 2 {
+		t.Fatalf("got %d results for 'bbc', want 2: %+v", len(byName), byName)
+	}
+
+	byID, err := m.SearchStreamNames("101", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byID) != 1 || byID[0].StreamID != "101" || byID[0].Category != "UK" {
+		t.Fatalf("got %+v, want one match for stream_id 101 with category UK", byID)
+	}
+}
+
+// TestSearchStreamNamesEmptyQueryReturnsNothing guards against ever dumping
+// the full table — this backs a type-to-search picker, not a listing.
+func TestSearchStreamNamesEmptyQueryReturnsNothing(t *testing.T) {
+	m := testDB(t)
+	if err := m.UpsertStreamNames(map[string]string{"1": "One"}, nil, nil, "api"); err != nil {
+		t.Fatal(err)
+	}
+	results, err := m.SearchStreamNames("", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("got %d results for an empty query, want 0", len(results))
+	}
+}
+
+// TestSearchStreamNamesRespectsLimit is the regression test for a provider
+// with a huge lineup and a common query term.
+func TestSearchStreamNamesRespectsLimit(t *testing.T) {
+	m := testDB(t)
+	names := make(map[string]string, 30)
+	for i := 0; i < 30; i++ {
+		names[fmt.Sprintf("%d", i)] = fmt.Sprintf("Sports %d", i)
+	}
+	if err := m.UpsertStreamNames(names, nil, nil, "api"); err != nil {
+		t.Fatal(err)
+	}
+	results, err := m.SearchStreamNames("sports", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 10 {
+		t.Fatalf("got %d results, want the limit of 10", len(results))
+	}
+}
+
+// TestSearchStreamNamesDedupesAcrossSources: the same stream_id can be
+// indexed from more than one source (api and m3u both run their own
+// harvest). A search must not show the same channel twice, and must prefer
+// the api-sourced row — the one with a category, since only the api harvest
+// resolves one.
+func TestSearchStreamNamesDedupesAcrossSources(t *testing.T) {
+	m := testDB(t)
+	if err := m.UpsertStreamNames(map[string]string{"1": "BBC One (m3u)"}, nil, nil, "m3u"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.UpsertStreamNames(
+		map[string]string{"1": "BBC One"}, nil, map[string]string{"1": "UK"}, "api",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := m.SearchStreamNames("bbc", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1 (deduped): %+v", len(results), results)
+	}
+	if results[0].Name != "BBC One" || results[0].Category != "UK" {
+		t.Fatalf("got %+v, want the api-sourced row (name=%q category=%q)", results[0], "BBC One", "UK")
+	}
+}

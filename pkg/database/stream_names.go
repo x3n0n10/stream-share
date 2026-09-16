@@ -38,10 +38,16 @@ const upsertBatchRows = 500
 // cannot pin a connection indefinitely.
 const upsertStreamNamesTimeout = 30 * time.Second
 
+// category uses CASE WHEN rather than a plain overwrite: resolveCategoryName
+// (pkg/server/xtream_handlers_api.go) returns "" whenever the in-memory
+// category index is cold, and a plain EXCLUDED.category would wipe a
+// previously-persisted category on every such harvest. name/epg_channel_id
+// still overwrite unconditionally — a channel rename should always win.
 const upsertStreamNamesSuffix = `
     ON CONFLICT (stream_id, source) DO UPDATE
         SET name = EXCLUDED.name, epg_channel_id = EXCLUDED.epg_channel_id,
-            category = EXCLUDED.category, updated_at = EXCLUDED.updated_at`
+            category = CASE WHEN EXCLUDED.category = '' THEN stream_names.category ELSE EXCLUDED.category END,
+            updated_at = EXCLUDED.updated_at`
 
 // UpsertStreamName upserts a single stream name with an optional EPG channel ID.
 func (m *DBManager) UpsertStreamName(streamID, source, name, epgChannelID string) error {
@@ -149,6 +155,14 @@ func (m *DBManager) LoadStreamNames() (map[string]map[string]string, map[string]
 	return bySource, epgIndex, rows.Err()
 }
 
+// escapeLikePattern escapes LIKE/ILIKE metacharacters (and the escape
+// character itself) in s so it can be safely embedded as a literal substring
+// in a pattern built with ESCAPE '\'. Without this, a query of e.g. "%" or
+// "_" would match every row instead of being searched for literally.
+func escapeLikePattern(s string) string {
+	return strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(s)
+}
+
 // SearchStreamNames returns up to limit channels whose name matches query
 // (case-insensitive substring) or whose stream_id starts with it. The same
 // stream_id can be indexed from more than one source (api and m3u both run
@@ -169,16 +183,21 @@ func (m *DBManager) SearchStreamNames(query string, limit int) ([]types.ChannelM
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	escaped := escapeLikePattern(query)
+
+	// Leading-wildcard ILIKE is a sequential scan — measured ~67ms worst case
+	// at 40k rows, fine at today's scale. Add a trigram index (pg_trgm) on
+	// name if stream_names grows past roughly 10x that.
 	rows, err := m.db.QueryContext(ctx, `
 		SELECT stream_id, name, category FROM (
 			SELECT DISTINCT ON (stream_id) stream_id, name, category
 			FROM stream_names
-			WHERE name ILIKE '%' || $1 || '%' OR stream_id LIKE $1 || '%'
+			WHERE name ILIKE '%' || $1 || '%' ESCAPE '\' OR stream_id LIKE $1 || '%' ESCAPE '\'
 			ORDER BY stream_id, CASE source WHEN 'api' THEN 0 WHEN 'm3u' THEN 1 ELSE 2 END
 		) deduped
 		ORDER BY name
 		LIMIT $2`,
-		query, limit,
+		escaped, limit,
 	)
 	if err != nil {
 		return nil, err

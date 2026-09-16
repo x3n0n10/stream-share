@@ -953,6 +953,10 @@ func (c *Config) refreshAPIChannelIndex() {
 		utils.WarnLog("stream_names refresh: failed to create Xtream client: %v", err)
 		return
 	}
+	// Give a cold or never-warmed category index another chance every refresh
+	// cycle, not just at process startup — otherwise a single get_live_categories
+	// failure at boot leaves categories empty for the process's whole lifetime.
+	c.warmCategoryNameIndex(client)
 	resp, _, _, err := client.Action(c.ProxyConfig, "get_live_streams", nil)
 	if err != nil {
 		utils.WarnLog("stream_names refresh: get_live_streams failed: %v", err)

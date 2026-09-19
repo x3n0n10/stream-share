@@ -33,8 +33,9 @@ import (
 // real SessionManager (nil DB), so tests can inspect which identity got
 // registered.
 type pathAuthRig struct {
-	router *gin.Engine
-	sm     *session.SessionManager
+	router      *gin.Engine
+	sm          *session.SessionManager
+	ctxUsername string
 }
 
 func newPathAuthRig(t *testing.T, pc *config.ProxyConfig) *pathAuthRig {
@@ -46,10 +47,13 @@ func newPathAuthRig(t *testing.T, pc *config.ProxyConfig) *pathAuthRig {
 
 	c := &Config{ProxyConfig: pc, sessionManager: sm}
 	router := gin.New()
+	rig := &pathAuthRig{sm: sm}
 	router.GET("/live/:username/:password/:id", c.authWithPathCredentials(), func(ctx *gin.Context) {
+		rig.ctxUsername = ctx.GetString("username")
 		ctx.Status(http.StatusOK)
 	})
-	return &pathAuthRig{router: router, sm: sm}
+	rig.router = router
+	return rig
 }
 
 // get performs GET /live/<user>/<pass>/1 as though it came from remoteIP and
@@ -100,6 +104,10 @@ func TestPathCredentialsIdentityIsClientIPWhenLDAPDisabled(t *testing.T) {
 	if _, shared := got["custom-login"]; shared {
 		t.Errorf("custom login must not be a session key, got %v", got)
 	}
+
+	if rig.ctxUsername != "198.51.100.2" {
+		t.Errorf("ctxUsername = %q, want %q", rig.ctxUsername, "198.51.100.2")
+	}
 }
 
 func TestPathCredentialsBadPasswordRegistersNoSession(t *testing.T) {
@@ -140,5 +148,9 @@ func TestPathCredentialsIdentityIsLDAPUsernameWhenLDAPEnabled(t *testing.T) {
 	got := rig.sessionIPs()
 	if len(got) != 1 || got["carol"] != "198.51.100.9" {
 		t.Errorf("sessions = %v, want {carol: 198.51.100.9}", got)
+	}
+
+	if rig.ctxUsername != "carol" {
+		t.Errorf("ctxUsername = %q, want %q", rig.ctxUsername, "carol")
 	}
 }

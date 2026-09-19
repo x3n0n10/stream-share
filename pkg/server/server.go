@@ -554,14 +554,23 @@ func (c *Config) authWithPathCredentials() gin.HandlerFunc {
 			return
 		}
 
-		// Register or update the user session and set username in context for later logs
+		// Track the viewer by client IP unless LDAP is on: a shared local login
+		// would otherwise collapse every device into one session/history
+		// identity, and IP aliases could never apply. Matches the provider-
+		// credentials routes, where resolveRequestUsername falls back to the IP.
+		identity := username
+		if !c.LDAPEnabled {
+			identity = ip
+		}
+
+		// Register or update the user session and set identity in context for later logs
 		if c.sessionManager == nil {
 			utils.ErrorLog("authWithPathCredentials: sessionManager is NIL - cannot register user session")
 		} else {
-			c.sessionManager.RegisterUser(username, ip, userAgent)
+			c.sessionManager.RegisterUser(identity, ip, userAgent)
 			utils.InfoLog("authWithPathCredentials: session registered for user=%s ip=%s", username, ip)
 		}
-		ctx.Set("username", username)
+		ctx.Set("username", identity)
 
 		ctx.Next()
 	}

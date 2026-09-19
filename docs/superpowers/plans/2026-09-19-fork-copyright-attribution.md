@@ -17,7 +17,7 @@ Copied from the spec ([2026-09-19-fork-copyright-attribution-design.md](../specs
 - File rules: `added` + Lucas header → replace the holder line; `added` + no header → prepend the standard GPL header with `x3n0n10`; `modified` + Lucas header → keep Lucas's line and add `x3n0n10` on the next line; `modified` + no header → leave alone.
 - Only `*.go` files outside `vendor/` with status `added` or `modified` are in scope.
 - Go module path `github.com/lucasduport/stream-share` stays unchanged. `LICENSE`, `vendor/`, and `docs/` are not edited.
-- README: fork line is `Fork of [lucasduport/stream-share](https://github.com/lucasduport/stream-share), maintained by [x3n0n10](https://github.com/x3n0n10).`, as its own paragraph directly after the intro paragraph at `README.md:7`. PayPal target `https://www.paypal.me/lucasdup135` becomes `https://paypal.me/x3n0n10`. Existing credits to `jtdevops/iptv-proxy` and `pierre-emmanuelJ/iptv-proxy` stay.
+- README: fork line is `Fork of [lucasduport/stream-share](https://github.com/lucasduport/stream-share), maintained by [x3n0n10](https://github.com/x3n0n10).`, as its own paragraph directly after the intro paragraph at `README.md:7`. PayPal target `https://www.paypal.me/lucasdup135` becomes `https://www.paypal.com/donate/?hosted_button_id=7EL3L7PAWZCVW`. Existing credits to `jtdevops/iptv-proxy` and `pierre-emmanuelJ/iptv-proxy` stay.
 - Commit trailer on every commit: `Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>`.
 
 Work happens in the worktree `/Users/jorislankhorst/Source/stream-share-wt-copyright` on branch `claude/copyright-fork-attribution`. Run all commands from that directory. Commit author is already the noreply address (`20641331+x3n0n10@users.noreply.github.com`); do not change git config.
@@ -190,7 +190,7 @@ Insert a new paragraph directly after line 7 (blank line before and after it):
 Fork of [lucasduport/stream-share](https://github.com/lucasduport/stream-share), maintained by [x3n0n10](https://github.com/x3n0n10).
 ```
 
-In the same file, change only the link target `https://www.paypal.me/lucasdup135` to `https://paypal.me/x3n0n10`. The badge image URL (`paypalobjects.com/...`) and the text around it stay.
+In the same file, change only the link target `https://www.paypal.me/lucasdup135` to `https://www.paypal.com/donate/?hosted_button_id=7EL3L7PAWZCVW`. The badge image URL (`paypalobjects.com/...`) and the text around it stay.
 
 - [ ] **Step 3: Verify**
 

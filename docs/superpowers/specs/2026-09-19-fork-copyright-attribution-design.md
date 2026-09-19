@@ -69,7 +69,7 @@ added), 1 modified without a header (untouched). The GPL body text and the
 
 - Add a new paragraph directly after the intro paragraph (`README.md:7`): `Fork of [lucasduport/stream-share](https://github.com/lucasduport/stream-share), maintained by [x3n0n10](https://github.com/x3n0n10).`
 - Replace the PayPal link target `https://www.paypal.me/lucasdup135` with
-  `https://paypal.me/x3n0n10`. The badge image and surrounding text stay.
+  `https://www.paypal.com/donate/?hosted_button_id=7EL3L7PAWZCVW`. The badge image and surrounding text stay.
 - Existing credits to `jtdevops/iptv-proxy` and `pierre-emmanuelJ/iptv-proxy`
   stay as they are.
 

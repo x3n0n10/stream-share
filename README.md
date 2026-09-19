@@ -6,6 +6,8 @@
 
 StreamShare is a comprehensive IPTV management solution that allows secure sharing of a single IPTV provider account with multiple users. Built upon the foundations of [jtdevops/iptv-proxy](https://github.com/jtdevops/iptv-proxy) and [pierre-emmanuelJ/iptv-proxy](https://github.com/pierre-emmanuelJ/iptv-proxy), this project has evolved far beyond a simple proxy to become a full-featured platform with authentication, stream multiplexing, and media management capabilities.
 
+Fork of [lucasduport/stream-share](https://github.com/lucasduport/stream-share), maintained by [x3n0n10](https://github.com/x3n0n10).
+
 ### Key Features
 
 - **Stream Multiplexing** - Share a single IPTV subscription with multiple users simultaneously
@@ -575,5 +577,5 @@ PostgreSQL is required for state persistence. Configure with:
 
 If you find StreamShare useful, consider supporting its development:
 
-[![paypal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.me/lucasdup135)
+[![paypal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/donate/?hosted_button_id=7EL3L7PAWZCVW)
 

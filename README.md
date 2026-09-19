@@ -197,7 +197,7 @@ Everything above is machine-readable JSON (`{success, data, error}`) and is enou
 
 #### Viewer identity and IP aliases
 
-Every place a viewer shows up — `streams`/`status`'s `viewers` list, `users`, and `history`'s `username` field — is keyed by whatever `resolveRequestUsername` resolved for that request. With LDAP enabled that's the LDAP username; with LDAP disabled, the native Xtream streaming routes carry no per-request credentials, so **the client's raw IP address becomes the de-facto viewer identity** instead.
+Every place a viewer shows up — `streams`/`status`'s `viewers` list, `users`, and `history`'s `username` field — is keyed by whatever `resolveRequestUsername` resolved for that request. With LDAP enabled that's the LDAP username; with LDAP disabled, viewers on every streaming route (provider-credential and custom-credential alike) are identified by **the client's raw IP address** instead, and that is what IP aliases attach to.
 
 Rather than showing bare IPs in a dashboard, assign each one a friendly name:
 

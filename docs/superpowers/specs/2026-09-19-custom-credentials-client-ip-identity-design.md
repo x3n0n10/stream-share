@@ -27,6 +27,12 @@ using the custom login therefore shares one identity:
 - `displayNameFor` only resolves aliases for IP-shaped identifiers, so custom
   logins can never be aliased per device.
 
+With a shared identity, `RequestStream` ([manager.go](../../../pkg/session/manager.go))
+treats a second device using the same login as the same client, so it closes
+the first device's client channel and stops its stream when it switches
+channel. Two devices on the custom login could not watch simultaneously;
+per-IP identity fixes that.
+
 `authenticate` and `appAuthenticate` (player_api/get.php/xmltv) do not
 register sessions, so they are unaffected.
 
@@ -86,6 +92,16 @@ otherwise recorded.
   path today.
 - Existing history rows keep the old login-name `username` next to the
   new IP-keyed rows. Anything grouping history by `username` sees both.
+- With no LDAP, `RegisterUser` looks up `GetDiscordByLDAPUser(identity)`, so a
+  Discord mapping made against the shared login no longer attaches to the
+  session; `DiscordID`/`DiscordName` stay empty (as on the provider-credentials
+  path).
+- `/disconnect` and `/timeout` (`handlers_users.go`) act on the identity
+  verbatim, so admins must now target the client IP; `/disconnect <custom-login>`
+  becomes a no-op.
+- `createVODDownload`'s "user is watching live" guard (`handlers_vod.go`) looks
+  up a session by the Discord-linked name and stops matching for LDAP-off
+  viewers, as it already does on the provider-credentials path.
 
 ## Testing
 

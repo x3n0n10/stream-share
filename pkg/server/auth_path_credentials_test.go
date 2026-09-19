@@ -29,9 +29,9 @@ import (
 	"github.com/lucasduport/stream-share/pkg/session"
 )
 
-// pathAuthRig wires authWithPathCredentials in front of a no-op handler with a
-// real SessionManager (nil DB), so tests can inspect which identity got
-// registered.
+// pathAuthRig wires authWithPathCredentials in front of a handler that records
+// ctx.GetString("username") into ctxUsername, with a real SessionManager
+// (nil DB), so tests can inspect which identity got registered.
 type pathAuthRig struct {
 	router      *gin.Engine
 	sm          *session.SessionManager

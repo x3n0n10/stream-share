@@ -14,8 +14,12 @@ RUN go mod download  # Validates dependencies
 # Copy source code
 COPY . .
 
+# Stamped into the binary so GET /api/internal/version can report it; a plain
+# build reports "dev".
+ARG VERSION=dev
+
 # Build static binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o stream-share .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X github.com/lucasduport/stream-share/pkg/version.Version=${VERSION}" -o stream-share .
 
 # Runtime stage
 FROM alpine:3.19

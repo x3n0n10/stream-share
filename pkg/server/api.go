@@ -108,6 +108,10 @@ func (c *Config) setupInternalAPI(r *gin.Engine) {
 	api.GET("/instance", c.getInstanceInfo)
 	api.GET("/stats", c.getDashboardStats)
 
+	// The release this instance was built from, for dashboards that show what
+	// each managed instance is running
+	api.GET("/version", c.getVersion)
+
 	// Upstream provider subscription state (expiry, connection limit/usage),
 	// read from the provider's own login response and served from cache
 	api.GET("/provider", c.getProviderInfo)

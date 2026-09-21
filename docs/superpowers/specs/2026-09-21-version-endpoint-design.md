@@ -84,9 +84,11 @@ Go tests in the existing style (call the handler with a gin test context, as
   `data.version` equal to `version.Version`, with `version.Version` overridden
   to a known value for the test and restored afterwards.
 - Route placement is checked by reading the registration in `setupInternalAPI`
-  during review (it sits inside the group that applies `apiKeyAuth`); the
-  middleware itself is already covered by the existing auth tests and is not
-  re-tested here.
+  during review (it sits inside the group that applies `apiKeyAuth`). No test
+  in the repository currently exercises the internal-API auth boundary, so this
+  placement is review-verified rather than test-covered; a router-level test
+  asserting 401 without a key would protect every internal route and is a
+  worthwhile separate change, not part of this one.
 
 Verification also includes `go vet ./...`, `go test -mod vendor ./...` and
 `go build -mod vendor` (what CI runs). The stamping itself is checked locally by

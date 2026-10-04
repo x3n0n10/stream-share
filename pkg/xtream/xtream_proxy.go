@@ -49,6 +49,9 @@ const (
 	getSimpleDataTable  = "get_simple_data_table"
 )
 
+// xmltvTimeout bounds a whole XMLTV download (connect, headers and body).
+const xmltvTimeout = 2 * time.Minute
+
 // Client represents an Xtream API client
 type Client struct {
 	Username    string
@@ -189,15 +192,19 @@ func (c *Client) GetXMLTV() ([]byte, error) {
 	u.RawQuery = params.Encode()
 	utils.DebugLog("XMLTV request: %s", u.String())
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// The shared client's 10s Timeout also covers reading the body, which is too
+	// short for a large EPG; use a copy without it and bound the call via ctx.
+	ctx, cancel := context.WithTimeout(context.Background(), xmltvTimeout)
 	defer cancel()
+	httpClient := *c.Client
+	httpClient.Timeout = 0
 	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
 	if err != nil {
 		return nil, utils.PrintErrorAndReturn(err)
 	}
 	req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
 	req.Header.Set("Accept", "application/xml, text/xml")
-	resp, err := c.Client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, utils.PrintErrorAndReturn(err)
 	}

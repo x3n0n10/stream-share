@@ -26,27 +26,23 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// rewriteXMLTVIcons rewrites the src attribute of every <icon> element in
-// an XMLTV document — legal on both <channel> and <programme> per the
-// XMLTV DTD, so no distinction is made between them — to point through
-// this proxy instead of the upstream provider. Implemented as a token-
-// stream copy so entity-escaped characters and untouched document
-// structure round-trip correctly; <url> elements are a separate tag and
-// are left untouched. Falls back to the original bytes unchanged if the
-// document fails to decode, so a non-XML upstream error body doesn't
-// error the whole EPG response.
-func (c *Config) rewriteXMLTVIcons(ctx *gin.Context, body []byte) []byte {
-	dec := xml.NewDecoder(bytes.NewReader(body))
-	var out bytes.Buffer
-	enc := xml.NewEncoder(&out)
-
+// rewriteXMLTVIconsTo copies an XMLTV document from r to w, rewriting the src
+// attribute of every <icon> element — legal on both <channel> and <programme>
+// per the XMLTV DTD, so no distinction is made between them — to point through
+// this proxy instead of the upstream provider. Implemented as a token-stream
+// copy, so memory stays at one element whatever the guide's size, and entity-
+// escaped characters and untouched document structure round-trip correctly;
+// <url> elements are a separate tag and are left untouched.
+func (c *Config) rewriteXMLTVIconsTo(ctx *gin.Context, r io.Reader, w io.Writer) error {
+	dec := xml.NewDecoder(r)
+	enc := xml.NewEncoder(w)
 	for {
 		tok, err := dec.Token()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return body
+			return err
 		}
 		if se, ok := tok.(xml.StartElement); ok && se.Name.Local == "icon" {
 			for i, attr := range se.Attr {
@@ -57,10 +53,18 @@ func (c *Config) rewriteXMLTVIcons(ctx *gin.Context, body []byte) []byte {
 			tok = se
 		}
 		if err := enc.EncodeToken(tok); err != nil {
-			return body
+			return err
 		}
 	}
-	if err := enc.Flush(); err != nil {
+	return enc.Flush()
+}
+
+// rewriteXMLTVIcons is the in-memory form of rewriteXMLTVIconsTo. It falls back
+// to the original bytes unchanged if the document fails to decode, so a
+// non-XML upstream error body doesn't error the whole EPG response.
+func (c *Config) rewriteXMLTVIcons(ctx *gin.Context, body []byte) []byte {
+	var out bytes.Buffer
+	if err := c.rewriteXMLTVIconsTo(ctx, bytes.NewReader(body), &out); err != nil {
 		return body
 	}
 	return out.Bytes()

@@ -19,14 +19,14 @@
 package server
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -39,8 +39,6 @@ import (
 	"github.com/lucasduport/stream-share/pkg/utils"
 	xtreamapi "github.com/lucasduport/stream-share/pkg/xtream"
 )
-
-var vodM3UMu sync.Mutex
 
 // lightweight in-memory cache for probed sizes to avoid re-hitting upstream on every search
 var (
@@ -129,6 +127,8 @@ func (c *Config) searchXtreamVOD(query string) ([]types.VODResult, error) {
 }
 
 // searchXtreamMovies queries the Xtream API for VOD movies and filters by tokens.
+// The full get_vod_streams catalog is cached (parsed) so repeated searches do
+// not re-download and re-decode the multi-tens-of-MB JSON body per query.
 func (c *Config) searchXtreamMovies(query string) ([]types.VODResult, error) {
 	q := strings.TrimSpace(query)
 	if q == "" {
@@ -136,13 +136,10 @@ func (c *Config) searchXtreamMovies(query string) ([]types.VODResult, error) {
 	}
 	tokens, _, _ := parseQueryTokens(q) // season/episode tokens ignored for movies
 	utils.DebugLog("Movies search: using Xtream client (baseURL=%s, user=%s)", c.XtreamBaseURL, utils.MaskString(c.XtreamUser.String()))
-	cli, err := xtreamapi.New(c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL, utils.GetIPTVUserAgent())
+
+	resp, err := c.getCachedVODCatalog()
 	if err != nil {
-		return nil, err
-	}
-	resp, httpcode, contentType, err := cli.Action(c.ProxyConfig, "get_vod_streams", url.Values{})
-	if err != nil {
-		utils.WarnLog("Movies search: get_vod_streams failed (HTTP %d, CT=%s): %v", httpcode, contentType, err)
+		utils.WarnLog("Movies search: get_vod_streams failed: %v", err)
 		return nil, err
 	}
 	arr, ok := resp.([]interface{})
@@ -252,59 +249,149 @@ func isRicher(a, b types.VODResult) bool {
 	return false
 }
 
+// errVODM3UNotReady is returned while the VOD M3U has never been downloaded
+// and the first download is still running in the background.
+var errVODM3UNotReady = errors.New("VOD M3U not downloaded yet")
+
+// vodM3UFailBackoff is how long a failed VOD M3U download is remembered before
+// a lookup may start another one; on slow providers each attempt is minutes of
+// bandwidth, so failures must not turn into a retry loop.
+const vodM3UFailBackoff = 5 * time.Minute
+
+// vodM3UStallTimeout aborts a VOD M3U download that has received no bytes for
+// this long. There is deliberately no overall deadline: a 400+ MB catalogue
+// from a slow provider can legitimately take many minutes while still making
+// progress.
+const vodM3UStallTimeout = 60 * time.Second
+
+// vodM3UFetch is one in-flight VOD M3U download; done closes when it ends.
+type vodM3UFetch struct {
+	done chan struct{}
+	err  error
+}
+
+var (
+	vodM3UMu       sync.Mutex
+	vodM3UInFlight *vodM3UFetch // nil when no download is running
+	vodM3ULastErr  error
+	vodM3UFailedAt time.Time
+)
+
+// vodM3UClient has no overall timeout (see vodM3UStallTimeout). Providers can
+// take minutes to start answering for a big catalogue, hence the long header
+// timeout. Compression is left on so providers that gzip the playlist send
+// roughly a tenth of the bytes.
+var vodM3UClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		ResponseHeaderTimeout: 3 * time.Minute,
+		IdleConnTimeout:       90 * time.Second,
+	},
+}
+
+func vodM3UCachePath() string {
+	return filepath.Join(utils.VODCacheDir(), "vod_cache.m3u")
+}
+
+// ensureVODM3UCache returns the path of the cached VOD M3U without ever
+// waiting on the provider: a stale file is served as-is while a single
+// background download refreshes it, and a missing file yields
+// errVODM3UNotReady while the first download runs. Request paths call this,
+// so they degrade to defaults instead of blocking on a multi-minute download.
+// Background work that needs the catalogue should use waitVODM3UCache.
 func (c *Config) ensureVODM3UCache() (string, error) {
-	vodM3UMu.Lock()
-	defer vodM3UMu.Unlock()
-
-	// VOD M3U index lives alongside the cached VOD media files.
-	cacheDir := utils.VODCacheDir()
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
-		return "", err
-	}
-
-	cacheFile := filepath.Join(cacheDir, "vod_cache.m3u")
-
-	// Check freshness vs. configured M3U cache expiration (hours)
-	expHours := c.M3UCacheExpiration
+	cacheFile := vodM3UCachePath()
 	info, err := os.Stat(cacheFile)
-	if err == nil {
-		age := time.Since(info.ModTime())
-		if age.Hours() < float64(expHours) {
-			utils.DebugLog("Using cached VOD M3U: %s (age: %v)", cacheFile, age)
-			return cacheFile, nil
-		}
-		// If expired but present, return stale file immediately and refresh in background to avoid blocking
-		stalePath := cacheFile
-		go func() {
-			// best-effort refresh
-			if err := c.refreshVODM3U(stalePath); err != nil {
-				utils.WarnLog("Failed background VOD M3U refresh: %v", err)
-			}
-		}()
-		utils.DebugLog("Using stale VOD M3U while refreshing in background: %s (age: %v)", cacheFile, age)
-		return stalePath, nil
+	if err != nil {
+		c.startVODM3URefresh()
+		return "", errVODM3UNotReady
 	}
-
-	// No cache present: fetch synchronously
-	if err := c.refreshVODM3U(cacheFile); err != nil {
-		return "", err
+	if age := time.Since(info.ModTime()); age.Hours() >= float64(c.M3UCacheExpiration) {
+		if c.startVODM3URefresh() != nil {
+			utils.DebugLog("Using stale VOD M3U while refreshing in background: %s (age: %v)", cacheFile, age)
+		}
 	}
 	return cacheFile, nil
 }
 
-// refreshVODM3U downloads the VOD M3U into cacheFile path.
+// vodM3UCached reports whether a VOD M3U has been downloaded at least once.
+func vodM3UCached() bool {
+	_, err := os.Stat(vodM3UCachePath())
+	return err == nil
+}
+
+// waitVODM3UCache is ensureVODM3UCache for background work: when no cached
+// file exists yet it waits for the in-flight download instead of failing.
+func (c *Config) waitVODM3UCache() (string, error) {
+	if p, err := c.ensureVODM3UCache(); err == nil {
+		return p, nil
+	}
+	f := c.startVODM3URefresh()
+	if f == nil {
+		vodM3UMu.Lock()
+		defer vodM3UMu.Unlock()
+		return "", fmt.Errorf("%w (last attempt: %v)", errVODM3UNotReady, vodM3ULastErr)
+	}
+	<-f.done
+	if f.err != nil {
+		return "", f.err
+	}
+	return vodM3UCachePath(), nil
+}
+
+// startVODM3URefresh starts a background VOD M3U download unless one is
+// already running, in which case that one is returned, so concurrent callers
+// share a single provider download. Returns nil while a recent failure is in
+// backoff.
+func (c *Config) startVODM3URefresh() *vodM3UFetch {
+	if c.XtreamBaseURL == "" {
+		return nil // plain M3U deployment: there is no VOD catalogue to fetch
+	}
+	vodM3UMu.Lock()
+	defer vodM3UMu.Unlock()
+	if vodM3UInFlight != nil {
+		return vodM3UInFlight
+	}
+	if vodM3ULastErr != nil && time.Since(vodM3UFailedAt) < vodM3UFailBackoff {
+		return nil
+	}
+	f := &vodM3UFetch{done: make(chan struct{})}
+	vodM3UInFlight = f
+	go func() {
+		f.err = c.refreshVODM3U(vodM3UCachePath())
+		vodM3UMu.Lock()
+		vodM3UInFlight = nil
+		vodM3ULastErr = f.err
+		if f.err != nil {
+			vodM3UFailedAt = time.Now()
+			utils.WarnLog("VOD M3U download failed (next attempt in %v): %v", vodM3UFailBackoff, f.err)
+		}
+		vodM3UMu.Unlock()
+		close(f.done)
+	}()
+	return f
+}
+
+// refreshVODM3U downloads the VOD M3U into cacheFile. The body goes to a
+// sibling .part file renamed into place only once complete, so an aborted
+// download never replaces a good cache with a truncated one.
 func (c *Config) refreshVODM3U(cacheFile string) error {
+	if err := os.MkdirAll(filepath.Dir(cacheFile), 0o755); err != nil {
+		return err
+	}
 	getURL := fmt.Sprintf("%s/get.php?username=%s&password=%s&type=m3u_plus&output=m3u8",
 		c.XtreamBaseURL, c.XtreamUser.String(), c.XtreamPassword.String())
 	utils.InfoLog("Refreshing VOD M3U from Xtream: %s", utils.MaskURL(getURL))
-	req, err := http.NewRequest("GET", getURL, nil)
+	start := time.Now()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", getURL, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
-	// Short timeout for refresh to avoid tying resources
-	client := &http.Client{Timeout: 6 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := vodM3UClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -312,62 +399,48 @@ func (c *Config) refreshVODM3U(cacheFile string) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("backend returned %d for M3U request", resp.StatusCode)
 	}
-	f, err := os.Create(cacheFile)
+
+	tmp := cacheFile + ".part"
+	f, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = f.Close() }()
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		return err
+	stall := time.AfterFunc(vodM3UStallTimeout, cancel)
+	defer stall.Stop()
+	n, err := io.Copy(f, &stallReader{r: resp.Body, timer: stall, idle: vodM3UStallTimeout})
+	if err == nil {
+		err = f.Close()
+	} else {
+		_ = f.Close()
 	}
-	utils.InfoLog("Stored VOD M3U to %s", cacheFile)
+	if err == nil && n == 0 {
+		err = errors.New("empty VOD M3U returned by Xtream backend")
+	}
+	if err == nil {
+		err = os.Rename(tmp, cacheFile)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("VOD M3U download aborted after %s (%v): %w", utils.HumanBytes(n), time.Since(start).Round(time.Second), err)
+	}
+	utils.InfoLog("Stored VOD M3U to %s (%s in %v)", cacheFile, utils.HumanBytes(n), time.Since(start).Round(time.Second))
 	return nil
 }
 
-// parseVODM3UExtensions scans the cached VOD M3U once and builds a map of streamID -> extension.
-func parseVODM3UExtensions(m3uPath string) (map[string]string, error) {
-	f, err := os.Open(m3uPath)
-	if err != nil {
-		return nil, err
+// stallReader re-arms timer on every read that returns data, so the timer
+// only fires (cancelling the request) when the body stalls for idle.
+type stallReader struct {
+	r     io.Reader
+	timer *time.Timer
+	idle  time.Duration
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if n > 0 {
+		s.timer.Reset(s.idle)
 	}
-	defer func() { _ = f.Close() }()
-	sc := bufio.NewScanner(f)
-	idx := make(map[string]string, 4096)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if !strings.HasPrefix(line, "http://") && !strings.HasPrefix(line, "https://") {
-			continue
-		}
-		u, err := url.Parse(line)
-		if err != nil {
-			continue
-		}
-		// Movie/series entries embed streamID possibly with extension as last path segment
-		last := path.Base(u.Path)
-		if last == "" {
-			continue
-		}
-		id := last
-		ext := path.Ext(last)
-		if ext != "" {
-			id = strings.TrimSuffix(last, ext)
-		}
-		if id == "" {
-			continue
-		}
-		if ext != "" {
-			if _, exists := idx[id]; !exists {
-				idx[id] = ext
-			}
-		}
-	}
-	if err := sc.Err(); err != nil {
-		return idx, err
-	}
-	return idx, nil
+	return n, err
 }
 
 // parseInt64 converts string to int64, ignoring commas/spaces
@@ -434,14 +507,16 @@ func allTokensIn(tokens []string, hay string) bool {
 	return true
 }
 
-// searchXtreamSeries searches series and flattens episodes matching the query
+// searchXtreamSeries searches series and flattens episodes matching the query.
+// The get_series catalog is cached (parsed) so repeated searches do not
+// re-download the full catalog; get_series_info calls for matching series are
+// issued with bounded parallelism instead of sequentially.
 func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 	q := strings.TrimSpace(query)
 	if q == "" {
 		return nil, nil
 	}
 	qTokens, qSeason, qEpisode := parseQueryTokens(q)
-	// Use resilient client to avoid FlexInt unmarshaling issues
 	utils.DebugLog("Series search: using resilient Xtream client (baseURL=%s, user=%s)", c.XtreamBaseURL, utils.MaskString(c.XtreamUser.String()))
 	cli, err := xtreamapi.New(c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL, utils.GetIPTVUserAgent())
 	if err != nil {
@@ -449,9 +524,9 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 		return nil, err
 	}
 
-	resp, httpcode, contentType, err := cli.Action(c.ProxyConfig, "get_series", url.Values{})
+	resp, err := c.getCachedSeriesCatalog()
 	if err != nil {
-		utils.WarnLog("Series search: get_series failed (HTTP %d, CT=%s): %v", httpcode, contentType, err)
+		utils.WarnLog("Series search: get_series failed: %v", err)
 		return nil, err
 	}
 
@@ -461,7 +536,15 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 		return nil, fmt.Errorf("unexpected get_series format: %T", resp)
 	}
 
-	out := make([]types.VODResult, 0, 50)
+	// First pass: collect matching series (name + id + metadata) without
+	// fetching series_info yet.
+	type seriesMatch struct {
+		name  string
+		id    string
+		genre string
+		year  string
+	}
+	matches := make([]seriesMatch, 0, 16)
 	for _, item := range arr {
 		m, ok := item.(map[string]interface{})
 		if !ok {
@@ -471,7 +554,6 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 		if seriesName == "" {
 			continue
 		}
-		// Only require non-season tokens to be in the series name
 		if !allTokensIn(qTokens, seriesName) {
 			continue
 		}
@@ -479,28 +561,67 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 		if seriesID == "" || seriesID == "<nil>" {
 			continue
 		}
-		genre := fmt.Sprintf("%v", m["genre"]) // may be empty
-		year := fmt.Sprintf("%v", firstNonEmpty(m["releaseDate"], m["release_date"]))
+		matches = append(matches, seriesMatch{
+			name:  seriesName,
+			id:    seriesID,
+			genre: fmt.Sprintf("%v", m["genre"]),
+			year:  fmt.Sprintf("%v", firstNonEmpty(m["releaseDate"], m["release_date"])),
+		})
+	}
 
-		utils.DebugLog("Series search: candidate '%s' (id=%s, genre=%s, year=%s)", seriesName, seriesID, genre, year)
-		utils.DebugLog("Series search: fetching series info for '%s' (series_id=%s)", seriesName, seriesID)
-		infoResp, httpcode, contentType, err := cli.Action(c.ProxyConfig, "get_series_info", url.Values{"series_id": {seriesID}})
-		if err != nil {
-			utils.WarnLog("Series search: get_series_info failed for id=%s: %v (HTTP %d, CT=%s)", seriesID, err, httpcode, contentType)
+	// Second pass: fetch get_series_info for all matches with bounded
+	// parallelism (default 8 concurrent), instead of sequentially per series.
+	const maxConcurrent = 8
+	type infoResult struct {
+		match seriesMatch
+		eps   map[string]interface{} // episodes by season
+		ok    bool
+	}
+	results := make([]infoResult, len(matches))
+	sem := make(chan struct{}, maxConcurrent)
+	var wg sync.WaitGroup
+	for i, mt := range matches {
+		wg.Add(1)
+		go func(idx int, match seriesMatch) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			utils.DebugLog("Series search: fetching series info for '%s' (series_id=%s)", match.name, match.id)
+			infoResp, httpcode, contentType, err := cli.Action(c.ProxyConfig, "get_series_info", url.Values{"series_id": {match.id}})
+			if err != nil {
+				utils.WarnLog("Series search: get_series_info failed for id=%s: %v (HTTP %d, CT=%s)", match.id, err, httpcode, contentType)
+				return
+			}
+			im, ok := infoResp.(map[string]interface{})
+			if !ok {
+				utils.WarnLog("Series search: unexpected series_info format for id=%s: %T", match.id, infoResp)
+				return
+			}
+			c.harvestSeriesEpisodeTitles(match.name, im)
+			if deduped, ok := c.seriesEpisodeDedup(im).(map[string]interface{}); ok {
+				im = deduped
+			}
+			epsBySeason, ok := im["episodes"].(map[string]interface{})
+			if !ok {
+				return
+			}
+			results[idx] = infoResult{match: match, eps: epsBySeason, ok: true}
+		}(i, mt)
+	}
+	wg.Wait()
+
+	// Third pass: flatten episodes into VOD results (single-threaded, preserves order).
+	out := make([]types.VODResult, 0, 50)
+	for _, r := range results {
+		if !r.ok {
 			continue
 		}
-		im, ok := infoResp.(map[string]interface{})
-		if !ok {
-			utils.WarnLog("Series search: unexpected series_info format for id=%s: %T", seriesID, infoResp)
-			continue
-		}
-		epsBySeason, ok := im["episodes"].(map[string]interface{})
-		if !ok {
-			// Some providers use episodes as array with season inside
-			continue
-		}
+		seriesName := r.match.name
+		genre := r.match.genre
+		year := r.match.year
 		totalEps := 0
-		for seasonStr, epsV := range epsBySeason {
+		for seasonStr, epsV := range r.eps {
 			seasonNum, _ := strconv.Atoi(seasonStr)
 			eps, ok := epsV.([]interface{})
 			if !ok {
@@ -512,7 +633,6 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 					continue
 				}
 				title := fmt.Sprintf("%v", em["title"])
-				// Apply token AND match on either episode title or series name
 				if len(qTokens) > 0 && !allTokensIn(qTokens, title) && !allTokensIn(qTokens, seriesName) {
 					continue
 				}
@@ -520,18 +640,16 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 				if streamID == "" || streamID == "<nil>" {
 					continue
 				}
-				epNum := toInt(em["episode_num"]) // best-effort
-				// Enforce numeric season/episode if specified
+				epNum := toInt(em["episode_num"])
 				if qSeason > 0 && seasonNum != qSeason {
 					continue
 				}
 				if qEpisode > 0 && epNum != qEpisode {
 					continue
 				}
-				// info subobject for duration/rating
 				var duration, rating string
 				if infoSub, ok := em["info"].(map[string]interface{}); ok {
-					duration = fmt.Sprintf("%v", infoSub["duration"]) // may be ""
+					duration = fmt.Sprintf("%v", infoSub["duration"])
 					rating = fmt.Sprintf("%v", firstNonEmpty(infoSub["rating"], infoSub["vote_average"]))
 				}
 
@@ -556,6 +674,18 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 	}
 	utils.DebugLog("Series search: returning %d results", len(out))
 	return out, nil
+}
+
+// getCachedVODCatalog returns the parsed get_vod_streams catalog, fetching and
+// caching it on first use. Concurrent callers share a single fetch.
+func (c *Config) getCachedVODCatalog() (interface{}, error) {
+	return fetchCatalogOnce(c.catalogKey("get_vod_streams", ""), c.catalogFetcher("get_vod_streams", url.Values{}))
+}
+
+// getCachedSeriesCatalog returns the parsed get_series catalog, fetching and
+// caching it on first use. Concurrent callers share a single fetch.
+func (c *Config) getCachedSeriesCatalog() (interface{}, error) {
+	return fetchCatalogOnce(c.catalogKey("get_series", ""), c.catalogFetcher("get_series", url.Values{}))
 }
 
 // firstNonEmpty returns the first non-empty/non-nil value among candidates

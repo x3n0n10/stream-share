@@ -20,7 +20,6 @@ package xtream
 
 import (
 	"bytes"
-	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -49,8 +48,12 @@ const (
 	getSimpleDataTable  = "get_simple_data_table"
 )
 
-// xmltvTimeout bounds a whole XMLTV download (connect, headers and body).
-const xmltvTimeout = 2 * time.Minute
+// maxResponseBytes caps how much of a provider response body is buffered in
+// memory. Large-catalog endpoints (get_vod_streams at ~87 MB today, growing)
+// need headroom; the cap exists only as a runaway-response guard, so it is set
+// well above the largest known catalog and a hit is reported loudly rather
+// than silently truncating the JSON (which would decode-fail downstream).
+const maxResponseBytes = 512 * 1024 * 1024
 
 // Client represents an Xtream API client
 type Client struct {
@@ -73,9 +76,18 @@ func New(user, password, baseURL, userAgent string) (*Client, error) {
 	if insecureTLS {
 		transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	}
+	// No global timeout: large-catalog endpoints (get_vod_streams ~87 MB and
+	// growing, get_series ~53 MB) can legitimately take minutes on a slow link.
+	// The transport's ResponseHeaderTimeout bounds the wait for headers; the
+	// per-request context (when set by callers) bounds the overall exchange.
 	httpClient := &http.Client{
-		Timeout:   10 * time.Second,
-		Transport: transport,
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			ResponseHeaderTimeout: 30 * time.Second,
+			IdleConnTimeout:       90 * time.Second,
+			DisableCompression:    true,
+			TLSClientConfig:       transport.(*http.Transport).TLSClientConfig,
+		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return http.ErrUseLastResponse
@@ -141,10 +153,18 @@ func (c *Client) Action(cfg *config.ProxyConfig, action string, q url.Values) (r
 			continue
 		}
 		if resp.StatusCode == http.StatusOK {
-			b, err = io.ReadAll(io.LimitReader(resp.Body, 100*1024*1024))
+			// Read with a large cap; if the provider sends more, fail loudly
+			// instead of silently truncating the JSON body.
+			b, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 			_ = resp.Body.Close()
 			if err != nil {
 				lastErr = err
+				continue
+			}
+			if len(b) > maxResponseBytes {
+				utils.WarnLog("Xtream action=%s response exceeded %d MB cap; refusing truncated body", action, maxResponseBytes/(1024*1024))
+				lastErr = fmt.Errorf("response exceeds %d MB cap", maxResponseBytes/(1024*1024))
+				b = nil
 				continue
 			}
 			break
@@ -178,46 +198,6 @@ func (c *Client) Action(cfg *config.ProxyConfig, action string, q url.Values) (r
 		return fallbackForAction(action), http.StatusOK, contentType, err
 	}
 	return result, http.StatusOK, contentType, nil
-}
-
-// GetXMLTV retrieves the EPG data in XMLTV format
-func (c *Client) GetXMLTV() ([]byte, error) {
-	u, err := url.Parse(strings.TrimRight(c.BaseURL, "/") + "/xmltv.php")
-	if err != nil {
-		return nil, utils.PrintErrorAndReturn(err)
-	}
-	params := url.Values{}
-	params.Set("username", c.Username)
-	params.Set("password", c.Password)
-	u.RawQuery = params.Encode()
-	utils.DebugLog("XMLTV request: %s", u.String())
-
-	// The shared client's 10s Timeout also covers reading the body, which is too
-	// short for a large EPG; use a copy without it and bound the call via ctx.
-	ctx, cancel := context.WithTimeout(context.Background(), xmltvTimeout)
-	defer cancel()
-	httpClient := *c.Client
-	httpClient.Timeout = 0
-	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
-	if err != nil {
-		return nil, utils.PrintErrorAndReturn(err)
-	}
-	req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
-	req.Header.Set("Accept", "application/xml, text/xml")
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, utils.PrintErrorAndReturn(err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return nil, utils.PrintErrorAndReturn(fmt.Errorf("unexpected status code: %d", resp.StatusCode))
-	}
-	limitedReader := &io.LimitedReader{R: resp.Body, N: 100 * 1024 * 1024}
-	xmlData, err := io.ReadAll(limitedReader)
-	if err != nil {
-		return nil, utils.PrintErrorAndReturn(fmt.Errorf("failed to read XMLTV data: %w", err))
-	}
-	return xmlData, nil
 }
 
 func createEmergencyCategoryData() []map[string]interface{} {

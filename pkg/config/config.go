@@ -21,6 +21,8 @@ package config
 
 import (
 	"net/url"
+
+	"github.com/lucasduport/stream-share/pkg/filter"
 )
 
 // Set a Cache Folder to save responses into
@@ -54,12 +56,33 @@ type ProxyConfig struct {
 	XtreamGenerateApiGet bool
 	M3UCacheExpiration   int
 	M3UFileName          string
-	CustomEndpoint       string
-	CustomId             string
-	RemoteURL            *url.URL
-	AdvertisedPort       int
-	HTTPS                bool
-	User, Password       CredentialString
+	// M3UDedupEnabled removes redundant tracks (same Xtream stream ID listed
+	// twice, or same-title copies differing only by language/quality) from
+	// the generated M3U, keeping the best source per duplicate group.
+	M3UDedupEnabled bool
+	// M3UDedupPreferredLangs is a comma-separated, ordered list of preferred
+	// audio language codes (e.g. "fra,eng"); among equal-quality duplicates
+	// the entry in the most preferred language wins.
+	M3UDedupPreferredLangs string
+	// SeriesEpisodeDedupEnabled merges the duplicate copies of an episode that
+	// some providers list several times in get_series_info (same season,
+	// number, title and technical fingerprint), keeping one.
+	SeriesEpisodeDedupEnabled bool
+	// SeriesEpisodeDedupTagVariants appends a technical tag (e.g. "HEVC
+	// 10-bit") to the titles of an episode's kept alternative encodes.
+	SeriesEpisodeDedupTagVariants bool
+	CustomEndpoint                string
+	CustomId                      string
+	RemoteURL                     *url.URL
+	AdvertisedPort                int
+	HTTPS                         bool
+	User, Password                CredentialString
+
+	// CatalogFilter keeps only the catalogue entries (live channels, movies,
+	// series) that pass its regular expressions, in every list served to
+	// players: player_api, get.php and xmltv.php. Empty filters nothing.
+	CatalogFilter filter.Config
+
 	// LDAP authentication fields
 	LDAPEnabled        bool
 	LDAPServer         string
@@ -122,6 +145,14 @@ type ProxyConfig struct {
 	// Those facts change on the order of days, so the default (15 minutes) is
 	// already generous; raise it to make provider traffic even rarer.
 	ProviderInfoRefreshMinutes int
+
+	// ProviderMaxConnections caps the media connections stream-share opens to
+	// the provider at once (live streams, VOD cache downloads, direct VOD
+	// proxying). When full, what someone is watching preempts downloads nobody
+	// watches any more, which pause and resume later. 0 (default) uses the
+	// limit the provider reports (max_connections) and no limit while it is
+	// unknown; a positive value forces a limit; -1 disables arbitration.
+	ProviderMaxConnections int
 
 	// StreamTechProbeEnabled turns on best-effort audio/video technical info
 	// (codec, resolution, bitrate, ...) for active live streams, exposed via the

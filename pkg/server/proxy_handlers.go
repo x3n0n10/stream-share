@@ -160,12 +160,15 @@ func (c *Config) buildUpstreamRequest(ctx *gin.Context, oriURL *url.URL) (*http.
 
 // writeUpstreamResponse copies resp's headers/status to ctx and streams its
 // body to the client with flushes, normalizing a Range-less 206 to 200.
-func writeUpstreamResponse(ctx *gin.Context, resp *http.Response) {
+func writeUpstreamResponse(ctx *gin.Context, resp *http.Response, isVOD bool) {
 	if resp.StatusCode == 461 {
 		utils.DebugLog("Upstream returned 461 (often blocks HEAD/Range or unexpected headers)")
 	}
 
 	mergeHttpHeader(ctx.Writer.Header(), resp.Header)
+	if isVOD {
+		mediaNoStore(ctx.Writer.Header())
+	}
 	status := resp.StatusCode
 	// If the client did not send a Range header but upstream returned 206, the player
 	// will get confused (it expected 200) and immediately drop the connection.
@@ -235,5 +238,5 @@ func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
 	defer func() { _ = resp.Body.Close() }()
 
 	utils.DebugLog("-> Upstream response status: %d", resp.StatusCode)
-	writeUpstreamResponse(ctx, resp)
+	writeUpstreamResponse(ctx, resp, isVODPath(oriURL.Path))
 }

@@ -107,35 +107,72 @@ func TestRegisterVODView_appearsInStreams(t *testing.T) {
 	}
 }
 
-// TestRegisterVODView_adoptsResolvedTitle is the regression test for the bug
-// where a VOD view's title stayed pinned to the raw stream id: the very first
-// Range request can lose the race to resolve a real title (e.g. get_vod_info
-// is still in flight) and falls back to passing the stream id as the title.
-// A later call for the same view, now carrying the resolved title, must
-// still be adopted instead of being ignored because a title was already set.
+// TestRegisterVODView_adoptsResolvedTitle: the first Range request of a view
+// can lose the race to resolve a title and pass the raw id; a later request
+// carrying the real title must be adopted (ported from x3n0n10/stream-share#46).
 func TestRegisterVODView_adoptsResolvedTitle(t *testing.T) {
 	sm := newTestManager()
 	defer sm.Stop()
 
 	sm.RegisterUser("alice", "1.2.3.4", "")
-	sm.RegisterVODView("alice", "327914", "movie", "327914") // fallback: id used as title
-
-	info, ok := sm.GetStreamInfo("327914")
-	if !ok {
-		t.Fatal("stream not found after RegisterVODView")
-	}
-	if info.StreamTitle != "327914" {
-		t.Fatalf("expected fallback title 327914, got %q", info.StreamTitle)
+	sm.RegisterVODView("alice", "327914", "movie", "327914")
+	if info, ok := sm.GetStreamInfo("327914"); !ok || info.StreamTitle != "327914" {
+		t.Fatalf("expected fallback title, got %+v", info)
 	}
 
 	sm.RegisterVODView("alice", "327914", "movie", "The Real Movie Title")
-
-	info, ok = sm.GetStreamInfo("327914")
-	if !ok {
-		t.Fatal("stream not found after second RegisterVODView")
+	if info, ok := sm.GetStreamInfo("327914"); !ok || info.StreamTitle != "The Real Movie Title" {
+		t.Fatalf("expected resolved title to be adopted, got %+v", info)
 	}
-	if info.StreamTitle != "The Real Movie Title" {
-		t.Fatalf("expected resolved title to be adopted, got %q", info.StreamTitle)
+}
+
+// adoptVODHistoryTitle decides when an open history row must be rewritten:
+// only while it still holds a fallback, per (stream, user) view, and it returns
+// 0 while the row's insert is in flight so recordVODHistory applies it later.
+func TestAdoptVODHistoryTitle(t *testing.T) {
+	sm := newTestManager()
+	defer sm.Stop()
+	key := streamUserKey("42", "alice")
+
+	// No open row for this view: nothing to correct.
+	if id := sm.adoptVODHistoryTitle("alice", "42", "Movie"); id != 0 {
+		t.Fatalf("no row: id = %d", id)
+	}
+
+	// Row inserted with the raw id as title.
+	sm.vodHistoryIDs[key] = 7
+	sm.vodHistoryTitles[key] = "42"
+
+	// Fallback titles never trigger a rewrite.
+	for _, title := range []string{"", "42"} {
+		if id := sm.adoptVODHistoryTitle("alice", "42", title); id != 0 {
+			t.Fatalf("fallback %q: id = %d", title, id)
+		}
+	}
+	if id := sm.adoptVODHistoryTitle("alice", "42", "Movie"); id != 7 {
+		t.Fatalf("resolved title: id = %d, want 7", id)
+	}
+	if sm.vodHistoryTitles[key] != "Movie" {
+		t.Fatalf("wanted title not recorded: %q", sm.vodHistoryTitles[key])
+	}
+	// Once corrected, the row is left alone (no rewrite per Range request).
+	if id := sm.adoptVODHistoryTitle("alice", "42", "Movie"); id != 0 {
+		t.Fatalf("already corrected: id = %d", id)
+	}
+	if id := sm.adoptVODHistoryTitle("alice", "42", "Other"); id != 0 {
+		t.Fatalf("real title must not be replaced: id = %d", id)
+	}
+
+	// Another viewer's row is tracked independently: the stream-level title
+	// is already resolved, but bob's row still holds the fallback.
+	bob := streamUserKey("42", "bob")
+	sm.vodHistoryIDs[bob] = 0 // insert still in flight
+	sm.vodHistoryTitles[bob] = ""
+	if id := sm.adoptVODHistoryTitle("bob", "42", "Movie"); id != 0 {
+		t.Fatalf("in-flight insert: id = %d, want 0", id)
+	}
+	if sm.vodHistoryTitles[bob] != "Movie" {
+		t.Fatalf("in-flight insert must still record the wanted title, got %q", sm.vodHistoryTitles[bob])
 	}
 }
 
@@ -344,13 +381,14 @@ func TestRequestStream_userSwitchesChannel(t *testing.T) {
 
 	// Alice starts on channel 1.
 	u1 := mustURL(t, srv1.URL)
-	if _, err := sm.RequestStream("alice", "ch1", "live", "Channel 1", u1); err != nil {
+	if _, _, err := sm.RequestStream("alice", "ch1", "live", "Channel 1", u1); err != nil {
 		t.Fatalf("RequestStream ch1: %v", err)
 	}
 
 	// Alice switches to channel 2.
 	u2 := mustURL(t, srv2.URL)
-	if _, err := sm.RequestStream("alice", "ch2", "live", "Channel 2", u2); err != nil {
+	_, aliceCh2, err := sm.RequestStream("alice", "ch2", "live", "Channel 2", u2)
+	if err != nil {
 		t.Fatalf("RequestStream ch2: %v", err)
 	}
 
@@ -367,7 +405,7 @@ func TestRequestStream_userSwitchesChannel(t *testing.T) {
 		}
 	}
 
-	sm.RemoveClient("ch2", "alice")
+	removeKey(sm, "ch2", aliceCh2)
 }
 
 // ---- RemoveClient under concurrent access ----
@@ -385,15 +423,16 @@ func TestRemoveClient_concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		user := fmt.Sprintf("u%d", i)
-		if _, err := sm.RequestStream(user, "concurrent", "live", "C", u); err != nil {
+		_, key, err := sm.RequestStream(user, "concurrent", "live", "C", u)
+		if err != nil {
 			continue
 		}
 		wg.Add(1)
-		go func(u string) {
+		go func(k string) {
 			defer wg.Done()
 			time.Sleep(20 * time.Millisecond)
-			sm.RemoveClient("concurrent", u)
-		}(user)
+			removeKey(sm, "concurrent", k)
+		}(key)
 	}
 	wg.Wait()
 }

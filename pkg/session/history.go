@@ -90,6 +90,36 @@ func (sm *SessionManager) RegisterVODView(username, streamID, streamType, title 
 	}
 }
 
+// UpdateVODViewTitle adopts a title resolved after a view started: it corrects
+// the view's history row and the session's displayed title while they still
+// hold a fallback. Unlike RegisterVODView it never (re)registers the viewer,
+// so it is safe to call after the view has ended.
+func (sm *SessionManager) UpdateVODViewTitle(username, streamID, title string) {
+	if title == "" || title == streamID {
+		return
+	}
+	sm.correctVODHistoryTitle(username, streamID, title)
+	sm.streamLock.Lock()
+	defer sm.streamLock.Unlock()
+	if ss, ok := sm.streamSessions[streamID]; ok && (ss.StreamTitle == "" || ss.StreamTitle == streamID) {
+		ss.StreamTitle = title
+	}
+}
+
+// HasVODViewer reports whether username is currently a viewer of streamID: a
+// VOD playback issues many Range requests, and only the first of a view finds
+// no viewer yet.
+func (sm *SessionManager) HasVODViewer(username, streamID string) bool {
+	sm.streamLock.RLock()
+	defer sm.streamLock.RUnlock()
+	ss, ok := sm.streamSessions[streamID]
+	if !ok {
+		return false
+	}
+	_, watching := ss.Viewers[username]
+	return watching
+}
+
 // UnregisterVODView schedules removal of a synthetic VOD view after a grace
 // period rather than tearing it down immediately. Players fetch cached files in
 // short Range requests with gaps in between while the local buffer plays; a

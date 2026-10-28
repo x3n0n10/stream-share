@@ -104,6 +104,9 @@ type Config struct {
 	// (see providerSlotCapacity); never nil once the server is built.
 	providerSlots *provider.Arbiter
 
+	// shares holds the live share links (see live_shares.go).
+	shares *shareStore
+
 	// catalogFilter is the compiled catalogue filter; nil keeps everything, and
 	// every filtering path checks for nil first so it costs nothing when unset.
 	catalogFilter *filter.Set
@@ -113,14 +116,22 @@ type Config struct {
 func NewServer(config *config.ProxyConfig) (*Config, error) {
 	var p m3u.Playlist
 
-	// Parse the M3U playlist from the remote URL if provided
+	// Parse the M3U playlist from the remote URL if provided — unless it is the
+	// Xtream account's own get.php, which is then served by the streaming
+	// get.php proxy instead. Parsing it here would download the whole playlist
+	// before the server can start and keep every track in memory for nothing
+	// (about 1.3 GiB of heap and minutes of boot on a million-track catalogue).
 	if config.RemoteURL.String() != "" {
-		var err error
-		p, err = m3u.Parse(config.RemoteURL.String())
-		if err != nil {
-			return nil, utils.PrintErrorAndReturn(err)
+		if (&Config{ProxyConfig: config}).xtreamServesM3U() {
+			utils.InfoLog("M3U_URL is the Xtream account's get.php: serving it through the Xtream proxy, not parsing it at boot")
+		} else {
+			var err error
+			p, err = m3u.Parse(config.RemoteURL.String())
+			if err != nil {
+				return nil, utils.PrintErrorAndReturn(err)
+			}
+			utils.InfoLog("Successfully parsed M3U playlist from %s", utils.MaskURL(config.RemoteURL.String()))
 		}
-		utils.InfoLog("Successfully parsed M3U playlist from %s", config.RemoteURL.String())
 	}
 
 	catalogFilter, err := filter.NewSet(config.CatalogFilter)
@@ -177,6 +188,7 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		serverConfig.providerInfo = &providerInfoState{}
 	}
 	serverConfig.providerSlots = provider.New(serverConfig.providerSlotCapacity)
+	serverConfig.shares = newShareStore()
 
 	// Force PostgreSQL initialization (sqlite removed)
 	utils.InfoLog("Bootstrap: Forcing PostgreSQL database initialization")
@@ -421,6 +433,12 @@ func (c *Config) Serve() error {
 	// always served from cache instead of waiting on the provider.
 	providerInfoStop := make(chan struct{})
 	c.startProviderInfoRefresher(providerInfoStop)
+
+	// Share links: load them, and cut viewers of links that end or are revoked.
+	c.loadLiveShares()
+	shareSweepStop := make(chan struct{})
+	c.startLiveShareSweeper(shareSweepStop)
+	defer close(shareSweepStop)
 	defer close(providerInfoStop)
 
 	// Drop expired LDAP auth-cache entries so they do not linger for the life of
@@ -491,6 +509,10 @@ func (c *Config) Serve() error {
 	// Add temporary link download route
 	router.GET("/download/:token", c.handleTemporaryLink)
 
+	// Live share links: the token is the credential (see live_shares.go).
+	router.GET("/share/:token", c.handleSharePlaylist)
+	router.GET("/share/:token/live.ts", c.handleShareStream)
+
 	// Container readiness endpoint for the Docker HEALTHCHECK. Reports whether
 	// THIS service has finished starting (see the ready flag set below), never
 	// provider/VPN state, so it is safe to gate compose ordering on.
@@ -552,7 +574,8 @@ func (c *Config) redactRequestURI(u *url.URL, route string) string {
 	segs := strings.Split(u.Path, "/")
 	routeSegs := strings.Split(route, "/")
 	for i, seg := range segs {
-		if secrets[seg] || (i < len(routeSegs) && routeSegs[i] == ":password") {
+		// :token segments are credentials too (share and download links).
+		if secrets[seg] || (i < len(routeSegs) && (routeSegs[i] == ":password" || routeSegs[i] == ":token")) {
 			segs[i] = "***"
 		}
 	}
@@ -635,7 +658,8 @@ func (c *Config) authWithPathCredentials() gin.HandlerFunc {
 			utils.ErrorLog("authWithPathCredentials: sessionManager is NIL - cannot register user session")
 		} else {
 			c.sessionManager.RegisterUser(identity, ip, userAgent)
-			utils.InfoLog("authWithPathCredentials: session registered for user=%s ip=%s", username, ip)
+			// Per request: RegisterUser itself logs a genuinely new session.
+			utils.DebugLog("authWithPathCredentials: session registered for user=%s ip=%s", username, ip)
 		}
 		ctx.Set("username", identity)
 

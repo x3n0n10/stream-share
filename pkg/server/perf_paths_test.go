@@ -70,6 +70,16 @@ func waitForFile(t *testing.T, p string) {
 // get the plain file; a changed file is not served from an older sibling.
 func TestServeFileCompressed(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "guide.xml")
+	// The last request starts a background build; let it finish before the
+	// temp dir is removed (registered after TempDir's cleanup, so it runs first).
+	t.Cleanup(func() {
+		for i := 0; i < 500; i++ {
+			if _, busy := gzipBuilds.Load(p); !busy {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
 	body := strings.Repeat("<programme channel=\"c1\"/>\n", 5000)
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)

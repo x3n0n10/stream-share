@@ -2,6 +2,16 @@
 
 # StreamShare - Advanced IPTV Access Management Platform
 
+> <img src="assets/logo.svg" alt="StreamShare Suite" width="56" align="right">
+>
+> **Thinking about running StreamShare?** Try the
+> [StreamShare Suite](https://github.com/x3n0n10/stream-share-suite) first.
+> It sets up and runs the whole stack from one web UI: StreamShare instances,
+> VPN (with automatic reconnect when a provider blocks your exit IP), PostgreSQL
+> and an optional Caddy reverse proxy. You don't need to maintain a compose file
+> by hand. It also gives you live monitoring, watch history, backups, and
+> updates. This README covers StreamShare itself, for running it on its own.
+
 ## Overview
 
 StreamShare is a comprehensive IPTV management solution that allows secure sharing of a single IPTV provider account with multiple users. Built upon the foundations of [jtdevops/iptv-proxy](https://github.com/jtdevops/iptv-proxy) and [pierre-emmanuelJ/iptv-proxy](https://github.com/pierre-emmanuelJ/iptv-proxy), this project has evolved far beyond a simple proxy to become a full-featured platform with authentication, stream multiplexing, and media management capabilities.

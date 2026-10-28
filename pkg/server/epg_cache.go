@@ -99,16 +99,15 @@ func (c *Config) xtreamXMLTV(ctx *gin.Context) {
 		return
 	}
 	defer func() { _ = f.Close() }()
-	// Channel/programme icons are rewritten to go through this proxy; streamed,
-	// so a huge guide is never held in memory.
-	ctx.Header("Content-Type", "application/xml")
-	ctx.Status(http.StatusOK)
-	bw := bufio.NewWriter(ctx.Writer)
+	// Channel/programme icons are rewritten to go through this proxy; streamed
+	// (and gzipped on the fly), so a huge guide is never held in memory.
+	zw := responseWriter(ctx, "application/xml")
+	bw := bufio.NewWriter(zw)
 	if err := c.rewriteXMLTVIconsTo(ctx, bufio.NewReader(f), bw); err != nil {
 		utils.WarnLog("XMLTV icon rewrite aborted: %v", err)
-		return
 	}
 	_ = bw.Flush()
+	_ = zw.Close()
 }
 
 // ensureEPGCache starts a background guide download when the cached guide is

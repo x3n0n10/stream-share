@@ -26,6 +26,8 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/lucasduport/stream-share/pkg/utils"
@@ -145,22 +147,79 @@ func (c *Config) registerVODView(username, streamID, streamType, fallbackTitle s
 		return func() {}
 	}
 	label := fallbackTitle
-	if name, ok := c.resolveTitleAtStart(streamID, streamType); ok && strings.TrimSpace(name) != "" {
+	if name, ok := c.titleAtStartBounded(username, streamID, streamType); ok && strings.TrimSpace(name) != "" {
 		label = name
 	}
 	if strings.TrimSpace(label) == "" {
 		label = streamID
 	}
-	utils.InfoLog("VOD %s started: %s for user %s", streamType, label, username)
+	// A playback issues many Range requests (open, index near the end, seeks):
+	// announce the view once, on the request that starts it.
+	if c.sessionManager.HasVODViewer(username, streamID) {
+		utils.DebugLog("VOD %s request: %s for user %s", streamType, label, username)
+	} else {
+		utils.InfoLog("VOD %s started: %s for user %s", streamType, label, username)
+	}
 	c.sessionManager.RegisterVODView(username, streamID, streamType, label)
 	return func() { c.sessionManager.UnregisterVODView(username, streamID) }
 }
 
-// serveLocalFileRange serves a local file with HTTP Range support for seamless
-// seeking, via the standard library's http.ServeContent — which handles Range
-// parsing (including multi-range and suffix ranges, more than the single-range
-// support this hand-rolled before), HEAD requests, conditional GET, and
-// Content-Length/Content-Range generation.
+// titleWaitAtStart bounds how long a VOD request waits for its title before
+// serving: resolving one can take a provider round trip (get_vod_info), and a
+// playback must not wait on the provider just to name itself in logs.
+const titleWaitAtStart = time.Second
+
+// titleResolving tracks the background title resolutions running, per
+// normalized stream id, so the many Range requests of one playback start one.
+var titleResolving sync.Map // id -> chan struct{} (closed when done)
+
+// titleAtStartBounded is resolveTitleAtStart for request paths: a title known
+// locally is returned at once; otherwise the resolution runs in the background
+// and is waited for at most titleWaitAtStart. A title that lands later still
+// reaches the view's session and history row through UpdateVODViewTitle.
+func (c *Config) titleAtStartBounded(username, streamID, streamType string) (string, bool) {
+	if streamType != "movie" && streamType != "series" {
+		return c.resolveTitleAtStart(streamID, streamType) // no provider call
+	}
+	if name, ok := c.getChannelNameByID(streamID); ok && strings.TrimSpace(name) != "" {
+		return name, true
+	}
+	if title, done := titleResolvedLookup(streamID); done {
+		return title, title != ""
+	}
+	if name, ok := vodNameCached(streamID); ok {
+		return name, true
+	}
+
+	id := normalizeStreamID(streamID)
+	ch := make(chan struct{})
+	if v, running := titleResolving.LoadOrStore(id, ch); running {
+		ch = v.(chan struct{})
+	} else {
+		go func() {
+			defer func() {
+				titleResolving.Delete(id)
+				close(ch)
+			}()
+			if name, ok := c.resolveTitleAtStart(streamID, streamType); ok && c.sessionManager != nil {
+				c.sessionManager.UpdateVODViewTitle(username, streamID, strings.TrimSpace(name))
+			}
+		}()
+	}
+	select {
+	case <-ch:
+	case <-time.After(titleWaitAtStart):
+		return "", false
+	}
+	if title, done := titleResolvedLookup(streamID); done {
+		return title, title != ""
+	}
+	return vodNameCached(streamID)
+}
+
+// serveLocalFileRange serves a local file with HTTP Range support for seamless seeking.
+// Uses http.ServeContent, which handles Range parsing, conditional requests
+// (If-Modified-Since / If-None-Match → 304), ETag generation, and HEAD for free.
 // If asAttachment is true, a Content-Disposition header will be set using filename.
 func serveLocalFileRange(ctx *gin.Context, filePath string, contentType string, filename string, asAttachment bool) {
 	fi, err := os.Stat(filePath)

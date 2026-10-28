@@ -2,6 +2,16 @@
 
 # StreamShare - Advanced IPTV Access Management Platform
 
+> <img src="assets/logo.svg" alt="StreamShare Suite" width="56" align="right">
+>
+> **Thinking about running StreamShare?** Try the
+> [StreamShare Suite](https://github.com/x3n0n10/stream-share-suite) first.
+> It sets up and runs the whole stack from one web UI: StreamShare instances,
+> VPN (with automatic reconnect when a provider blocks your exit IP), PostgreSQL
+> and an optional Caddy reverse proxy. You don't need to maintain a compose file
+> by hand. It also gives you live monitoring, watch history, backups, and
+> updates. This README covers StreamShare itself, for running it on its own.
+
 ## Overview
 
 StreamShare is a comprehensive IPTV management solution that allows secure sharing of a single IPTV provider account with multiple users. Built upon the foundations of [jtdevops/iptv-proxy](https://github.com/jtdevops/iptv-proxy) and [pierre-emmanuelJ/iptv-proxy](https://github.com/pierre-emmanuelJ/iptv-proxy), this project has evolved far beyond a simple proxy to become a full-featured platform with authentication, stream multiplexing, and media management capabilities.
@@ -205,7 +215,9 @@ The filter applies to everything players get:
 - the guide (`xmltv.php`), when live rules are set: only the kept channels and their programmes. Until the live list has been fetched once, the full guide is served;
 - live streams: a channel the filter drops answers 404, even asked by its id. Ids the cached live list does not know are let through.
 
-What it does not apply to: the Discord `/watch` search (an admin tool that keeps searching the whole catalogue), movie and series streams by id (their lists can be too large, or empty on some providers, to check every request against), `get.php` tracks that are neither a movie nor a series (bare stream addresses, radio links) are treated as live channels.
+The Discord `/watch` search uses the same rules: it only finds movies and series players are offered.
+
+What it does not apply to: movie and series streams by id (their lists can be too large, or empty on some providers, to check every request against), `get.php` tracks that are neither a movie nor a series (bare stream addresses, radio links) are treated as live channels.
 
 ### Xtream Codes API Compatibility
 
@@ -242,12 +254,16 @@ StreamShare includes a powerful Discord bot for content discovery and streaming.
 | `/link <ldap_username>` | Link your Discord account with your LDAP username |
 | `/linkadmin <discord_id> <ldap_username>` | Link any Discord user to an LDAP account (admin only) |
 | `/watch <query> [days]` | Search movies and series; pick from a dropdown to get a download link. The item is cached automatically for 1–14 days (default 7). Supports queries like `show s02e04` |
+| `/share <channel> <until> [start] [guest]` | Share a live channel for a time window: pick the channel and get a link for VLC or an IPTV app (see [Live Share Links](#live-share-links)) |
+| `/shares` | List your share links (admins: every link) and revoke them |
 | `/library` | List cached items and expiration times |
 | `/help` | Show all available commands and usage |
 | `/status` | Show server status — active streams, viewers, and your provider subscription's state (admin only) |
 | `/history [username] [period]` | Watch history timeline for live and VOD (admin only). Omit `username` for a feed across all clients; `period` selects the window (24h, 7d, 30d, 90d, all time) |
 | `/disconnect <ldap_username>` | Disconnect a user from the stream |
 | `/timeout <ldap_username> <minutes>` | Temporarily block a user for N minutes |
+
+Admin features (the admin-only commands, and every user's links in `/shares`) require the role set in `DISCORD_ADMIN_ROLE_ID`. When it is unset, only members with the **Manage Server** or **Administrator** permission count as admins.
 
 Tips:
 - Link your account first with `/link <ldap_user>`.
@@ -283,6 +299,10 @@ StreamShare exposes an internal API (used by the Discord bot and admin tools) un
 | `/api/internal/cache/list` | GET | List active cache entries | X-API-Key |
 | `/api/internal/history?hours=N&limit=N&offset=N` | GET | Chronological watch-history feed across all users, paginated | X-API-Key |
 | `/api/internal/history/:username?hours=N&limit=N&offset=N` | GET | Watch history for one user, paginated | X-API-Key |
+| `/api/internal/shares` | POST | Create a live share link: `{username, guest?, stream_id, starts_at?, ends_at}` (RFC 3339; `starts_at` defaults to now) | X-API-Key |
+| `/api/internal/shares?username=` | GET | List share links (all when `username` is empty) with their state and URLs | X-API-Key |
+| `/api/internal/shares/:token?username=` | DELETE | Revoke a share link and disconnect its viewers; with `username`, only its creator may | X-API-Key |
+| `/api/internal/shares/channels?q=` | GET | Live channels offered to players whose name contains every word of `q` (for the Discord picker) | X-API-Key |
 | `/api/internal/instance` | GET | Identify this deployment (name, uptime, enabled features) — for labeling data in a multi-instance dashboard | X-API-Key |
 | `/api/internal/stats?hours=N` | GET | Aggregate dashboard stats: live activity plus historical totals and top titles/users over the window (default 24h, `hours=0` for all-time) | X-API-Key |
 | `/api/internal/version` | GET | The release this instance was built from, as `data.version` (`dev` for an unstamped build) — so a dashboard can show what each instance is running | X-API-Key |
@@ -468,6 +488,22 @@ Behavior:
 - Otherwise, the request is proxied from the provider.
 
 Temporary links are perfect for sharing VOD content with users who don't have StreamShare accounts. Control lifetime with `TEMP_LINK_HOURS`.
+
+### Live Share Links
+
+Share one live channel with someone for a scheduled window, without giving them an account: `/share channel:<name> until:<end> [start:<start>]` in Discord picks the channel and returns a link.
+
+```
+https://streamshare.example.com/share/<token>.m3u      # one-channel playlist (VLC, IPTV apps)
+https://streamshare.example.com/share/<token>/live.ts  # the stream itself
+```
+
+- **Window:** the link plays from `start` (default now) until `until`, at most 24 hours. Times are read in the server's time zone (`TZ`): `21:00`, `tomorrow 21:00` / `demain 21:00`, `2026-11-02 21:00`; `until` also takes a duration (`2h`, `90m`, `1h30`). The playlist can be fetched before the window opens, so a guest can set it up in advance; the stream answers 403 until then, and 410 once the link ends or is revoked. Viewers still connected when it ends are cut within a few seconds.
+- **On behalf of its creator:** the link has no login of its own. Its viewers show up under the creator who invited them: `<creator> (share: <guest>)` in `/status` and the history when `/share` was given a `guest` name, else `<creator> (share)`. Internally they get their own identity (`share:<token prefix>`), so a guest is never mistaken for one of the creator's devices.
+- **Up to 3 devices** per link at once; a 4th connection gets 429.
+- **The household comes first:** on an account with fewer provider connections than viewers (see `PROVIDER_MAX_CONNECTIONS`), household viewing takes the connection back from a share stream, and a share never takes it from the household — the guest gets 503 "busy" instead. A guest watching the same channel as the household shares its provider connection and costs nothing.
+- **Catalogue filter:** only channels offered to players can be shared or played through a link.
+- `/shares` lists your links (admins: all of them) with revoke buttons. Links are stored in the database and survive restarts; without a database they live in memory only.
 
 ### VOD Caching
 

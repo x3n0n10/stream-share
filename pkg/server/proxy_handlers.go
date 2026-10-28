@@ -20,6 +20,7 @@
 package server
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -63,7 +64,7 @@ func (c *Config) getM3U(ctx *gin.Context) {
 		return
 	}
 	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, c.M3UFileName))
-	ctx.Data(http.StatusOK, "application/octet-stream", c.rewritePlaylistHosts(ctx, body))
+	serveBytesCompressed(ctx, "application/octet-stream", c.rewritePlaylistHosts(ctx, body))
 }
 
 // reverseProxy forwards a track request to the upstream using Xtream creds.
@@ -124,7 +125,11 @@ func (c *Config) m3u8ReverseProxy(ctx *gin.Context) {
 	if resp.Request != nil && resp.Request.URL != nil {
 		base = resp.Request.URL
 	}
-	body = c.rewriteM3U8(ctx, base, body)
+	// Only a manifest is rewritten; a media segment requested through this
+	// route must reach the player byte for byte.
+	if bytes.HasPrefix(bytes.TrimSpace(body), []byte("#EXTM3U")) {
+		body = c.rewriteM3U8(ctx, base, body)
+	}
 	contentType := resp.Header.Get("Content-Type")
 	mergeHttpHeader(ctx.Writer.Header(), resp.Header)
 	// The rewritten body is a different length than upstream's; overwrite

@@ -424,6 +424,21 @@ func TestRewritePlaylistHosts(t *testing.T) {
 		}
 	})
 
+	t.Run("provider-absolute track and logo (streamed get.php) are mapped onto the proxy", func(t *testing.T) {
+		in := `#EXTINF:-1 tvg-logo="http://provider.example.com/l.png", Ch` + "\n" +
+			"http://provider.example.com:8080/live/localuser/localpass/12345.ts\n"
+		out := string(c.rewritePlaylistHosts(ctx, []byte(in)))
+		if !strings.Contains(out, `tvg-logo="http://proxy.example.com:8080/img?url=http%3A%2F%2Fprovider.example.com%2Fl.png"`) {
+			t.Errorf("logo not proxied: %q", out)
+		}
+		if !strings.Contains(out, "\nhttp://proxy.example.com:8080/live/localuser/localpass/12345.ts") {
+			t.Errorf("track still points at the provider: %q", out)
+		}
+		if strings.Contains(out, "provider.example.com:8080") {
+			t.Errorf("provider host leaked: %q", out)
+		}
+	})
+
 	t.Run("a non-# line not starting with / is left alone", func(t *testing.T) {
 		in := "not-a-path-or-comment"
 		out := string(c.rewritePlaylistHosts(ctx, []byte(in)))

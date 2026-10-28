@@ -28,6 +28,7 @@ import (
 
 	"github.com/lucasduport/stream-share/pkg/banner"
 	"github.com/lucasduport/stream-share/pkg/config"
+	"github.com/lucasduport/stream-share/pkg/filter"
 	"github.com/lucasduport/stream-share/pkg/server"
 	homedir "github.com/mitchellh/go-homedir"
 	"github.com/spf13/cobra"
@@ -79,8 +80,8 @@ It supports:
 				xtreamUser = username
 				xtreamPassword = password
 				xtreamBaseURL = fmt.Sprintf("%s://%s", remoteHostURL.Scheme, remoteHostURL.Host)
-				log.Printf("[stream-share] INFO: Xtream service enabled with base URL: %q, username: %q, password: %q",
-					xtreamBaseURL, xtreamUser, xtreamPassword)
+				log.Printf("[stream-share] INFO: Xtream service enabled with base URL: %q, username: %q",
+					xtreamBaseURL, xtreamUser)
 			}
 		}
 
@@ -98,11 +99,22 @@ It supports:
 				Hostname: viper.GetString("hostname"),
 				Port:     viper.GetInt("port"),
 			},
-			RemoteURL:            remoteHostURL,
-			XtreamUser:           config.CredentialString(xtreamUser),
-			XtreamPassword:       config.CredentialString(xtreamPassword),
-			XtreamBaseURL:        xtreamBaseURL,
-			M3UCacheExpiration:   viper.GetInt("m3u-cache-expiration-hours"),
+			RemoteURL:                     remoteHostURL,
+			XtreamUser:                    config.CredentialString(xtreamUser),
+			XtreamPassword:                config.CredentialString(xtreamPassword),
+			XtreamBaseURL:                 xtreamBaseURL,
+			M3UCacheExpiration:            viper.GetInt("m3u-cache-expiration-hours"),
+			M3UDedupEnabled:               viper.GetBool("m3u-dedup-enabled"),
+			M3UDedupPreferredLangs:        viper.GetString("m3u-dedup-preferred-langs"),
+			SeriesEpisodeDedupEnabled:     viper.GetBool("series-episode-dedup-enabled"),
+			SeriesEpisodeDedupTagVariants: viper.GetBool("series-episode-dedup-tag-variants"),
+			CatalogFilter: filter.Config{
+				All:          filterPatterns("filter"),
+				Live:         filterPatterns("filter-live"),
+				Movie:        filterPatterns("filter-movie"),
+				Series:       filterPatterns("filter-series"),
+				ExcludeAdult: viper.GetBool("filter-exclude-adult"),
+			},
 			User:                 config.CredentialString(viper.GetString("auth-user")),
 			Password:             config.CredentialString(viper.GetString("auth-password")),
 			AdvertisedPort:       viper.GetInt("advertised-port"),
@@ -159,6 +171,7 @@ It supports:
 			InstanceName:               viper.GetString("instance-name"),
 			StreamTechProbeEnabled:     viper.GetBool("stream-tech-probe-enabled"),
 			ProviderInfoRefreshMinutes: viper.GetInt("provider-info-refresh-minutes"),
+			ProviderMaxConnections:     viper.GetInt("provider-max-connections"),
 
 			// Provider health check (reporting only; VPN reconnect is external)
 			HealthCheckEnabled:            viper.GetBool("healthcheck-enabled"),
@@ -187,6 +200,18 @@ It supports:
 	},
 }
 
+// filterPatterns reads the four regular expressions of one catalogue filter
+// prefix (see the filter-* flags).
+func filterPatterns(prefix string) filter.Patterns {
+	return filter.Patterns{
+		Group:        viper.GetString(prefix + "-group-regex"),
+		Name:         viper.GetString(prefix + "-name-regex"),
+		GroupExclude: viper.GetString(prefix + "-group-exclude-regex"),
+		NameExclude:  viper.GetString(prefix + "-name-exclude-regex"),
+		Any:          viper.GetString(prefix + "-any-regex"),
+	}
+}
+
 // Execute adds all child commands to the root command and sets flags appropriately
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
@@ -211,6 +236,27 @@ func init() {
 	rootCmd.Flags().String("hostname", "", "Deprecated, no longer used for generated URLs (derived from the request); kept for backward compatibility")
 	rootCmd.Flags().BoolP("https-enabled", "", false, "Use HTTPS for generated URLs")
 	rootCmd.Flags().Int("m3u-cache-expiration-hours", 1, "M3U cache expiration in hours")
+	rootCmd.Flags().Bool("m3u-dedup-enabled", false, "Remove redundant tracks (duplicate stream IDs, same-title movie/live language/quality copies) from the generated M3U")
+	rootCmd.Flags().String("m3u-dedup-preferred-langs", "fra", "Comma-separated ordered list of preferred audio languages for M3U dedup (e.g. \"fra,eng\")")
+	rootCmd.Flags().Bool("series-episode-dedup-enabled", false, "Merge identical duplicate copies of a series episode (same season, number, title and technical info) in get_series_info")
+	rootCmd.Flags().Bool("series-episode-dedup-tag-variants", false, "With series episode dedup, tag the titles of an episode's different encodes (e.g. \"[HEVC 10-bit]\")")
+
+	// Catalogue filter (all empty = no filtering). Each prefix takes four RE2
+	// expressions: <prefix>-group-regex / -name-regex keep what they match,
+	// -group-exclude-regex / -name-exclude-regex drop what they match.
+	for prefix, what := range map[string]string{
+		"filter":        "entries (any kind)",
+		"filter-live":   "live channels",
+		"filter-movie":  "movies",
+		"filter-series": "series",
+	} {
+		rootCmd.Flags().String(prefix+"-group-regex", "", "Catalogue filter: keep only "+what+" whose group (category) matches this regular expression")
+		rootCmd.Flags().String(prefix+"-name-regex", "", "Catalogue filter: keep only "+what+" whose name matches this regular expression")
+		rootCmd.Flags().String(prefix+"-group-exclude-regex", "", "Catalogue filter: drop "+what+" whose group (category) matches this regular expression")
+		rootCmd.Flags().String(prefix+"-name-exclude-regex", "", "Catalogue filter: drop "+what+" whose name matches this regular expression")
+		rootCmd.Flags().String(prefix+"-any-regex", "", "Catalogue filter: keep only "+what+" whose group or name matches this regular expression")
+	}
+	rootCmd.Flags().Bool("filter-exclude-adult", false, "Catalogue filter: drop entries the provider flags as adult (Xtream is_adult)")
 
 	// Authentication configuration
 	rootCmd.Flags().String("auth-user", "usertest", "Username for basic authentication when LDAP is not enabled")
@@ -268,6 +314,7 @@ func init() {
 	// Dashboard configuration
 	rootCmd.Flags().String("instance-name", "", "Friendly name for this instance, used to identify it in a multi-instance dashboard (defaults to hostname)")
 	rootCmd.Flags().Bool("stream-tech-probe-enabled", false, "Expose audio/video technical info (codec, resolution, bitrate) for active live streams via the dashboard API; requires ffprobe in the runtime image")
+	rootCmd.Flags().Int("provider-max-connections", 0, "Most media connections opened to the provider at once; watched streams preempt background VOD downloads (0 = the limit the provider reports, none while unknown; -1 = no arbitration)")
 	rootCmd.Flags().Int("provider-info-refresh-minutes", 15, "How often to refresh the upstream provider's subscription info (expiry, connection limit) exposed at /api/internal/provider")
 
 	// Bind all flags to viper

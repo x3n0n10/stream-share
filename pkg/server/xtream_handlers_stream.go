@@ -20,7 +20,6 @@
 package server
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"log"
@@ -28,7 +27,6 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -37,7 +35,6 @@ import (
 	"github.com/lucasduport/stream-share/pkg/catchup"
 	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
-	xtreamapi "github.com/lucasduport/stream-share/pkg/xtream"
 )
 
 func (c *Config) xtreamApiGet(ctx *gin.Context) {
@@ -73,7 +70,6 @@ func (c *Config) xtreamApiGet(ctx *gin.Context) {
 	xtreamM3uCacheLock.RLock()
 	path := xtreamM3uCache[cacheName].string
 	xtreamM3uCacheLock.RUnlock()
-
 	body, err := os.ReadFile(path)
 	if err != nil {
 		ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err)) // nolint: errcheck
@@ -93,22 +89,22 @@ func (c *Config) xtreamStream(ctx *gin.Context, oriURL *url.URL) {
 	c.multiplexedStream(ctx, oriURL)
 }
 
-func (c *Config) xtreamXMLTV(ctx *gin.Context) {
-	client, err := xtreamapi.New(c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL, ctx.Request.UserAgent())
-	if err != nil {
-		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
-		return
+// rejectFilteredLive answers 404 for a live channel the catalogue filter hides
+// from players, so it cannot be played by id either. It only knows ids from
+// the cached live catalogue and lets unknown ones through.
+func (c *Config) rejectFilteredLive(ctx *gin.Context, id string) bool {
+	if c.catalogFilter == nil || !c.liveStreamFiltered(id) {
+		return false
 	}
-	resp, err := client.GetXMLTV()
-	if err != nil {
-		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
-		return
-	}
-	ctx.Data(http.StatusOK, "application/xml", c.rewriteXMLTVIcons(ctx, resp))
+	ctx.AbortWithStatus(http.StatusNotFound)
+	return true
 }
 
 func (c *Config) xtreamStreamHandler(ctx *gin.Context) {
 	id := ctx.Param("id")
+	if c.rejectFilteredLive(ctx, id) {
+		return
+	}
 	rpURL, err := url.Parse(fmt.Sprintf("%s/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
 	if err != nil {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
@@ -119,6 +115,9 @@ func (c *Config) xtreamStreamHandler(ctx *gin.Context) {
 
 func (c *Config) xtreamStreamLive(ctx *gin.Context) {
 	id := ctx.Param("id")
+	if c.rejectFilteredLive(ctx, id) {
+		return
+	}
 	rpURL, err := url.Parse(fmt.Sprintf("%s/live/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
 	if err != nil {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
@@ -341,239 +340,85 @@ func (c *Config) streamFileSegment(ctx *gin.Context, filePath string, startOffse
 	}
 }
 
-func (c *Config) xtreamStreamMovieWithCache(ctx *gin.Context) {
+// streamVODWithCache serves a movie or series request, transparently caching
+// it to local disk on first access. When a ready cache entry exists it serves
+// the local file; otherwise it starts (or joins) the background download and
+// serves the player from the file as it is written, so the download is the
+// only provider connection for it (see serveVODDownload). When caching is
+// disabled or no database is configured the request is proxied directly to
+// upstream via c.stream.
+//
+// A synthetic VOD view is always registered with the session manager so that
+// /status and watch history reflect the playback regardless of the serving
+// path (cache hit, cache-miss proxy, or disabled-cache proxy).
+//
+// basePath is "movie" or "series"; defaultExt is the extension used when none
+// can be resolved from the request or the M3U catalogue (".mp4" for movies,
+// ".mkv" for series).
+func (c *Config) streamVODWithCache(ctx *gin.Context, basePath, defaultExt string) {
 	id := ctx.Param("id")
-	// Normalize DB key: cached entries are stored by bare stream_id without extension
 	idRaw := strings.TrimSuffix(id, path.Ext(id))
-	// Reject IDs containing path separators or dot-dot to prevent path traversal.
-	if strings.Contains(idRaw, "/") || strings.Contains(idRaw, "..") {
+	if !isValidStreamID(idRaw) {
 		utils.ErrorLog("Rejected stream ID with path traversal characters: %q", idRaw)
 		ctx.AbortWithStatus(http.StatusBadRequest)
 		return
 	}
-	if c.sessionManager != nil {
-		username := c.resolveRequestUsername(ctx)
-		if username != "" {
-			movieTitle := idRaw
-			if name, ok := c.resolveTitleAtStart(idRaw, "movie"); ok && strings.TrimSpace(name) != "" {
-				movieTitle = name
-			}
-			utils.InfoLog("VOD movie started: %s for user %s", movieTitle, username)
-			c.sessionManager.RegisterVODView(username, idRaw, "movie", movieTitle)
-			defer c.sessionManager.UnregisterVODView(username, idRaw)
-		}
-	}
-	if c.db != nil {
+
+	defer c.registerVODView(c.resolveRequestUsername(ctx), idRaw, basePath, idRaw)()
+
+	if c.VODCacheEnabled && c.db != nil {
 		if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil {
-			// If file exists and is ready, serve locally; if DB status is stale, serve as complete.
 			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
-				var ct string
-				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" {
-					ct = "video/mp2t"
-				} else if ext == ".mkv" {
-					ct = "video/x-matroska"
-				} else {
-					ct = "video/mp4"
-				}
+				ct := contentTypeForPath(entry.FilePath)
 				c.touchVODCache(idRaw)
-				if strings.ToLower(entry.Status) == "ready" {
-					utils.InfoLog("Serving cached movie for %s from %s", c.vodLabel(idRaw), entry.FilePath)
-					serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
-					return
-				}
-				// Final file exists but DB status is stale (rename completed before DB update).
-				utils.InfoLog("Serving complete cached file for %s (DB status pending update)", c.vodLabel(idRaw))
+				utils.InfoLog("Serving cached %s for %s from %s", basePath, c.vodLabel(idRaw), entry.FilePath)
 				serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
 				return
 			}
 		}
-		// Not cached yet: auto-start 7-day caching in background
-		// Use the extension from the request if present; only fall back to the
-		// M3U cache lookup and then a hardcoded default when the client omitted it.
-		basePath := "movie"
-		resolvedExt := path.Ext(id)
-		if resolvedExt == "" {
-			resolvedExt = c.findVODExtensionInCache(basePath, idRaw)
-		}
-		finalID := idRaw
-		if resolvedExt == "" {
-			resolvedExt = ".mp4"
-		}
-		finalID += resolvedExt
-		upstream := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
-		cacheDir := utils.VODCacheDir()
-		_ = os.MkdirAll(cacheDir, 0o755)
-		dest := filepath.Join(cacheDir, idRaw+resolvedExt)
+
+		// Not cached yet: auto-start 7-day caching in the background (or join
+		// the download already running) and serve the player from it. A
+		// second, direct provider connection for the same file would make a
+		// one-connection provider cut the download, and vice versa.
+		upstream, dest, _ := c.resolveVODCacheURL(basePath, defaultExt, id)
 		expires := time.Now().Add(7 * 24 * time.Hour)
-		// Insert pending entry
-		if err := c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: idRaw, Type: "movie", FilePath: dest, Status: "downloading", ExpiresAt: expires, CreatedAt: time.Now()}); err != nil {
-			utils.ErrorLog("Failed to record movie cache entry for %s: %v", idRaw, err)
-		}
-		downloadCtx, downloadCancel := context.WithCancel(context.Background())
-		if _, loaded := c.inProgressDownloads.LoadOrStore(idRaw, downloadCancel); loaded {
-			downloadCancel() // another goroutine owns this download; discard our cancel
-		} else {
-			go func() {
-				// The background download owns downloadCtx/downloadCancel for its
-				// entire run, independent of any single proxied viewer request's
-				// lifetime — it must keep going until it actually finishes (or
-				// fails), the same way an explicit /cache request does.
-				defer c.inProgressDownloads.Delete(idRaw)
-				defer downloadCancel()
-				c.fetchToFile(downloadCtx, upstream, dest, idRaw, expires)
-			}()
-		}
-		// Proxy to upstream directly: lets the IPTV server handle Content-Length, Content-Range,
-		// and Range seeks natively. This avoids avformat errors (MP4 moov at EOF) and seek loops.
-		// Background caching continues independently of this request; once complete, future
-		// requests serve from the local file.
-		upstreamURL, upstreamErr := url.Parse(upstream)
-		if upstreamErr != nil {
-			downloadCancel()
-			_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(upstreamErr))
-			return
-		}
-		c.stream(ctx, upstreamURL)
+		dl := c.startBackgroundDownload(upstream, dest, idRaw, basePath, expires, func() {
+			if err := c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: idRaw, Type: basePath, FilePath: dest, Status: "downloading", ExpiresAt: expires, CreatedAt: time.Now()}); err != nil {
+				utils.ErrorLog("Failed to record %s cache entry for %s: %v", basePath, idRaw, err)
+			}
+		})
+		c.serveVODDownload(ctx, dl, vodCachedLabel(idRaw), "", false)
 		return
 	}
-	rpURL, err := url.Parse(fmt.Sprintf("%s/movie/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
+
+	// Caching disabled or no database: proxy directly to upstream. VOD is
+	// seekable and each viewer may be at a different position, so the direct
+	// proxy (c.stream) is used instead of multiplexing — sharing a single
+	// linear upstream connection across viewers does not work for VOD.
+	rpURL, err := url.Parse(fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, id))
 	if err != nil {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
 		return
 	}
-	utils.DebugLog("Movie streaming request - using Xtream credentials for upstream: %s", rpURL.String())
-	c.xtreamStream(ctx, rpURL)
+	utils.DebugLog("VOD %s streaming request - proxying to upstream: %s", basePath, rpURL.String())
+	c.stream(ctx, rpURL)
 }
 
 func (c *Config) xtreamStreamMovie(ctx *gin.Context) {
-	if c.VODCacheEnabled {
-		c.xtreamStreamMovieWithCache(ctx)
-	} else {
-		id := ctx.Param("id")
-		rpURL, err := url.Parse(fmt.Sprintf("%s/movie/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
-		if err != nil {
-			_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
-			return
-		}
-		utils.DebugLog("Movie streaming request - using Xtream credentials for upstream: %s", rpURL.String())
-		c.xtreamStream(ctx, rpURL)
-	}
-}
-
-func (c *Config) xtreamStreamSeriesWithCache(ctx *gin.Context) {
-	id := ctx.Param("id")
-	idRaw := strings.TrimSuffix(id, path.Ext(id))
-	// Reject IDs containing path separators or dot-dot to prevent path traversal.
-	if strings.Contains(idRaw, "/") || strings.Contains(idRaw, "..") {
-		utils.ErrorLog("Rejected stream ID with path traversal characters: %q", idRaw)
-		ctx.AbortWithStatus(http.StatusBadRequest)
-		return
-	}
-	if c.sessionManager != nil {
-		username := c.resolveRequestUsername(ctx)
-		if username != "" {
-			seriesTitle := idRaw
-			if name, ok := c.resolveTitleAtStart(idRaw, "series"); ok && strings.TrimSpace(name) != "" {
-				seriesTitle = name
-			}
-			utils.InfoLog("VOD series started: %s for user %s", seriesTitle, username)
-			c.sessionManager.RegisterVODView(username, idRaw, "series", seriesTitle)
-			defer c.sessionManager.UnregisterVODView(username, idRaw)
-		}
-	}
-	if c.db != nil {
-		if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil {
-			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
-				var ct string
-				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" {
-					ct = "video/mp2t"
-				} else if ext == ".mkv" {
-					ct = "video/x-matroska"
-				} else {
-					ct = "video/mp4"
-				}
-				c.touchVODCache(idRaw)
-				if strings.ToLower(entry.Status) == "ready" {
-					utils.InfoLog("Serving cached episode for %s from %s", c.vodLabel(idRaw), entry.FilePath)
-					serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
-					return
-				}
-				// Final file exists but DB status is stale (rename completed before DB update).
-				utils.InfoLog("Serving complete cached file for %s (DB status pending update)", c.vodLabel(idRaw))
-				serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
-				return
-			}
-		}
-		// Not cached yet: auto-start 7-day caching in background
-		basePath := "series"
-		resolvedExt := path.Ext(id)
-		if resolvedExt == "" {
-			resolvedExt = c.findVODExtensionInCache(basePath, idRaw)
-		}
-		finalID := idRaw
-		if resolvedExt == "" {
-			resolvedExt = ".mkv"
-		}
-		finalID += resolvedExt
-		upstream := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
-		cacheDir := utils.VODCacheDir()
-		_ = os.MkdirAll(cacheDir, 0o755)
-		dest := filepath.Join(cacheDir, idRaw+resolvedExt)
-		expires := time.Now().Add(7 * 24 * time.Hour)
-		if err := c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: idRaw, Type: "series", FilePath: dest, Status: "downloading", ExpiresAt: expires, CreatedAt: time.Now()}); err != nil {
-			utils.ErrorLog("Failed to record series cache entry for %s: %v", idRaw, err)
-		}
-		downloadCtx, downloadCancel := context.WithCancel(context.Background())
-		if _, loaded := c.inProgressDownloads.LoadOrStore(idRaw, downloadCancel); loaded {
-			downloadCancel()
-		} else {
-			go func() {
-				// The background download owns downloadCtx/downloadCancel for its
-				// entire run, independent of any single proxied viewer request's
-				// lifetime — it must keep going until it actually finishes (or
-				// fails), the same way an explicit /cache request does.
-				defer c.inProgressDownloads.Delete(idRaw)
-				defer downloadCancel()
-				c.fetchToFile(downloadCtx, upstream, dest, idRaw, expires)
-			}()
-		}
-		// Proxy to upstream directly for proper headers and native Range-seek support.
-		// Background caching continues independently of this request; once complete,
-		// future requests serve from the local file.
-		upstreamURL, upstreamErr := url.Parse(upstream)
-		if upstreamErr != nil {
-			downloadCancel()
-			_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(upstreamErr))
-			return
-		}
-		c.stream(ctx, upstreamURL)
-		return
-	}
-	rpURL, err := url.Parse(fmt.Sprintf("%s/series/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
-	if err != nil {
-		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
-		return
-	}
-	c.xtreamStream(ctx, rpURL)
+	c.streamVODWithCache(ctx, "movie", ".mp4")
 }
 
 func (c *Config) xtreamStreamSeries(ctx *gin.Context) {
-	if c.VODCacheEnabled {
-		c.xtreamStreamSeriesWithCache(ctx)
-	} else {
-		id := ctx.Param("id")
-		rpURL, err := url.Parse(fmt.Sprintf("%s/series/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
-		if err != nil {
-			_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
-			return
-		}
-		c.xtreamStream(ctx, rpURL)
-	}
+	c.streamVODWithCache(ctx, "series", ".mkv")
 }
 
 // Direct handlers using proxy credentials
 func (c *Config) xtreamProxyCredentialsStreamHandler(ctx *gin.Context) {
 	id := ctx.Param("id")
+	if c.rejectFilteredLive(ctx, id) {
+		return
+	}
 	utils.DebugLog("Direct stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
 	rpURL, err := url.Parse(fmt.Sprintf("%s/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
 	if err != nil {
@@ -586,6 +431,9 @@ func (c *Config) xtreamProxyCredentialsStreamHandler(ctx *gin.Context) {
 
 func (c *Config) xtreamProxyCredentialsLiveStreamHandler(ctx *gin.Context) {
 	id := ctx.Param("id")
+	if c.rejectFilteredLive(ctx, id) {
+		return
+	}
 	utils.DebugLog("Direct live stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
 	rpURL, err := url.Parse(fmt.Sprintf("%s/live/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
 	if err != nil {
@@ -597,230 +445,9 @@ func (c *Config) xtreamProxyCredentialsLiveStreamHandler(ctx *gin.Context) {
 }
 
 func (c *Config) xtreamProxyCredentialsMovieStreamHandler(ctx *gin.Context) {
-	if c.VODCacheEnabled {
-		c.xtreamProxyCredentialsMovieStreamHandlerWithCache(ctx)
-	} else {
-		id := ctx.Param("id")
-		rpURL, err := url.Parse(fmt.Sprintf("%s/movie/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
-		if err != nil {
-			utils.ErrorLog("Failed to parse upstream URL: %v", err)
-			ctx.AbortWithStatus(500)
-			return
-		}
-		utils.DebugLog("Movie streaming request - using Xtream credentials for upstream: %s", rpURL.String())
-		c.stream(ctx, rpURL)
-	}
-}
-
-func (c *Config) xtreamProxyCredentialsMovieStreamHandlerWithCache(ctx *gin.Context) {
-	id := ctx.Param("id")
-	idRaw := strings.TrimSuffix(id, path.Ext(id))
-	// Reject IDs containing path separators or dot-dot to prevent path traversal.
-	if strings.Contains(idRaw, "/") || strings.Contains(idRaw, "..") {
-		utils.ErrorLog("Rejected stream ID with path traversal characters: %q", idRaw)
-		ctx.AbortWithStatus(http.StatusBadRequest)
-		return
-	}
-	utils.DebugLog("Direct movie stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
-	if c.sessionManager != nil {
-		username := c.resolveRequestUsername(ctx)
-		if username != "" {
-			movieTitle := idRaw
-			if name, ok := c.resolveTitleAtStart(idRaw, "movie"); ok && strings.TrimSpace(name) != "" {
-				movieTitle = name
-			}
-			utils.InfoLog("VOD movie started: %s for user %s", movieTitle, username)
-			c.sessionManager.RegisterVODView(username, idRaw, "movie", movieTitle)
-			defer c.sessionManager.UnregisterVODView(username, idRaw)
-		}
-	}
-	if c.db != nil {
-		if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil {
-			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
-				var ct string
-				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" {
-					ct = "video/mp2t"
-				} else if ext == ".mkv" {
-					ct = "video/x-matroska"
-				} else {
-					ct = "video/mp4"
-				}
-				c.touchVODCache(idRaw)
-				if strings.ToLower(entry.Status) == "ready" {
-					utils.InfoLog("Serving cached movie (proxy creds path) for %s from %s", c.vodLabel(idRaw), entry.FilePath)
-					serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
-					return
-				}
-				// Final file exists but DB status is stale (rename completed before DB update).
-				utils.InfoLog("Serving complete cached file for %s (DB status pending update)", c.vodLabel(idRaw))
-				serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
-				return
-			}
-		}
-		// Auto-start caching
-		basePath := "movie"
-		resolvedExt := path.Ext(id)
-		if resolvedExt == "" {
-			resolvedExt = c.findVODExtensionInCache(basePath, idRaw)
-		}
-		finalID := idRaw
-		if resolvedExt == "" {
-			resolvedExt = ".mp4"
-		}
-		finalID += resolvedExt
-		upstream := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
-		cacheDir := utils.VODCacheDir()
-		_ = os.MkdirAll(cacheDir, 0o755)
-		dest := filepath.Join(cacheDir, idRaw+resolvedExt)
-		expires := time.Now().Add(7 * 24 * time.Hour)
-		if err := c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: idRaw, Type: "movie", FilePath: dest, Status: "downloading", ExpiresAt: expires, CreatedAt: time.Now()}); err != nil {
-			utils.ErrorLog("Failed to record movie cache entry for %s: %v", idRaw, err)
-		}
-		downloadCtx, downloadCancel := context.WithCancel(context.Background())
-		if _, loaded := c.inProgressDownloads.LoadOrStore(idRaw, downloadCancel); loaded {
-			downloadCancel()
-		} else {
-			go func() {
-				// The background download owns downloadCtx/downloadCancel for its
-				// entire run, independent of any single proxied viewer request's
-				// lifetime — it must keep going until it actually finishes (or
-				// fails), the same way an explicit /cache request does.
-				defer c.inProgressDownloads.Delete(idRaw)
-				defer downloadCancel()
-				c.fetchToFile(downloadCtx, upstream, dest, idRaw, expires)
-			}()
-		}
-		// Proxy to upstream directly for proper headers and native Range-seek support.
-		// Background caching continues independently of this request; once complete,
-		// future requests serve from the local file.
-		upstreamURL, upstreamErr := url.Parse(upstream)
-		if upstreamErr != nil {
-			downloadCancel()
-			_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(upstreamErr))
-			return
-		}
-		c.stream(ctx, upstreamURL)
-		return
-	}
-	rpURL, err := url.Parse(fmt.Sprintf("%s/movie/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
-	if err != nil {
-		utils.ErrorLog("Failed to parse upstream URL: %v", err)
-		ctx.AbortWithStatus(500)
-		return
-	}
-	c.stream(ctx, rpURL)
+	c.streamVODWithCache(ctx, "movie", ".mp4")
 }
 
 func (c *Config) xtreamProxyCredentialsSeriesStreamHandler(ctx *gin.Context) {
-	if c.VODCacheEnabled {
-		c.xtreamProxyCredentialsSeriesStreamHandlerWithCache(ctx)
-	} else {
-		id := ctx.Param("id")
-		rpURL, err := url.Parse(fmt.Sprintf("%s/series/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
-		if err != nil {
-			utils.ErrorLog("Failed to parse upstream URL: %v", err)
-			ctx.AbortWithStatus(500)
-			return
-		}
-		utils.DebugLog("Series streaming request - using Xtream credentials for upstream: %s", rpURL.String())
-		c.stream(ctx, rpURL)
-	}
-}
-
-func (c *Config) xtreamProxyCredentialsSeriesStreamHandlerWithCache(ctx *gin.Context) {
-	id := ctx.Param("id")
-	idRaw := strings.TrimSuffix(id, path.Ext(id))
-	// Reject IDs containing path separators or dot-dot to prevent path traversal.
-	if strings.Contains(idRaw, "/") || strings.Contains(idRaw, "..") {
-		utils.ErrorLog("Rejected stream ID with path traversal characters: %q", idRaw)
-		ctx.AbortWithStatus(http.StatusBadRequest)
-		return
-	}
-	utils.DebugLog("Direct series stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
-	if c.sessionManager != nil {
-		username := c.resolveRequestUsername(ctx)
-		if username != "" {
-			seriesTitle := idRaw
-			if name, ok := c.resolveTitleAtStart(idRaw, "series"); ok && strings.TrimSpace(name) != "" {
-				seriesTitle = name
-			}
-			utils.InfoLog("VOD series started: %s for user %s", seriesTitle, username)
-			c.sessionManager.RegisterVODView(username, idRaw, "series", seriesTitle)
-			defer c.sessionManager.UnregisterVODView(username, idRaw)
-		}
-	}
-	if c.db != nil {
-		if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil {
-			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
-				var ct string
-				if ext := strings.ToLower(path.Ext(entry.FilePath)); ext == ".ts" {
-					ct = "video/mp2t"
-				} else if ext == ".mkv" {
-					ct = "video/x-matroska"
-				} else {
-					ct = "video/mp4"
-				}
-				c.touchVODCache(idRaw)
-				if strings.ToLower(entry.Status) == "ready" {
-					utils.InfoLog("Serving cached episode (proxy creds path) for %s from %s", c.vodLabel(idRaw), entry.FilePath)
-					serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
-					return
-				}
-				// Final file exists but DB status is stale (rename completed before DB update).
-				utils.InfoLog("Serving complete cached file for %s (DB status pending update)", c.vodLabel(idRaw))
-				serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
-				return
-			}
-		}
-		basePath := "series"
-		resolvedExt := path.Ext(id)
-		if resolvedExt == "" {
-			resolvedExt = c.findVODExtensionInCache(basePath, idRaw)
-		}
-		finalID := idRaw
-		if resolvedExt == "" {
-			resolvedExt = ".mkv"
-		}
-		finalID += resolvedExt
-		upstream := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
-		cacheDir := utils.VODCacheDir()
-		_ = os.MkdirAll(cacheDir, 0o755)
-		dest := filepath.Join(cacheDir, idRaw+resolvedExt)
-		expires := time.Now().Add(7 * 24 * time.Hour)
-		if err := c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: idRaw, Type: "series", FilePath: dest, Status: "downloading", ExpiresAt: expires, CreatedAt: time.Now()}); err != nil {
-			utils.ErrorLog("Failed to record series cache entry for %s: %v", idRaw, err)
-		}
-		downloadCtx, downloadCancel := context.WithCancel(context.Background())
-		if _, loaded := c.inProgressDownloads.LoadOrStore(idRaw, downloadCancel); loaded {
-			downloadCancel()
-		} else {
-			go func() {
-				// The background download owns downloadCtx/downloadCancel for its
-				// entire run, independent of any single proxied viewer request's
-				// lifetime — it must keep going until it actually finishes (or
-				// fails), the same way an explicit /cache request does.
-				defer c.inProgressDownloads.Delete(idRaw)
-				defer downloadCancel()
-				c.fetchToFile(downloadCtx, upstream, dest, idRaw, expires)
-			}()
-		}
-		// Proxy to upstream directly for proper headers and native Range-seek support.
-		// Background caching continues independently of this request; once complete,
-		// future requests serve from the local file.
-		upstreamURL, upstreamErr := url.Parse(upstream)
-		if upstreamErr != nil {
-			downloadCancel()
-			_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(upstreamErr))
-			return
-		}
-		c.stream(ctx, upstreamURL)
-		return
-	}
-	rpURL, err := url.Parse(fmt.Sprintf("%s/series/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
-	if err != nil {
-		utils.ErrorLog("Failed to parse upstream URL: %v", err)
-		ctx.AbortWithStatus(500)
-		return
-	}
-	c.stream(ctx, rpURL)
+	c.streamVODWithCache(ctx, "series", ".mkv")
 }

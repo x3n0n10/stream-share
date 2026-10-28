@@ -99,6 +99,114 @@ streamshare --m3u-url http://provider.com/get.php?username=user&password=pass&ty
 Access your playlist at:  
 `http://streamshare.example.com:8080/iptv.m3u?username=test&password=passwordtest`
 
+### M3U Deduplication
+
+Provider playlists routinely contain redundant entries: the same channel or movie
+listed twice under different categories, or one entry per language / per quality
+for the same VOD title. When enabled (it is **off by default**), StreamShare
+collapses those into a single entry, keeping the best source, before the playlist
+is written to disk.
+
+Two detection layers are applied:
+
+1. **Exact identity** — same Xtream stream type + stream ID (`/movie/<user>/<pass>/12345.mp4`
+   listed twice), or the exact same URL in a plain M3U playlist.
+2. **Title fingerprint** — for Xtream `movie` and `live` entries only, the same
+   normalized title. Normalization ignores case, accents, punctuation, a leading
+   `The`/`Le`/`La`/`Les`, quality tags (`4K`, `1080p`, `HD`, ...), language tags
+   at either end of the title or in brackets (`FR:`, `[VF]`, `VOSTFR`, `ITA`, ...)
+   and `SxxEyy` formatting. The year is kept in the key, bracketed or not, so
+   remakes (`Dune (1984)` vs `Dune 2021`) stay separate.
+
+Safety rules:
+
+- Entries whose title carries an episode marker (`S01E02`) are **never** merged by
+  title, so two episodes of the same series are both kept.
+- `series`, `timeshift` and plain M3U entries are **never** merged by title, only
+  by exact identity.
+- Bracketed text that is not a tag (`(US)`, `(Director's Cut)`) and subtitles
+  (`Mission Impossible - Fallout`) stay part of the title, so they never cause a merge.
+- Among duplicates, the survivor is chosen by score: video quality first
+  (`8K` > `4K`/`UHD` > `1080p` > `720p` > ...), then the preferred language, then
+  richer metadata (logo, EPG id, group-title), then the provider's original order.
+
+In Xtream `get.php` mode the playlist is streamed to a temp file while a ~24-byte
+record is kept per track, then only the surviving tracks are copied into the final
+file in one sequential pass, so a 400+ MB / 1.45M-track catalog is deduplicated
+without loading it into RAM (at the cost of one extra temporary copy on disk).
+
+Configuration:
+
+| Env var | Default | Description |
+|---|---|---|
+| `M3U_DEDUP_ENABLED` | `false` | Set to `true` to enable deduplication |
+| `M3U_DEDUP_PREFERRED_LANGS` | `fra` | Comma-separated ordered list of preferred audio languages (e.g. `fra,eng`); among equal-quality duplicates the most preferred language wins |
+
+### Series Episode Deduplication
+
+Some providers list the same episode of a series several times under different stream ids: in a player, the episode shows up twice (or more), and picking each copy downloads the same file again. With `SERIES_EPISODE_DEDUP_ENABLED=true`, the server merges those copies in the `get_series_info` answer players browse (and in the Discord `/watch` series search). It is **off by default**: with it off, answers are passed through unchanged.
+
+Two entries are merged only when everything comparable says they are the same file:
+
+- same season and episode number, and the same title (case and spacing aside);
+- the same technical info from the provider: duration within 2 seconds, video codec, profile, pixel format and height, audio codec, and container.
+
+An entry whose info lacks a duration or a video codec can't be compared and is never merged. The copy with the lowest stream id is kept, so a file already cached or a history row for that id keeps matching; a dropped copy still plays if a player asks for its id directly. The season's `episode_count` is lowered accordingly.
+
+Copies of one episode with different technical info (say an H.264 and an HEVC 10-bit encode) are genuine alternatives and are all kept. Set `SERIES_EPISODE_DEDUP_TAG_VARIANTS=true` to append what tells them apart to their titles, e.g. `S01E02 [HEVC 10-bit]` and `S01E02 [H.264]`, so you can pick the one your device plays.
+
+| Env var | Default | Description |
+|---|---|---|
+| `SERIES_EPISODE_DEDUP_ENABLED` | `false` | Merge identical duplicate copies of an episode |
+| `SERIES_EPISODE_DEDUP_TAG_VARIANTS` | `false` | Tag the titles of an episode's different encodes |
+
+### Catalogue Filtering
+
+Providers often ship catalogues of tens of thousands of channels and hundreds of thousands of movies and episodes, most of them in languages nobody on your server watches. Every player then downloads and indexes all of it. The catalogue filter keeps only what you want, on the server, so players only ever receive the entries you kept. It is **off by default**: with nothing configured, every answer is passed through unchanged.
+
+Each rule is a [regular expression](https://github.com/google/re2/wiki/Syntax) matched against an entry's **group** (its category: `category_name` in the Xtream API, `group-title` in a playlist) or its **name**. The semantics follow [iptv-proxy](https://github.com/pierre-emmanuelJ/iptv-proxy)'s channel filters:
+
+- `*_GROUP_REGEX`, `*_NAME_REGEX`: keep only what matches.
+- `*_GROUP_EXCLUDE_REGEX`, `*_NAME_EXCLUDE_REGEX`: drop what matches, even if it was kept by the first two.
+- `*_ANY_REGEX`: keep only what matches in the group **or** the name. Use it when a provider marks something (a language, say) in the title for some entries and in the category for others.
+- An entry is kept when it passes all of them. Expressions are case sensitive; start one with `(?i)` to ignore case. An invalid expression stops the server at startup, naming the option.
+- **An entry without a group is judged on its name alone**: group patterns never drop it. Many providers leave movies and series uncategorized and carry their language or origin in the name only, so filter those with name patterns.
+
+The five variables exist with four prefixes; a kind-specific set applies on top of the set for every kind:
+
+| Prefix | Applies to |
+|---|---|
+| `FILTER_` | every kind of entry |
+| `FILTER_LIVE_` | live channels |
+| `FILTER_MOVIE_` | movies |
+| `FILTER_SERIES_` | series |
+
+Plus `FILTER_EXCLUDE_ADULT=true`, which drops entries the provider flags as adult (Xtream `is_adult`).
+
+Example (an illustration; adapt the expressions to how your provider names things). A provider prefixes live categories with a language (`FR| SPORTS`) and movie and series titles too (`FR - Amélie`), except some uncategorized-by-title movies whose language is only in their category (`|FR| COMEDY`). Keep French and English, drop adult content:
+
+```yaml
+environment:
+  FILTER_LIVE_GROUP_REGEX: '^\|?(FR|EN|US|UK)(\||\s)'
+  FILTER_MOVIE_ANY_REGEX: '^\|?(FR|EN|US|UK)(\||\s)'
+  FILTER_SERIES_ANY_REGEX: '^\|?(FR|EN|US|UK)(\||\s)'
+  FILTER_GROUP_EXCLUDE_REGEX: '(?i)adult|xxx'
+  FILTER_EXCLUDE_ADULT: "true"
+```
+
+Note that `*_GROUP_REGEX` and `*_NAME_REGEX` together require **both** to match; use `*_ANY_REGEX` for "either".
+
+> **Check your rules against your real catalogue before deploying them.** Naming varies a lot between providers (`FR|`, `FR -`, `|FR|`, `FR `...), and a pattern that misses the actual format silently drops everything of that kind. Count what a playlist keeps per kind (e.g. fetch `get.php` before and after) on a first deployment.
+
+The filter applies to everything players get:
+
+- the Xtream API lists (`get_live_streams`, `get_vod_streams`, `get_series`) and their categories. A category that no longer holds any kept entry is dropped too, once that list has been fetched;
+- the `get.php` playlist, track by track (a dropped track loses all its lines: `#EXTINF`, `#EXTGRP`, `#EXTVLCOPT`...). With deduplication on, filtering happens first;
+- the guide (`xmltv.php`), when live rules are set: only the kept channels and their programmes. Until the live list has been fetched once, the full guide is served;
+- live streams: a channel the filter drops answers 404, even asked by its id. Ids the cached live list does not know are let through.
+
+What it does not apply to: the Discord `/watch` search (an admin tool that keeps searching the whole catalogue), movie and series streams by id (their lists can be too large, or empty on some providers, to check every request against), `get.php` tracks that are neither a movie nor a series (bare stream addresses, radio links) are treated as live channels.
+
 ### Xtream Codes API Compatibility
 
 StreamShare fully supports the Xtream Codes API with enhanced error handling and response sanitization:
@@ -370,8 +478,27 @@ Cache movies or episodes to disk for faster start times and to reduce upstream u
 - Cached items automatically serve for both downloads and VOD/series streaming endpoints when available.
 
 Configuration:
-- `CACHE_FOLDER` — Absolute path to the root cache directory. stream-share creates purpose-specific subfolders underneath it: `<CACHE_FOLDER>/vod` for cached VOD media and `<CACHE_FOLDER>/catchup` for live catchup buffers. Defaults to `$TMPDIR/stream-share` when unset.
+- `CACHE_FOLDER` — Absolute path to the root cache directory. stream-share creates purpose-specific subfolders underneath it: `<CACHE_FOLDER>/vod` for cached VOD media, `<CACHE_FOLDER>/catchup` for live catchup buffers and `<CACHE_FOLDER>/epg` for the cached XMLTV guide (`xmltv.php` is downloaded once from the provider at startup, served from disk to every player, refreshed in the background after `M3U_CACHE_EXPIRATION_HOURS`, and the last good guide keeps being served if the provider fails). Defaults to `$TMPDIR/stream-share` when unset.
 - `INTERNAL_API_KEY` — API key used by the internal API (Discord bot and tools).
+
+#### Provider connection limit
+
+IPTV accounts allow a limited number of connections at once, often a single one, and the provider cuts the oldest when a new one opens. A cache download keeps running after the viewer leaves (so the item ends up cached), which used to make it fight with whatever the viewer watched next: each one's connection was cut in turn, and playback stalled.
+
+stream-share now arbitrates every media connection it opens to the provider (live streams and VOD cache downloads) within the account's limit:
+
+- Something **watched** (a live stream with viewers, a download a player is reading from) is in the foreground. A download **nobody watches** (the item a viewer left, an explicit `/watch` cache) is in the background.
+- When the limit is reached, a foreground stream **pauses a background download**: its connection is closed, it keeps what it downloaded and **resumes automatically** where it stopped once a connection is free. Pausing does not count against its retries.
+- Background downloads never pause anything; they take free connections in arrival order.
+- If everything in use is being watched, the most recent request takes over the connection (the provider could not serve both anyway).
+
+| Env var | Default | Description |
+|---|---|---|
+| `PROVIDER_MAX_CONNECTIONS` | `0` | `0` uses the limit your provider reports (`max_connections` in its account info, see [Provider subscription info](#provider-subscription-info)) and applies no limit while it is unknown; a positive number forces a limit; `-1` turns arbitration off |
+
+`/api/internal/status` lists who holds the provider connections and which downloads are paused (`provider_slots`) when a limit applies.
+
+Not arbitrated: movies proxied directly when VOD caching is off, HLS segment requests, and the optional provider health probe; they behave as before.
 
 ---
 

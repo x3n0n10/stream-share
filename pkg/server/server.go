@@ -40,6 +40,8 @@ import (
 	"github.com/lucasduport/stream-share/pkg/config"
 	"github.com/lucasduport/stream-share/pkg/database"
 	"github.com/lucasduport/stream-share/pkg/discord"
+	"github.com/lucasduport/stream-share/pkg/filter"
+	"github.com/lucasduport/stream-share/pkg/provider"
 	"github.com/lucasduport/stream-share/pkg/session"
 	"github.com/lucasduport/stream-share/pkg/slate"
 	"github.com/lucasduport/stream-share/pkg/utils"
@@ -94,8 +96,17 @@ type Config struct {
 	// apply to this deployment (plain M3U) and the endpoint reports so.
 	providerInfo *providerInfoState
 
-	// inProgressDownloads guards against concurrent duplicate fetchToFile goroutines
+	// inProgressDownloads holds the running VOD cache downloads (stream ID ->
+	// *vodDownload): one per item, shared by every request served from it.
 	inProgressDownloads sync.Map
+
+	// providerSlots arbitrates the media connections opened to the provider
+	// (see providerSlotCapacity); never nil once the server is built.
+	providerSlots *provider.Arbiter
+
+	// catalogFilter is the compiled catalogue filter; nil keeps everything, and
+	// every filtering path checks for nil first so it costs nothing when unset.
+	catalogFilter *filter.Set
 }
 
 // NewServer initializes a new server configuration with all necessary components.
@@ -110,6 +121,14 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 			return nil, utils.PrintErrorAndReturn(err)
 		}
 		utils.InfoLog("Successfully parsed M3U playlist from %s", config.RemoteURL.String())
+	}
+
+	catalogFilter, err := filter.NewSet(config.CatalogFilter)
+	if err != nil {
+		return nil, utils.PrintErrorAndReturn(err)
+	}
+	if catalogFilter.Active() {
+		utils.InfoLog("Catalogue filter enabled (rules %s)", catalogFilter.Fingerprint())
 	}
 
 	// Use custom ID for endpoint if provided, otherwise use a generated one
@@ -133,6 +152,7 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		db:                   nil,
 		discordBot:           nil,
 		startTime:            time.Now(),
+		catalogFilter:        catalogFilter,
 	}
 
 	// Provider health check: report-only. Reconnecting the VPN on a bad result is
@@ -156,6 +176,7 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	if strings.TrimSpace(config.XtreamBaseURL) != "" {
 		serverConfig.providerInfo = &providerInfoState{}
 	}
+	serverConfig.providerSlots = provider.New(serverConfig.providerSlotCapacity)
 
 	// Force PostgreSQL initialization (sqlite removed)
 	utils.InfoLog("Bootstrap: Forcing PostgreSQL database initialization")
@@ -166,6 +187,7 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	serverConfig.db = db
 	serverConfig.sessionManager = session.NewSessionManager(db)
 	serverConfig.sessionManager.SetNameResolver(serverConfig.resolveStreamName)
+	serverConfig.sessionManager.SetProviderSlots(serverConfig.providerSlots)
 	utils.InfoLog("Session manager initialized with database connection")
 
 	// Seed in-memory name indices from DB so names are available before the first API call.
@@ -381,6 +403,15 @@ func (c *Config) Serve() error {
 	// resolve names immediately, without waiting for a player to request the list.
 	go c.warmChannelNameIndex()
 
+	// Start the VOD M3U download now: on big catalogues it takes minutes, and
+	// lookups never wait for it, so starting early is what makes extensions and
+	// titles available by the time the first VOD is requested.
+	if c.XtreamBaseURL != "" {
+		_, _ = c.ensureVODM3UCache()
+		// Same for the XMLTV guide, which players fetch right after login.
+		c.ensureEPGCache()
+	}
+
 	// Start background goroutine to keep apiChannelIndex fresh.
 	nameRefreshStop := make(chan struct{})
 	c.startNameIndexRefresher(nameRefreshStop)
@@ -431,11 +462,17 @@ func (c *Config) Serve() error {
 	// request, which drowns the log in noise from the frequently-polled /healthz
 	// and internal API endpoints. Log only failures (>= 400) unless debug logging
 	// is on, in which case fall back to the full access log.
+	// Release mode unless debug logging is on: in debug mode gin prints every
+	// route at startup, and the Xtream stream routes embed the provider's
+	// username and password in their paths. An explicit GIN_MODE still wins.
+	if os.Getenv(gin.EnvGinMode) == "" && !utils.IsDebugLogEnabled() {
+		gin.SetMode(gin.ReleaseMode)
+	}
 	router := gin.New()
 	if utils.IsDebugLogEnabled() {
 		router.Use(gin.Logger())
 	} else {
-		router.Use(quietRequestLogger())
+		router.Use(c.quietRequestLogger())
 	}
 	router.Use(gin.Recovery())
 	router.Use(cors.Default())
@@ -480,7 +517,7 @@ func (c *Config) Serve() error {
 // quietRequestLogger logs only failed HTTP requests (status >= 400), keeping the
 // success flood — health checks, internal API polling — out of the log. Requests
 // it does log go through the project logger at a severity matching their status.
-func quietRequestLogger() gin.HandlerFunc {
+func (c *Config) quietRequestLogger() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		start := time.Now()
 		ctx.Next()
@@ -489,18 +526,47 @@ func quietRequestLogger() gin.HandlerFunc {
 		if status < 400 {
 			return
 		}
-		path := ctx.Request.URL.Path
-		if raw := ctx.Request.URL.RawQuery; raw != "" {
-			path = path + "?" + raw
-		}
 		msg := fmt.Sprintf("[HTTP] %d | %v | %s | %s %q",
-			status, time.Since(start), ctx.ClientIP(), ctx.Request.Method, path)
+			status, time.Since(start), ctx.ClientIP(), ctx.Request.Method, c.redactRequestURI(ctx.Request.URL, ctx.FullPath()))
 		if status >= 500 {
 			utils.ErrorLog("%s", msg)
 		} else {
 			utils.WarnLog("%s", msg)
 		}
 	}
+}
+
+// redactRequestURI renders a request path and query for logging with every
+// credential masked: the username/password query parameters, path segments the
+// matched route declares as :password (stream routes carry a viewer's own
+// credentials as /live/<user>/<pass>/<id>, LDAP ones included), and any segment
+// equal to the proxy's or the provider's username or password. route is the
+// matched route pattern (ctx.FullPath()), empty when nothing matched.
+func (c *Config) redactRequestURI(u *url.URL, route string) string {
+	secrets := map[string]bool{}
+	for _, s := range []string{c.User.String(), c.Password.String(), c.XtreamUser.String(), c.XtreamPassword.String()} {
+		if s != "" {
+			secrets[s] = true
+		}
+	}
+	segs := strings.Split(u.Path, "/")
+	routeSegs := strings.Split(route, "/")
+	for i, seg := range segs {
+		if secrets[seg] || (i < len(routeSegs) && routeSegs[i] == ":password") {
+			segs[i] = "***"
+		}
+	}
+	out := strings.Join(segs, "/")
+	if u.RawQuery == "" {
+		return out
+	}
+	q := u.Query()
+	for _, k := range []string{"username", "password"} {
+		if q.Has(k) {
+			q.Set(k, "***")
+		}
+	}
+	return out + "?" + q.Encode()
 }
 
 // Add direct streaming routes with proxy credentials
@@ -591,9 +657,15 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 		return
 	}
 
+	// Normalize the stream ID and classify its type once for both the view
+	// registration and the cache lookup below.
+	idRaw := strings.TrimSuffix(tempLink.StreamID, path.Ext(tempLink.StreamID))
+	basePath := classifyStreamType(tempLink.URL, "movie")
+
+	defer c.registerVODView(tempLink.Username, idRaw, basePath, tempLink.Title)()
+
 	// If cached locally, serve from disk (normalize ID without extension)
 	if c.db != nil && tempLink.StreamID != "" {
-		idRaw := strings.TrimSuffix(tempLink.StreamID, path.Ext(tempLink.StreamID))
 		if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil && entry.Status == "ready" {
 			utils.InfoLog("Download via cache for %s -> %s", c.vodLabel(tempLink.StreamID), entry.FilePath)
 			ext := strings.ToLower(path.Ext(entry.FilePath))
@@ -601,18 +673,23 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 				ext = ".mp4"
 			}
 			c.touchVODCache(idRaw)
-			var ct string
-			switch ext {
-			case ".ts":
-				ct = "video/mp2t"
-			case ".mkv":
-				ct = "video/x-matroska"
-			case ".mp4":
-				ct = "video/mp4"
-			default:
-				ct = "application/octet-stream"
+			serveLocalFileRange(ctx, entry.FilePath, contentTypeForPath(entry.FilePath), sanitiseFilename(tempLink.Title)+ext, true)
+			return
+		}
+
+		// Cache miss: when VOD caching is enabled, start (or join) the
+		// background download and serve this download from it, so future
+		// requests serve from local disk and this one opens no second provider
+		// connection. This realizes the "always cache" policy.
+		if c.VODCacheEnabled {
+			defaultExt := ".mp4"
+			if basePath == "series" {
+				defaultExt = ".mkv"
 			}
-			serveLocalFileRange(ctx, entry.FilePath, ct, sanitiseFilename(tempLink.Title)+ext, true)
+			upstream, dest, _ := c.resolveVODCacheURL(basePath, defaultExt, tempLink.StreamID)
+			expires := time.Now().Add(7 * 24 * time.Hour)
+			dl := c.startBackgroundDownload(upstream, dest, idRaw, basePath, expires, nil)
+			c.serveVODDownload(ctx, dl, vodCachedLabel(idRaw), sanitiseFilename(tempLink.Title)+path.Ext(dest), true)
 			return
 		}
 	}
@@ -728,7 +805,9 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 
 	// Request the stream through the session manager for multiplexing
 	label := c.streamLabel(streamID)
-	buffer, err := c.sessionManager.RequestStream(username, streamID, streamType, streamTitle, targetURL)
+	// clientKey identifies this connection: one user can hold several (e.g.
+	// two devices on the same account), so every later call names its own.
+	buffer, clientKey, err := c.sessionManager.RequestStream(username, streamID, streamType, streamTitle, targetURL)
 	if err != nil {
 		utils.ErrorLog("Multiplex: RequestStream failed for user=%s %s err=%v", username, label, err)
 		ctx.AbortWithStatus(http.StatusInternalServerError)
@@ -739,13 +818,13 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	}
 
 	// Get the data channel and termination signal for this client
-	dataChan, exists := c.sessionManager.GetClientChannel(streamID, username)
+	dataChan, exists := c.sessionManager.GetClientChannel(streamID, clientKey)
 	if !exists {
 		utils.ErrorLog("Failed to get client channel for user=%s, %s", username, label)
 		ctx.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
-	doneChan, _ := c.sessionManager.GetClientDone(streamID, username)
+	doneChan, _ := c.sessionManager.GetClientDone(streamID, clientKey)
 	clientGone := ctx.Request.Context().Done()
 
 	// Wait until the pump knows whether the upstream actually came up, before we
@@ -764,7 +843,7 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 				if !c.sessionManager.ServesSlateFor(streamID) {
 					utils.WarnLog("Multiplex: upstream failed for %s (user=%s): %s",
 						label, username, startErr.Error())
-					c.sessionManager.RemoveClient(streamID, username)
+					c.sessionManager.RemoveClient(streamID, username, clientKey)
 					ctx.AbortWithStatus(http.StatusBadGateway)
 					return
 				}
@@ -772,12 +851,12 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 		case <-time.After(upstreamReadyTimeout):
 			utils.WarnLog("Multiplex: upstream did not respond within %s for %s (user=%s)",
 				upstreamReadyTimeout, label, username)
-			c.sessionManager.RemoveClient(streamID, username)
+			c.sessionManager.RemoveClient(streamID, username, clientKey)
 			ctx.AbortWithStatus(http.StatusGatewayTimeout)
 			return
 		case <-clientGone:
 			utils.DebugLog("Multiplex: client %s left before %s started", username, label)
-			c.sessionManager.RemoveClient(streamID, username)
+			c.sessionManager.RemoveClient(streamID, username, clientKey)
 			return
 		}
 	}
@@ -818,7 +897,7 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 
 	// Clean up after streaming is done
 	utils.DebugLog("Stream ended for user %s (%s)", username, label)
-	c.sessionManager.RemoveClient(streamID, username)
+	c.sessionManager.RemoveClient(streamID, username, clientKey)
 }
 
 // playlistInitialization writes a proxified M3U file to disk if a playlist was parsed.
@@ -838,13 +917,25 @@ func (c *Config) playlistInitialization() error {
 
 // MarshallInto a *bufio.Writer a Playlist.
 // marshallInto writes the in-memory playlist into an M3U file, rewriting
-// credentials and paths depending on xtream mode.
+// credentials and paths depending on xtream mode. When M3U dedup is enabled,
+// redundant tracks are dropped first (same stream ID listed twice, or
+// same-title copies differing only by language/quality), keeping the best
+// source per group.
 func (c *Config) marshallInto(into *os.File, xtream bool) error {
-	filteredTrack := make([]m3u.Track, 0, len(c.playlist.Tracks))
+	tracks := c.playlist.Tracks
+	if c.M3UDedupEnabled && len(tracks) > 1 {
+		before := len(tracks)
+		tracks, _ = deduplicateTracks(tracks, dedupPreferredLanguages(c.M3UDedupPreferredLangs))
+		if len(tracks) != before {
+			utils.InfoLog("M3U dedup: %d tracks -> %d kept (%d redundant removed)", before, len(tracks), before-len(tracks))
+		}
+	}
+
+	filteredTrack := make([]m3u.Track, 0, len(tracks))
 
 	ret := 0
 	into.WriteString("#EXTM3U\n") // nolint: errcheck
-	for i, track := range c.playlist.Tracks {
+	for i, track := range tracks {
 		var buffer bytes.Buffer
 
 		buffer.WriteString("#EXTINF:") // nolint: errcheck
@@ -872,6 +963,8 @@ func (c *Config) marshallInto(into *os.File, xtream bool) error {
 
 		filteredTrack = append(filteredTrack, track)
 	}
+	// Store back the written list so route registration (which runs after
+	// playlistInitialization) sees the same tracks and indices as the file.
 	c.playlist.Tracks = filteredTrack
 
 	return into.Sync()
@@ -953,26 +1046,29 @@ func (c *Config) startNameIndexRefresher(stopCh <-chan struct{}) {
 }
 
 // refreshAPIChannelIndex re-fetches get_live_streams from the upstream Xtream API
-// and updates the in-memory apiChannelIndex (and persists to DB).
+// and updates the in-memory apiChannelIndex (and persists to DB). The catalog
+// fetch goes through the shared cache, so overlapping refreshes and player
+// fetches coalesce into a single provider round-trip.
 func (c *Config) refreshAPIChannelIndex() {
 	if c.XtreamBaseURL == "" {
-		return
-	}
-	client, err := xtreamapi.New(c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL, "")
-	if err != nil {
-		utils.WarnLog("stream_names refresh: failed to create Xtream client: %v", err)
 		return
 	}
 	// Give a cold or never-warmed category index another chance every refresh
 	// cycle, not just at process startup — otherwise a single get_live_categories
 	// failure at boot leaves categories empty for the process's whole lifetime.
-	c.warmCategoryNameIndex(client)
-	resp, _, _, err := client.Action(c.ProxyConfig, "get_live_streams", nil)
-	if err != nil {
+	if client, cerr := xtreamapi.New(c.XtreamUser.String(), c.XtreamPassword.String(), c.XtreamBaseURL, ""); cerr == nil {
+		c.warmCategoryNameIndex(client)
+	} else {
+		utils.WarnLog("stream_names refresh: failed to create Xtream client: %v", cerr)
+	}
+	// Force a provider round-trip; on failure the cache keeps (and players
+	// keep getting) the last good catalogue.
+	e, stale, err := fetchCatalogEntry(c.catalogKey("get_live_streams", ""), true, c.catalogFetcher("get_live_streams", nil))
+	if err != nil || stale {
 		utils.WarnLog("stream_names refresh: get_live_streams failed: %v", err)
 		return
 	}
-	if n := c.harvestChannelNames(xtreamapi.ProcessResponse(resp)); n > 0 {
+	if n := c.harvestChannelNames(xtreamapi.ProcessResponse(e.data)); n > 0 {
 		utils.DebugLog("stream_names: refreshed %d live channel names from upstream", n)
 	}
 }

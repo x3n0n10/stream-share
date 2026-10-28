@@ -52,6 +52,16 @@ func vodNameCached(streamID string) (string, bool) {
 	return name, ok && name != ""
 }
 
+// vodCachedLabel is vodLabel without network I/O: the cached title if any.
+// For per-request paths (a playback issues many Range requests).
+func vodCachedLabel(streamID string) string {
+	id := normalizeStreamID(streamID)
+	if name, ok := vodNameCached(streamID); ok {
+		return fmt.Sprintf("%s (Stream %s)", strings.TrimSpace(name), id)
+	}
+	return fmt.Sprintf("Stream %s", id)
+}
+
 // vodTitleByID lazily resolves a movie title via get_vod_info, caching the
 // result (including confirmed misses). It performs a network call on a cache
 // miss, so it must NOT be called while holding a lock the stream hot path needs.
@@ -172,6 +182,18 @@ func titleResolvedStore(streamID, title string) {
 	titleResolvedMu.Unlock()
 }
 
+// forgetTitleMisses drops memoised misses for ids that now have a title, so
+// the next lookup finds it instead of waiting out titleMissRetryAfter.
+func forgetTitleMisses(titles map[string]string) {
+	titleResolvedMu.Lock()
+	for id := range titles {
+		if a, ok := titleResolvedIndex[id]; ok && a.title == "" {
+			delete(titleResolvedIndex, id)
+		}
+	}
+	titleResolvedMu.Unlock()
+}
+
 // resolveTitleAtStart resolves a stream's title when it first starts, allowed to
 // hit the network for VOD. Used off the lock to populate StreamTitle and warm the
 // VOD cache so subsequent (locked) log lookups resolve from cache.
@@ -208,11 +230,17 @@ func (c *Config) resolveTitleAtStart(streamID, streamType string) (string, bool)
 		}
 	case "series":
 		// get_vod_info is keyed by a movie vod_id and cannot resolve a series
-		// episode id. Try the cached VOD M3U first (cheap — a local file scan);
+		// episode id. Use, in order: a title harvested from a get_series_info
+		// answer (see series_titles.go), the series metadata of a cached
+		// episode, then the cached VOD M3U (cheap — a local file scan);
 		// providers that omit series from that M3U fall back to crawling the
 		// Xtream series catalogue itself.
-		if t := c.findVODTitleInCache("series", streamID); strings.TrimSpace(t) != "" {
-			title = strings.TrimSpace(t)
+		if name, ok := vodNameCached(streamID); ok {
+			title = strings.TrimSpace(name)
+		} else if t := c.seriesTitleFromVODCache(streamID); t != "" {
+			title = t
+		} else if t := strings.TrimSpace(c.findVODTitleInCache("series", streamID)); t != "" {
+			title = t
 		} else {
 			name, found, exhausted := c.fetchSeriesEpisodeTitle(streamID)
 			if found {
@@ -231,7 +259,9 @@ func (c *Config) resolveTitleAtStart(streamID, streamType string) (string, bool)
 		}
 	}
 
-	titleResolvedStore(streamID, title)
+	if title != "" || vodM3UCached() {
+		titleResolvedStore(streamID, title)
+	}
 	if title == "" {
 		return "", false
 	}

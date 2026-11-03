@@ -346,14 +346,9 @@ var playerAPICatalogPrefixes = map[string]string{
 	"get_series_categories": "series_categories",
 }
 
-// catalogKey is the catalog-cache key of action for this provider account,
-// with an optional category_id narrowing the list.
-func (c *Config) catalogKey(action, categoryID string) string {
-	key := playerAPICatalogPrefixes[action] + ":" + c.XtreamBaseURL + ":" + c.XtreamUser.String()
-	if categoryID != "" {
-		key += ":category_id=" + categoryID
-	}
-	return key
+// catalogKey is the catalog-cache key of action for this provider account.
+func (c *Config) catalogKey(action string) string {
+	return playerAPICatalogPrefixes[action] + ":" + c.XtreamBaseURL + ":" + c.XtreamUser.String()
 }
 
 // playerAPICatalogKey reports whether a player_api request can be served from
@@ -377,7 +372,7 @@ func (c *Config) playerAPICatalogKey(action string, q url.Values) (string, bool)
 			return "", false
 		}
 	}
-	return c.catalogKey(action, ""), true
+	return c.catalogKey(action), true
 }
 
 // catalogFetcher returns a fetch function for the catalog cache that runs
@@ -651,7 +646,7 @@ func (c *Config) warmCategoryNameIndex(client *xtreamapi.Client) {
 // periodic refresher, and the player_api handler so the full live catalog is
 // fetched at most once per TTL window.
 func (c *Config) getCachedLiveStreamsCatalog() (interface{}, error) {
-	return fetchCatalogOnce(c.catalogKey("get_live_streams", ""), c.catalogFetcher("get_live_streams", nil))
+	return fetchCatalogOnce(c.catalogKey("get_live_streams"), c.catalogFetcher("get_live_streams", nil))
 }
 
 func (c *Config) injectCatchupFlags(resp interface{}, whole bool) interface{} {

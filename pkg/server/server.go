@@ -1087,7 +1087,7 @@ func (c *Config) refreshAPIChannelIndex() {
 	}
 	// Force a provider round-trip; on failure the cache keeps (and players
 	// keep getting) the last good catalogue.
-	e, stale, err := fetchCatalogEntry(c.catalogKey("get_live_streams", ""), true, c.catalogFetcher("get_live_streams", nil))
+	e, stale, err := fetchCatalogEntry(c.catalogKey("get_live_streams"), true, c.catalogFetcher("get_live_streams", nil))
 	if err != nil || stale {
 		utils.WarnLog("stream_names refresh: get_live_streams failed: %v", err)
 		return

@@ -35,7 +35,7 @@ var (
 // liveChannelNumber returns the channel number of a live stream id, when the
 // cached live catalogue knows it.
 func (c *Config) liveChannelNumber(streamID string) (int, bool) {
-	e := peekCatalogEntry(c.catalogKey("get_live_streams", ""))
+	e := peekCatalogEntry(c.catalogKey("get_live_streams"))
 	if e == nil {
 		return 0, false
 	}

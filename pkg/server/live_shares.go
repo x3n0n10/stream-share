@@ -282,7 +282,7 @@ func (c *Config) liveChannel(streamID string, allowFetch bool) (map[string]inter
 		}
 		resp = r
 	} else {
-		r, ok := peekCatalog(c.catalogKey("get_live_streams", ""))
+		r, ok := peekCatalog(c.catalogKey("get_live_streams"))
 		if !ok {
 			return nil, false
 		}

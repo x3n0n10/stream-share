@@ -757,13 +757,13 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 // getCachedVODCatalog returns the parsed get_vod_streams catalog, fetching and
 // caching it on first use. Concurrent callers share a single fetch.
 func (c *Config) getCachedVODCatalog() (interface{}, error) {
-	return fetchCatalogOnce(c.catalogKey("get_vod_streams", ""), c.catalogFetcher("get_vod_streams", url.Values{}))
+	return fetchCatalogOnce(c.catalogKey("get_vod_streams"), c.catalogFetcher("get_vod_streams", url.Values{}))
 }
 
 // getCachedSeriesCatalog returns the parsed get_series catalog, fetching and
 // caching it on first use. Concurrent callers share a single fetch.
 func (c *Config) getCachedSeriesCatalog() (interface{}, error) {
-	return fetchCatalogOnce(c.catalogKey("get_series", ""), c.catalogFetcher("get_series", url.Values{}))
+	return fetchCatalogOnce(c.catalogKey("get_series"), c.catalogFetcher("get_series", url.Values{}))
 }
 
 // firstNonEmpty returns the first non-empty/non-nil value among candidates

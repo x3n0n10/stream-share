@@ -91,7 +91,7 @@ func (c *Config) filterEntries(kind filter.Kind, items []interface{}, names map[
 // is never fetched for this.
 func (c *Config) filterCategories(a catalogAction, items []interface{}) []interface{} {
 	var used map[string]bool
-	if entries, ok := peekCatalog(c.catalogKey(a.pair, "")); ok {
+	if entries, ok := peekCatalog(c.catalogKey(a.pair)); ok {
 		if list, ok := entries.([]interface{}); ok {
 			names := categoryNamesFrom(items)
 			used = make(map[string]bool)
@@ -127,7 +127,7 @@ func (c *Config) categoryNames(categoriesAction string) map[string]string {
 	if !c.catalogFilter.Active() {
 		return nil
 	}
-	resp, err := fetchCatalogOnce(c.catalogKey(categoriesAction, ""), c.catalogFetcher(categoriesAction, nil))
+	resp, err := fetchCatalogOnce(c.catalogKey(categoriesAction), c.catalogFetcher(categoriesAction, nil))
 	if err != nil {
 		return nil
 	}
@@ -234,11 +234,11 @@ var (
 // fetches (it runs on the stream request path): nil when no live catalogue is
 // cached yet; without cached categories, channels are judged on their name.
 func (c *Config) keptLiveIDs() *liveKeptSet {
-	e := peekCatalogEntry(c.catalogKey("get_live_streams", ""))
+	e := peekCatalogEntry(c.catalogKey("get_live_streams"))
 	if e == nil {
 		return nil
 	}
-	cats := peekCatalogEntry(c.catalogKey("get_live_categories", ""))
+	cats := peekCatalogEntry(c.catalogKey("get_live_categories"))
 	liveKeptMu.Lock()
 	defer liveKeptMu.Unlock()
 	if liveKeptMem != nil && liveKeptMem.src == e && liveKeptMem.cats == cats {

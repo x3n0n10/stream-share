@@ -183,7 +183,7 @@ func TestPlayerAPIServesLastGoodCatalogueWhenProviderFails(t *testing.T) {
 
 	// Expire the entry: the next request must still answer, from the last
 	// good copy, while a refresh is attempted.
-	key := c.catalogKey("get_series", "")
+	key := c.catalogKey("get_series")
 	catalogCacheMu.Lock()
 	catalogCache[key].fetchedAt = time.Now().Add(-2 * catalogCacheTTL())
 	catalogCacheMu.Unlock()
@@ -255,7 +255,7 @@ func TestPlayerAPICatchupFlagsDoNotMutateCachedCatalogue(t *testing.T) {
 	if !c.catchupManager.HasUpstreamCatchup("2") || c.catchupManager.HasUpstreamCatchup("1") {
 		t.Fatal("upstream catchup support must come from the provider's own tv_archive")
 	}
-	raw, ok := getCachedCatalog(c.catalogKey("get_live_streams", ""))
+	raw, ok := getCachedCatalog(c.catalogKey("get_live_streams"))
 	if !ok {
 		t.Fatal("catalogue not cached")
 	}

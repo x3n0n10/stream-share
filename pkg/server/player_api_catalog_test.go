@@ -64,7 +64,7 @@ func newFakeCatalogProvider(t *testing.T) *fakeCatalogProvider {
 		case cat != "":
 			_, _ = fmt.Fprintf(w, `[{"stream_id":"9","name":"Only %s","tv_archive":0}]`, cat)
 		default:
-			_, _ = w.Write([]byte(`[{"stream_id":"1","name":"One","tv_archive":0},{"stream_id":"2","name":"Two","tv_archive":1}]`))
+			_, _ = w.Write([]byte(`[{"stream_id":"1","name":"One","category_id":"42","tv_archive":0},{"stream_id":"2","name":"Two","category_id":43,"tv_archive":1}]`))
 		}
 	}))
 	t.Cleanup(p.srv.Close)
@@ -129,19 +129,36 @@ func TestPlayerAPICatalogServedFromCache(t *testing.T) {
 	}
 }
 
-func TestPlayerAPICategoryNotServedFromFullCatalogue(t *testing.T) {
+func TestPlayerAPICategorySlicedFromFullCatalogue(t *testing.T) {
 	invalidateCatalogCache()
 	p := newFakeCatalogProvider(t)
 	c := playerAPITestConfig(p.srv.URL)
 
-	decodeList(t, callPlayerAPI(t, c, "action=get_live_streams"))
-	got := decodeList(t, callPlayerAPI(t, c, "action=get_live_streams&category_id=42"))
-	if len(got) != 1 || got[0]["name"] != "Only 42" {
-		t.Fatalf("category request got %v, want the provider's filtered list", got)
+	for _, tc := range []struct {
+		cat  string
+		want []string
+	}{{"42", []string{"One"}}, {"43", []string{"Two"}}, {"999", nil}} {
+		got := decodeList(t, callPlayerAPI(t, c, "action=get_live_streams&category_id="+tc.cat))
+		if len(got) != len(tc.want) {
+			t.Fatalf("category %s: got %v, want %v", tc.cat, got, tc.want)
+		}
+		for i, name := range tc.want {
+			if got[i]["name"] != name {
+				t.Fatalf("category %s: got %v, want %v", tc.cat, got, tc.want)
+			}
+		}
 	}
-	decodeList(t, callPlayerAPI(t, c, "action=get_live_streams&category_id=42"))
-	if a, b := p.count("get_live_streams", ""), p.count("get_live_streams", "42"); a != 1 || b != 1 {
-		t.Fatalf("provider hits: full=%d category=%d, want 1 and 1", a, b)
+	if a, b := p.count("get_live_streams", ""), p.count("get_live_streams", "42"); a != 1 || b != 0 {
+		t.Fatalf("provider hits: full=%d category=%d, want 1 and 0", a, b)
+	}
+	catalogCacheMu.RLock()
+	n := len(catalogCache)
+	catalogCacheMu.RUnlock()
+	if n != 1 {
+		t.Fatalf("catalog cache holds %d entries, want only the full list", n)
+	}
+	if _, ok := c.playerAPICatalogKey("get_live_categories", url.Values{"category_id": {"42"}}); ok {
+		t.Fatal("a category list has no category_id slice and must bypass the cache")
 	}
 }
 

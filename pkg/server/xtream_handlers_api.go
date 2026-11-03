@@ -360,24 +360,24 @@ func (c *Config) catalogKey(action, categoryID string) string {
 // the catalog cache, and under which key. Only the catalogue list actions
 // qualify, with no parameter other than category_id: anything else is passed
 // through uncached rather than letting arbitrary query strings grow the cache.
+// A category_id request on a stream list shares the whole list's key: it is
+// sliced from that entry, not cached as a second copy of its own.
 func (c *Config) playerAPICatalogKey(action string, q url.Values) (string, bool) {
 	if _, ok := playerAPICatalogPrefixes[action]; !ok {
 		return "", false
 	}
-	categoryID := ""
 	for k, vs := range q {
 		switch k {
 		case "username", "password", "action":
 		case "category_id":
-			if len(vs) > 1 {
+			if len(vs) > 1 || catalogActions[action].categories {
 				return "", false
 			}
-			categoryID = strings.TrimSpace(vs[0])
 		default:
 			return "", false
 		}
 	}
-	return c.catalogKey(action, categoryID), true
+	return c.catalogKey(action, ""), true
 }
 
 // catalogFetcher returns a fetch function for the catalog cache that runs
@@ -427,7 +427,12 @@ func usableCatalog(resp interface{}) bool {
 // catalogue, not per request.
 func (c *Config) servePlayerAPICatalog(ctx *gin.Context, action, key string, q url.Values) {
 	utils.InfoLog("Action\t%s requested by %s", action, ctx.ClientIP())
-	e, stale, err := fetchCatalogEntry(key, false, c.catalogFetcher(action, q))
+	categoryID := strings.TrimSpace(q.Get("category_id"))
+	fetchQ := q
+	if categoryID != "" {
+		fetchQ = url.Values{}
+	}
+	e, stale, err := fetchCatalogEntry(key, false, c.catalogFetcher(action, fetchQ))
 	if err != nil {
 		var re *catalogResultError
 		if !errors.As(err, &re) {
@@ -451,21 +456,17 @@ func (c *Config) servePlayerAPICatalog(ctx *gin.Context, action, key string, q u
 		utils.DebugLog("Action\t%s served from cached catalogue fetched %s ago", action, time.Since(e.fetchedAt).Round(time.Second))
 	}
 
-	body, err := e.renderedJSON(func(data interface{}) ([]byte, error) {
-		processed := xtreamapi.ProcessResponse(data)
-		if action == "get_live_streams" {
-			// Names come from the full list: /status and logs must still name
-			// a channel the catalogue filter hides from players.
-			c.harvestChannelNames(processed)
-		}
-		if c.catalogFilter != nil {
-			processed = c.filterPlayerAPICatalog(action, processed)
-		}
-		if action == "get_live_streams" && c.catchupManager != nil && c.catchupManager.IsEnabled() {
-			processed = c.injectCatchupFlags(processed)
-		}
-		return json.Marshal(processed)
-	})
+	var body []byte
+	if categoryID != "" {
+		// Rendered per request and not memoised: players ask for each
+		// category once, and keeping every slice would duplicate the catalogue.
+		items, _ := e.data.([]interface{})
+		body, err = c.renderCatalog(action, categorySlice(items, categoryID), false)
+	} else {
+		body, err = e.renderedJSON(func(data interface{}) ([]byte, error) {
+			return c.renderCatalog(action, data, true)
+		})
+	}
 	if err != nil {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
 		return
@@ -477,13 +478,51 @@ func (c *Config) servePlayerAPICatalog(ctx *gin.Context, action, key string, q u
 	}
 	ctx.Header("Vary", "Accept-Encoding")
 	if acceptsGzip(ctx.Request) {
-		if gz, gerr := catalogGzip(key, e, body); gerr == nil {
+		var gz []byte
+		var gerr error
+		if categoryID != "" {
+			gz, gerr = gzipBytes(body)
+		} else {
+			gz, gerr = catalogGzip(key, e, body)
+		}
+		if gerr == nil {
 			ctx.Header("Content-Encoding", "gzip")
 			ctx.Data(http.StatusOK, "application/json; charset=utf-8", gz)
 			return
 		}
 	}
 	ctx.Data(http.StatusOK, "application/json; charset=utf-8", body)
+}
+
+// renderCatalog is the JSON a player receives for a catalogue list. harvest
+// is false for a category slice: the channel-name index is rebuilt from
+// whatever list it is given, so it must only ever see the whole one.
+func (c *Config) renderCatalog(action string, data interface{}, harvest bool) ([]byte, error) {
+	processed := xtreamapi.ProcessResponse(data)
+	if harvest && action == "get_live_streams" {
+		// Names come from the full list: /status and logs must still name
+		// a channel the catalogue filter hides from players.
+		c.harvestChannelNames(processed)
+	}
+	if c.catalogFilter != nil {
+		processed = c.filterPlayerAPICatalog(action, processed)
+	}
+	if action == "get_live_streams" && c.catchupManager != nil && c.catchupManager.IsEnabled() {
+		processed = c.injectCatchupFlags(processed)
+	}
+	return json.Marshal(processed)
+}
+
+// categorySlice returns the entries of items whose category_id is categoryID,
+// like the provider's own category_id filter. Never nil, so it encodes as [].
+func categorySlice(items []interface{}, categoryID string) []interface{} {
+	out := []interface{}{}
+	for _, item := range items {
+		if m, ok := item.(map[string]interface{}); ok && catalogString(m["category_id"]) == categoryID {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func (c *Config) xtreamPlayerAPIGET(ctx *gin.Context) {

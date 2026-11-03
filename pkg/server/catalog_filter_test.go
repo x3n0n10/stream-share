@@ -230,3 +230,17 @@ func BenchmarkFilterLiveList50k(b *testing.B) {
 		_ = c.filterEntries(filter.Live, items, names)
 	}
 }
+
+// The catalogue filter applies to a category slice like to the whole list.
+func TestPlayerAPIFiltersCategorySlice(t *testing.T) {
+	invalidateCatalogCache()
+	c := filteredTestConfig(t, filterProvider(t).URL, aOnlyNoAdult)
+
+	// Category 10 holds streams 1 and 3; 3 is flagged adult.
+	if s := ids(decodeList(t, callPlayerAPI(t, c, "action=get_live_streams&category_id=10")), "stream_id"); s != "1" {
+		t.Fatalf("category 10 should show only stream 1, got %q", s)
+	}
+	if s := ids(decodeList(t, callPlayerAPI(t, c, "action=get_live_streams&category_id=20")), "stream_id"); s != "" {
+		t.Fatalf("category 20 holds only a stream the filter hides, got %q", s)
+	}
+}

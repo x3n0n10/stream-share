@@ -309,3 +309,40 @@ func BenchmarkPlayerAPIVODStreams(b *testing.B) {
 		}
 	}
 }
+
+// A category slice is flagged for catchup like the whole list, but must not
+// replace the manager's provider-wide upstream-catchup map with its own subset.
+func TestPlayerAPICategorySliceKeepsUpstreamCatchupMap(t *testing.T) {
+	invalidateCatalogCache()
+	p := newFakeCatalogProvider(t)
+	c := playerAPITestConfig(p.srv.URL)
+	c.catchupManager = catchup.New(true, t.TempDir(), 3)
+
+	decodeList(t, callPlayerAPI(t, c, "action=get_live_streams"))
+	got := decodeList(t, callPlayerAPI(t, c, "action=get_live_streams&category_id=42"))
+	if len(got) != 1 || fmt.Sprint(got[0]["tv_archive"]) != "1" {
+		t.Fatalf("slice not flagged for catchup: %v", got)
+	}
+	// Stream 2 is in category 43, outside the slice, and has native catchup.
+	if !c.catchupManager.HasUpstreamCatchup("2") {
+		t.Fatal("a category request wiped the upstream catchup map for other categories")
+	}
+}
+
+// An item a panel lists under several categories (category_ids) is part of
+// each of them, as it is when the provider filters.
+func TestPlayerAPICategorySliceMatchesCategoryIDs(t *testing.T) {
+	invalidateCatalogCache()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"stream_id":"1","category_id":"10","category_ids":[10,20]},` +
+			`{"stream_id":"2","category_id":"20"},{"stream_id":"3","category_id":"30","category_ids":[30]}]`))
+	}))
+	t.Cleanup(srv.Close)
+	c := playerAPITestConfig(srv.URL)
+
+	for cat, want := range map[string]string{"10": "1", "20": "1,2", "30": "3", "99": ""} {
+		if got := ids(decodeList(t, callPlayerAPI(t, c, "action=get_vod_streams&category_id="+cat)), "stream_id"); got != want {
+			t.Fatalf("category %s: got streams %q, want %q", cat, got, want)
+		}
+	}
+}

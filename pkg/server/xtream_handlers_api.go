@@ -494,12 +494,13 @@ func (c *Config) servePlayerAPICatalog(ctx *gin.Context, action, key string, q u
 	ctx.Data(http.StatusOK, "application/json; charset=utf-8", body)
 }
 
-// renderCatalog is the JSON a player receives for a catalogue list. harvest
-// is false for a category slice: the channel-name index is rebuilt from
-// whatever list it is given, so it must only ever see the whole one.
-func (c *Config) renderCatalog(action string, data interface{}, harvest bool) ([]byte, error) {
+// renderCatalog is the JSON a player receives for a catalogue list. whole is
+// false for a category slice: the channel-name index and the upstream-catchup
+// map are rebuilt from whatever list they are given, so they must only ever
+// see the whole one.
+func (c *Config) renderCatalog(action string, data interface{}, whole bool) ([]byte, error) {
 	processed := xtreamapi.ProcessResponse(data)
-	if harvest && action == "get_live_streams" {
+	if whole && action == "get_live_streams" {
 		// Names come from the full list: /status and logs must still name
 		// a channel the catalogue filter hides from players.
 		c.harvestChannelNames(processed)
@@ -508,17 +509,28 @@ func (c *Config) renderCatalog(action string, data interface{}, harvest bool) ([
 		processed = c.filterPlayerAPICatalog(action, processed)
 	}
 	if action == "get_live_streams" && c.catchupManager != nil && c.catchupManager.IsEnabled() {
-		processed = c.injectCatchupFlags(processed)
+		processed = c.injectCatchupFlags(processed, whole)
 	}
 	return json.Marshal(processed)
 }
 
-// categorySlice returns the entries of items whose category_id is categoryID,
-// like the provider's own category_id filter. Never nil, so it encodes as [].
+// categorySlice returns the entries of items in categoryID, like the
+// provider's own category_id filter: by the entry's category_id, or by its
+// category_ids list when a panel files it under several. Never nil, so it
+// encodes as [].
 func categorySlice(items []interface{}, categoryID string) []interface{} {
 	out := []interface{}{}
 	for _, item := range items {
-		if m, ok := item.(map[string]interface{}); ok && catalogString(m["category_id"]) == categoryID {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		in := catalogString(m["category_id"]) == categoryID
+		ids, _ := m["category_ids"].([]interface{})
+		for _, v := range ids {
+			in = in || catalogString(v) == categoryID
+		}
+		if in {
 			out = append(out, item)
 		}
 	}
@@ -642,7 +654,7 @@ func (c *Config) getCachedLiveStreamsCatalog() (interface{}, error) {
 	return fetchCatalogOnce(c.catalogKey("get_live_streams", ""), c.catalogFetcher("get_live_streams", nil))
 }
 
-func (c *Config) injectCatchupFlags(resp interface{}) interface{} {
+func (c *Config) injectCatchupFlags(resp interface{}, whole bool) interface{} {
 	streams, ok := resp.([]interface{})
 	if !ok {
 		return resp
@@ -675,7 +687,9 @@ func (c *Config) injectCatchupFlags(resp interface{}) interface{} {
 		m["tv_archive"] = 1
 		m["tv_archive_duration"] = c.catchupManager.AdvertisedHours()
 	}
-	c.catchupManager.SetUpstreamCatchup(upstreamCatchup)
+	if whole {
+		c.catchupManager.SetUpstreamCatchup(upstreamCatchup)
+	}
 	return out
 }
 

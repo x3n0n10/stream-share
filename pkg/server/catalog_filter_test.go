@@ -98,7 +98,9 @@ func TestPlayerAPIFiltersLiveListAndKeepsNamesFromFullList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := len(full.([]interface{})); n != 4 {
+	n := 0
+	_ = catalogStoreOf(full).each(func(map[string]interface{}) bool { n++; return true })
+	if n != 4 {
 		t.Fatalf("cached catalogue has %d entries, want the provider's 4", n)
 	}
 }

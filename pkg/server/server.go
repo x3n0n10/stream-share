@@ -114,6 +114,7 @@ type Config struct {
 
 // NewServer initializes a new server configuration with all necessary components.
 func NewServer(config *config.ProxyConfig) (*Config, error) {
+	config.CatalogStorage = parseCatalogStorage(config.CatalogStorage)
 	var p m3u.Playlist
 
 	// Parse the M3U playlist from the remote URL if provided — unless it is the
@@ -1092,7 +1093,7 @@ func (c *Config) refreshAPIChannelIndex() {
 		utils.WarnLog("stream_names refresh: get_live_streams failed: %v", err)
 		return
 	}
-	if n := c.harvestChannelNames(xtreamapi.ProcessResponse(e.data)); n > 0 {
+	if n := c.harvestChannelNames(e.data); n > 0 {
 		utils.DebugLog("stream_names: refreshed %d live channel names from upstream", n)
 	}
 }

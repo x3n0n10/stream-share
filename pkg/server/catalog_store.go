@@ -22,8 +22,13 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/lucasduport/stream-share/pkg/config"
 	"github.com/lucasduport/stream-share/pkg/filter"
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
@@ -33,11 +38,72 @@ import (
 type catalogStore interface {
 	// each calls fn for every item that is a JSON object, until fn returns false.
 	each(fn func(m map[string]interface{}) bool) error
+	// serveWhole answers a player with the whole list for action.
+	serveWhole(ctx *gin.Context, c *Config, action string) error
+	// serveSlice answers a player with the entries of one category.
+	serveSlice(ctx *gin.Context, c *Config, action, categoryID string) error
 }
 
 // memoryCatalog is a decoded answer held in memory. Anything that is not a
-// list has no items.
-type memoryCatalog struct{ data interface{} }
+// list has no items. The JSON a player receives, and its gzip form, are
+// encoded once per catalogue so cache hits don't re-encode tens of MB on every
+// request; a catalogue is never mutated after it is stored (a refresh stores a
+// new one), so the memo stays valid for its whole life.
+type memoryCatalog struct {
+	data interface{}
+
+	renderOnce sync.Once
+	rendered   []byte
+	renderErr  error
+	gzOnce     sync.Once
+	gz         []byte
+	gzErr      error
+}
+
+func (m *memoryCatalog) serveWhole(ctx *gin.Context, c *Config, action string) error {
+	m.renderOnce.Do(func() { m.rendered, m.renderErr = c.renderCatalog(action, m.data, true) })
+	if m.renderErr != nil {
+		return m.renderErr
+	}
+	sendCatalogJSON(ctx, action, m.rendered, func() ([]byte, error) {
+		m.gzOnce.Do(func() { m.gz, m.gzErr = gzipBytes(m.rendered) })
+		return m.gz, m.gzErr
+	})
+	return nil
+}
+
+// serveSlice renders per request and memoises nothing: players ask for each
+// category once, and keeping every slice would duplicate the catalogue.
+func (m *memoryCatalog) serveSlice(ctx *gin.Context, c *Config, action, categoryID string) error {
+	slice, err := categorySlice(m, categoryID)
+	if err != nil {
+		return err
+	}
+	body, err := c.renderCatalog(action, slice, false)
+	if err != nil {
+		return err
+	}
+	sendCatalogJSON(ctx, action, body, func() ([]byte, error) { return gzipBytes(body) })
+	return nil
+}
+
+// sendCatalogJSON writes a rendered catalogue body, gzipped when the player
+// accepts it and gz succeeds, and dumps it to the cache folder in debug mode.
+func sendCatalogJSON(ctx *gin.Context, action string, body []byte, gz func() ([]byte, error)) {
+	if config.CacheFolder != "" && utils.IsDebugLogEnabled() {
+		filename := fmt.Sprintf("%s_%s.json", action, time.Now().Format("20060102_150405"))
+		utils.WriteResponseToFile(filename, body, "application/json")
+	}
+	ctx.Header("Vary", "Accept-Encoding")
+	if acceptsGzip(ctx.Request) {
+		if b, err := gz(); err == nil {
+			ctx.Header("Content-Encoding", "gzip")
+			ctx.Data(http.StatusOK, "application/json; charset=utf-8", b)
+			return
+		}
+	}
+	ctx.Data(http.StatusOK, "application/json; charset=utf-8", body)
+}
 
 func (c *memoryCatalog) each(fn func(m map[string]interface{}) bool) error {
 	items, _ := c.data.([]interface{})

@@ -390,7 +390,7 @@ func (c *Config) catalogFetcher(action string, q url.Values) func() (interface{}
 			// provider sent nothing usable.
 			return nil, &catalogResultError{data: resp, code: httpcode}
 		}
-		return resp, nil
+		return &memoryCatalog{data: resp}, nil
 	}
 }
 
@@ -445,44 +445,15 @@ func (c *Config) servePlayerAPICatalog(ctx *gin.Context, action, key string, q u
 		utils.DebugLog("Action\t%s served from cached catalogue fetched %s ago", action, time.Since(e.fetchedAt).Round(time.Second))
 	}
 
-	var body []byte
+	store := catalogStoreOf(e.data)
 	if categoryID != "" {
-		// Rendered per request and not memoised: players ask for each
-		// category once, and keeping every slice would duplicate the catalogue.
-		var slice []interface{}
-		if slice, err = categorySlice(catalogStoreOf(e.data), categoryID); err == nil {
-			body, err = c.renderCatalog(action, slice, false)
-		}
+		err = store.serveSlice(ctx, c, action, categoryID)
 	} else {
-		body, err = e.renderedJSON(func(data interface{}) ([]byte, error) {
-			return c.renderCatalog(action, data, true)
-		})
+		err = store.serveWhole(ctx, c, action)
 	}
 	if err != nil {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
-		return
 	}
-
-	if config.CacheFolder != "" && utils.IsDebugLogEnabled() {
-		filename := fmt.Sprintf("%s_%s.json", action, time.Now().Format("20060102_150405"))
-		utils.WriteResponseToFile(filename, body, "application/json")
-	}
-	ctx.Header("Vary", "Accept-Encoding")
-	if acceptsGzip(ctx.Request) {
-		var gz []byte
-		var gerr error
-		if categoryID != "" {
-			gz, gerr = gzipBytes(body)
-		} else {
-			gz, gerr = catalogGzip(key, e, body)
-		}
-		if gerr == nil {
-			ctx.Header("Content-Encoding", "gzip")
-			ctx.Data(http.StatusOK, "application/json; charset=utf-8", gz)
-			return
-		}
-	}
-	ctx.Data(http.StatusOK, "application/json; charset=utf-8", body)
 }
 
 // renderCatalog is the JSON a player receives for a catalogue list. whole is

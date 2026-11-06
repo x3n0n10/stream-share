@@ -143,7 +143,7 @@ func (c *Config) searchXtreamMovies(query string) ([]types.VODResult, error) {
 		utils.WarnLog("Movies search: get_vod_streams failed: %v", err)
 		return nil, err
 	}
-	if _, ok := resp.([]interface{}); !ok {
+	if !isCatalogList(catalogStoreOf(resp)) {
 		return nil, fmt.Errorf("unexpected get_vod_streams format: %T", resp)
 	}
 	// Search what players are offered: the catalogue filter applies here too.
@@ -603,7 +603,7 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 		utils.WarnLog("Series search: get_series failed: %v", err)
 		return nil, err
 	}
-	if _, ok := resp.([]interface{}); !ok {
+	if !isCatalogList(catalogStoreOf(resp)) {
 		utils.WarnLog("Series search: unexpected get_series format: %T", resp)
 		return nil, fmt.Errorf("unexpected get_series format: %T", resp)
 	}

@@ -73,7 +73,8 @@ func TestChannelHarvestCollectsNamesAndEPG(t *testing.T) {
 	}
 }
 
-type failingStore struct{}
+// failingStore embeds a nil memoryCatalog only to satisfy the serve methods.
+type failingStore struct{ *memoryCatalog }
 
 func (failingStore) each(fn func(m map[string]interface{}) bool) error {
 	return errors.New("disk read failed")

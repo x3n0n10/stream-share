@@ -108,6 +108,7 @@ It supports:
 			M3UDedupPreferredLangs:        viper.GetString("m3u-dedup-preferred-langs"),
 			SeriesEpisodeDedupEnabled:     viper.GetBool("series-episode-dedup-enabled"),
 			SeriesEpisodeDedupTagVariants: viper.GetBool("series-episode-dedup-tag-variants"),
+			CatalogStorage:                viper.GetString("catalog-storage"),
 			CatalogFilter: filter.Config{
 				All:          filterPatterns("filter"),
 				Live:         filterPatterns("filter-live"),
@@ -256,6 +257,7 @@ func init() {
 		rootCmd.Flags().String(prefix+"-name-exclude-regex", "", "Catalogue filter: drop "+what+" whose name matches this regular expression")
 		rootCmd.Flags().String(prefix+"-any-regex", "", "Catalogue filter: keep only "+what+" whose group or name matches this regular expression")
 	}
+	rootCmd.Flags().String("catalog-storage", "memory", "Where cached provider catalogues are kept: memory (default) or disk (lower RAM, uses CACHE_FOLDER)")
 	rootCmd.Flags().Bool("filter-exclude-adult", false, "Catalogue filter: drop entries the provider flags as adult (Xtream is_adult)")
 
 	// Authentication configuration

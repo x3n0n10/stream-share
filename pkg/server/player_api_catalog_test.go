@@ -259,12 +259,12 @@ func TestPlayerAPICatchupFlagsDoNotMutateCachedCatalogue(t *testing.T) {
 	if !ok {
 		t.Fatal("catalogue not cached")
 	}
-	for _, it := range raw.([]interface{}) {
-		m := it.(map[string]interface{})
+	_ = catalogStoreOf(raw).each(func(m map[string]interface{}) bool {
 		if m["stream_id"] == "1" && fmt.Sprint(m["tv_archive"]) != "0" {
 			t.Fatalf("cached catalogue was mutated: %v", m)
 		}
-	}
+		return true
+	})
 }
 
 func waitFor(t *testing.T, cond func() bool) {

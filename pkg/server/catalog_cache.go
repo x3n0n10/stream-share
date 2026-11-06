@@ -32,20 +32,6 @@ type catalogEntry struct {
 	// failedAt is when the last refresh of this entry failed; guarded by
 	// catalogCacheMu. It spaces out retries while the provider is down.
 	failedAt time.Time
-
-	// The JSON a player receives for this catalog, encoded once per entry so
-	// cache hits don't re-encode tens of MB on every request.
-	renderOnce sync.Once
-	rendered   []byte
-	renderErr  error
-}
-
-// renderedJSON returns render(e.data), computed once for this entry. An entry
-// is never mutated after it is stored (a refresh stores a new one), so the
-// memoised bytes stay valid for the entry's whole life.
-func (e *catalogEntry) renderedJSON(render func(interface{}) ([]byte, error)) ([]byte, error) {
-	e.renderOnce.Do(func() { e.rendered, e.renderErr = render(e.data) })
-	return e.rendered, e.renderErr
 }
 
 // catalogCache memoises parsed Xtream catalog responses (get_vod_streams,

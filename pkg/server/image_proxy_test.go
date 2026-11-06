@@ -19,6 +19,7 @@
 package server
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -446,4 +447,76 @@ func TestRewritePlaylistHosts(t *testing.T) {
 			t.Errorf("output = %q, want unchanged %q", out, in)
 		}
 	})
+}
+
+// legacyRewritePlaylistHosts is the pre-streaming implementation, kept as the
+// golden oracle for rewritePlaylistHostsTo.
+func (c *Config) legacyRewritePlaylistHosts(ctx *gin.Context, body []byte) []byte {
+	base := c.requestBaseURL(ctx)
+	customEnd := strings.Trim(c.CustomEndpoint, "/")
+	if customEnd != "" {
+		customEnd = "/" + customEnd
+	}
+	lines := strings.Split(string(body), "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimRight(line, "\r")
+		switch {
+		case strings.HasPrefix(trimmed, "#EXTINF") && strings.Contains(trimmed, "tvg-logo="):
+			lines[i] = rewriteQuotedURI(trimmed, "tvg-logo=", func(raw string) string {
+				if strings.HasPrefix(raw, "/") {
+					return base + raw
+				}
+				if isHTTPURL(raw) {
+					return base + c.proxyImagePath(raw)
+				}
+				return raw
+			})
+		case strings.HasPrefix(trimmed, "#"):
+		case strings.HasPrefix(trimmed, "/"):
+			lines[i] = base + trimmed
+		case isHTTPURL(trimmed):
+			if u, err := url.Parse(trimmed); err == nil {
+				lines[i] = base + customEnd + u.EscapedPath()
+			}
+		}
+	}
+	return []byte(strings.Join(lines, "\n"))
+}
+
+func TestRewritePlaylistHostsToMatchesBytes(t *testing.T) {
+	c := testImageProxyConfig()
+	ctx := testRequestContext()
+
+	base := []string{
+		"#EXTM3U\n" +
+			`#EXTINF:-1 tvg-id="ch1" tvg-logo="/img?url=http%3A%2F%2Fupstream.example.com%2Flogo.png", Channel One` + "\n" +
+			"/anti/user/pass/0/stream1\n",
+		`#EXTINF:-1 tvg-id="ch2", Channel Two` + "\n" + "/anti/user/pass/1/stream2\n",
+		`#EXTINF:-1 tvg-logo="http://provider.example.com/l.png", Ch` + "\n" +
+			"http://provider.example.com:8080/live/localuser/localpass/12345.ts\n",
+		"not-a-path-or-comment",
+		"",
+		"\n\n",
+	}
+	long := `#EXTINF:-1 tvg-logo="/img?x=1" tvg-name="` + strings.Repeat("a", 100000) + `", Long` + "\r\n" +
+		"http://provider.example.com/live/u/p/9.ts\r\n"
+	inputs := append([]string{}, base...)
+	for _, in := range base {
+		inputs = append(inputs, strings.TrimSuffix(in, "\n"))
+	}
+	inputs = append(inputs, long, strings.TrimSuffix(long, "\r\n"))
+
+	for i, in := range inputs {
+		var out bytes.Buffer
+		if err := c.rewritePlaylistHostsTo(ctx, strings.NewReader(in), &out); err != nil {
+			t.Fatalf("input %d: %v", i, err)
+		}
+		want := c.legacyRewritePlaylistHosts(ctx, []byte(in))
+		if !bytes.Equal(out.Bytes(), want) {
+			t.Errorf("input %d: streamed output differs from legacy (len %d vs %d)", i, out.Len(), len(want))
+		}
+		if got := c.rewritePlaylistHosts(ctx, []byte(in)); !bytes.Equal(got, want) {
+			t.Errorf("input %d: wrapper differs from legacy", i)
+		}
+	}
 }

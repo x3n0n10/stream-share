@@ -209,13 +209,7 @@ func (c *Config) xtreamGet(ctx *gin.Context) {
 		}
 	}
 
-	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, c.M3UFileName))
-	body, err := os.ReadFile(path)
-	if err != nil {
-		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
-		return
-	}
-	serveBytesCompressed(ctx, "application/octet-stream", c.rewritePlaylistHosts(ctx, body))
+	c.streamPlaylist(ctx, path)
 }
 
 // xtreamPlayerAPI proxies player_api actions with a local login path to avoid brittle unmarshaling differences.

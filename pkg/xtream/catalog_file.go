@@ -105,7 +105,7 @@ func ClassifyCatalogFile(path, action string) (kind CatalogFileKind, small inter
 	if err != nil {
 		return CatalogFileSmall, FallbackForAction(action), err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	r := bufio.NewReaderSize(f, 64<<10)
 	var first byte

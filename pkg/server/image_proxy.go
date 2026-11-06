@@ -318,7 +318,7 @@ func (c *Config) streamPlaylist(ctx *gin.Context, path string) {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, c.M3UFileName))
 	w := responseWriter(ctx, "application/octet-stream")
 	if err := c.rewritePlaylistHostsTo(ctx, f, w); err != nil {

@@ -98,17 +98,17 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		a := r.URL.Query().Get("action")
 		if a == "" {
-			fmt.Fprintf(w, `{"user_info":{"username":"u","password":"p","auth":1,"status":"Active","exp_date":"1900000000","is_trial":"0","active_cons":"0","created_at":"1600000000","max_connections":"1","allowed_output_formats":["m3u8","ts"]},"server_info":{"url":"127.0.0.1","port":"%s","https_port":"","server_protocol":"http","rtmp_port":"","timezone":"UTC","timestamp_now":1700000000,"time_now":"2023-11-14 00:00:00"}}`, strings.TrimPrefix(addr, ":"))
+			_, _ = fmt.Fprintf(w, `{"user_info":{"username":"u","password":"p","auth":1,"status":"Active","exp_date":"1900000000","is_trial":"0","active_cons":"0","created_at":"1600000000","max_connections":"1","allowed_output_formats":["m3u8","ts"]},"server_info":{"url":"127.0.0.1","port":"%s","https_port":"","server_protocol":"http","rtmp_port":"","timezone":"UTC","timestamp_now":1700000000,"time_now":"2023-11-14 00:00:00"}}`, strings.TrimPrefix(addr, ":"))
 			return
 		}
 		mu.RLock()
 		b, ok := bodies[a]
 		mu.RUnlock()
 		if ok {
-			w.Write(b)
+			_, _ = w.Write(b)
 			return
 		}
-		w.Write([]byte("[]"))
+		_, _ = w.Write([]byte("[]"))
 	})
 	// Renames the first item of each list so a forced refresh gets a new body.
 	bumps := 0
@@ -119,11 +119,11 @@ func main() {
 		for _, k := range []string{"get_live_streams", "get_vod_streams", "get_series"} {
 			bodies[k] = bytes.Replace(base[k], []byte(`"name":"`), []byte(fmt.Sprintf(`"name":"B%d `, bumps)), 1)
 		}
-		fmt.Fprintf(w, "bump %d\n", bumps)
+		_, _ = fmt.Fprintf(w, "bump %d\n", bumps)
 	})
 	http.HandleFunc("/get.php", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "audio/x-mpegurl")
-		w.Write([]byte(strings.ReplaceAll(m3uBody, "HOST", "http://127.0.0.1"+addr)))
+		_, _ = w.Write([]byte(strings.ReplaceAll(m3uBody, "HOST", "http://127.0.0.1"+addr)))
 	})
 	http.HandleFunc("/xmltv.php", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<?xml version="1.0"?><tv></tv>`))

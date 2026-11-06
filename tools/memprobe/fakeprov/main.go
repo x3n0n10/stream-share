@@ -126,7 +126,7 @@ func main() {
 		_, _ = w.Write([]byte(strings.ReplaceAll(m3uBody, "HOST", "http://127.0.0.1"+addr)))
 	})
 	http.HandleFunc("/xmltv.php", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`<?xml version="1.0"?><tv></tv>`))
+		_, _ = w.Write([]byte(`<?xml version="1.0"?><tv></tv>`))
 	})
 	fmt.Println("listening", addr)
 	panic(http.ListenAndServe(addr, nil))

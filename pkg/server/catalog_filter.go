@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/lucasduport/stream-share/pkg/filter"
 )
@@ -91,7 +92,7 @@ func (c *Config) filterEntries(kind filter.Kind, items []interface{}, names map[
 // is never fetched for this.
 func (c *Config) filterCategories(a catalogAction, items []interface{}) []interface{} {
 	var used map[string]bool
-	if entries := peekCatalogEntry(c.catalogKey(a.pair)); entries != nil {
+	if entries := peekCatalogEntry(c.catalogKey(a.pair)); entries != nil && isCatalogList(catalogStoreOf(entries.data)) {
 		used = c.usedCategories(a, entries, items)
 	}
 	out := make([]interface{}, 0, len(items))
@@ -114,35 +115,47 @@ func (c *Config) filterCategories(a catalogAction, items []interface{}) []interf
 
 var (
 	usedCatMu  sync.Mutex
-	usedCatMem = map[filter.Kind]*usedCategories{}
+	usedCatMem = map[filter.Kind]*usedCatSet{}
 )
 
-// usedCategories is the set of category ids that keep an entry, for one cached
-// stream list and one cached categories list.
-type usedCategories struct {
-	src, cats *catalogEntry
-	set       map[string]bool
+// usedCatSet is the set of category ids that keep an entry, for the stream
+// list and categories list fetched at the given times. It is keyed on times,
+// not entries, so it never pins a replaced catalogue in memory.
+type usedCatSet struct {
+	srcAt, catsAt time.Time
+	set           map[string]bool
 }
 
 // usedCategories returns the ids of the categories that keep at least one
-// entry of the cached stream list, memoised per cached pair (like liveKeptMem)
-// so a categories request does not walk tens of thousands of entries again.
+// entry of the cached stream list, memoised per cached pair so a categories
+// request does not walk tens of thousands of entries again. nil when a read
+// fails: nothing is known and nothing is memoised.
 func (c *Config) usedCategories(a catalogAction, entries *catalogEntry, items []interface{}) map[string]bool {
 	cats := peekCatalogEntry(c.catalogKey(catalogActions[a.pair].pair))
 	usedCatMu.Lock()
 	defer usedCatMu.Unlock()
-	if u := usedCatMem[a.kind]; u != nil && cats != nil && u.src == entries && u.cats == cats {
+	if u := usedCatMem[a.kind]; u != nil && cats != nil && u.srcAt.Equal(entries.fetchedAt) && u.catsAt.Equal(cats.fetchedAt) {
 		return u.set
 	}
-	names := categoryNamesFrom(catalogStoreOf(items))
+	names, err := categoryNamesFrom(catalogStoreOf(items))
+	if err != nil {
+		warnCatalogRead(catalogKeyLabel(c.catalogKey(a.pair)), err)
+		return nil
+	}
 	set := make(map[string]bool)
-	_ = catalogStoreOf(entries.data).each(func(m map[string]interface{}) bool {
+	err = catalogStoreOf(entries.data).each(func(m map[string]interface{}) bool {
 		if c.keepCatalogEntry(a.kind, m, names) {
 			set[catalogString(m["category_id"])] = true
 		}
 		return true
 	})
-	usedCatMem[a.kind] = &usedCategories{src: entries, cats: cats, set: set}
+	if err != nil {
+		warnCatalogRead(catalogKeyLabel(c.catalogKey(a.pair)), err)
+		return nil
+	}
+	if cats != nil {
+		usedCatMem[a.kind] = &usedCatSet{srcAt: entries.fetchedAt, catsAt: cats.fetchedAt, set: set}
+	}
 	return set
 }
 
@@ -153,20 +166,26 @@ func (c *Config) categoryNames(categoriesAction string) map[string]string {
 	if !c.catalogFilter.Active() {
 		return nil
 	}
-	resp, err := fetchCatalogOnce(c.catalogKey(categoriesAction), c.catalogFetcher(categoriesAction, nil))
+	key := c.catalogKey(categoriesAction)
+	resp, err := fetchCatalogOnce(key, c.catalogFetcher(categoriesAction, nil))
 	if err != nil {
 		return nil
 	}
-	return categoryNamesFrom(catalogStoreOf(resp))
+	names, err := categoryNamesFrom(catalogStoreOf(resp))
+	if err != nil {
+		warnCatalogRead(catalogKeyLabel(key), err)
+		return nil
+	}
+	return names
 }
 
-func categoryNamesFrom(s catalogStore) map[string]string {
+func categoryNamesFrom(s catalogStore) (map[string]string, error) {
 	names := map[string]string{}
-	_ = s.each(func(m map[string]interface{}) bool {
+	err := s.each(func(m map[string]interface{}) bool {
 		names[catalogString(m["category_id"])] = catalogString(m["category_name"])
 		return true
 	})
-	return names
+	return names, err
 }
 
 // catalogString renders a decoded JSON scalar (string or number) as a string,
@@ -270,10 +289,14 @@ func (c *Config) keptLiveIDs() *liveKeptSet {
 	}
 	var names map[string]string
 	if cats != nil {
-		names = categoryNamesFrom(catalogStoreOf(cats.data))
+		var err error
+		if names, err = categoryNamesFrom(catalogStoreOf(cats.data)); err != nil {
+			warnCatalogRead(catalogKeyLabel(c.catalogKey("get_live_categories")), err)
+			return nil
+		}
 	}
 	set := &liveKeptSet{src: e, cats: cats, ids: make(map[string]bool), epgIDs: make(map[string]bool)}
-	_ = catalogStoreOf(e.data).each(func(m map[string]interface{}) bool {
+	err := catalogStoreOf(e.data).each(func(m map[string]interface{}) bool {
 		id := normalizeStreamID(catalogString(m["stream_id"]))
 		if id == "" {
 			return true
@@ -285,6 +308,10 @@ func (c *Config) keptLiveIDs() *liveKeptSet {
 		}
 		return true
 	})
+	if err != nil {
+		warnCatalogRead(catalogKeyLabel(c.catalogKey("get_live_streams")), err)
+		return nil
+	}
 	liveKeptMem = set
 	return set
 }

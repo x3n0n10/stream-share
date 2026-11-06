@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/lucasduport/stream-share/pkg/filter"
@@ -69,5 +70,45 @@ func TestChannelHarvestCollectsNamesAndEPG(t *testing.T) {
 	}
 	if h.epgIDs["9001"] != "a.epg" {
 		t.Fatalf("epg ids = %v", h.epgIDs)
+	}
+}
+
+type failingStore struct{}
+
+func (failingStore) each(fn func(m map[string]interface{}) bool) error {
+	return errors.New("disk read failed")
+}
+
+// A cached stream entry that is not a list says nothing about used categories.
+func TestFilterCategoriesIgnoresNonListStreamEntry(t *testing.T) {
+	invalidateCatalogCache()
+	c := filteredTestConfig(t, "", aOnlyNoAdult)
+	storeCachedCatalog(c.catalogKey("get_live_streams"), map[string]interface{}{"user_info": "x"})
+	cats := []interface{}{
+		map[string]interface{}{"category_id": "10", "category_name": "A| News"},
+		map[string]interface{}{"category_id": "20", "category_name": "B| Sport"},
+	}
+	got := c.filterCategories(catalogActions["get_live_categories"], cats)
+	if len(got) != 1 || got[0].(map[string]interface{})["category_id"] != "10" {
+		t.Fatalf("got %v, want only category 10", got)
+	}
+}
+
+// A failed read yields nothing known and nothing memoised.
+func TestFailedCatalogReadIsNotMemoised(t *testing.T) {
+	invalidateCatalogCache()
+	liveKeptMem = nil
+	usedCatMem = map[filter.Kind]*usedCatSet{}
+	c := filteredTestConfig(t, "", aOnlyNoAdult)
+	live := storeCachedCatalog(c.catalogKey("get_live_streams"), failingStore{})
+	storeCachedCatalog(c.catalogKey("get_live_categories"), []interface{}{})
+	if set := c.keptLiveIDs(); set != nil || liveKeptMem != nil {
+		t.Fatalf("keptLiveIDs memoised a failed read: %v", set)
+	}
+	if used := c.usedCategories(catalogActions["get_live_categories"], live, nil); used != nil || len(usedCatMem) != 0 {
+		t.Fatalf("usedCategories memoised a failed read: %v", used)
+	}
+	if buildLiveNumIndex(failingStore{}) != nil {
+		t.Fatal("buildLiveNumIndex must return nil on a failed read")
 	}
 }

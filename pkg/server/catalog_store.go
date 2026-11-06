@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/lucasduport/stream-share/pkg/filter"
+	"github.com/lucasduport/stream-share/pkg/utils"
 )
 
 // catalogStore is a cached provider catalogue read one item at a time, so a
@@ -55,6 +56,22 @@ func catalogStoreOf(data interface{}) catalogStore {
 		return s
 	}
 	return &memoryCatalog{data: data}
+}
+
+// isCatalogList reports whether s holds a list. A store other than the
+// in-memory one only ever holds arrays.
+func isCatalogList(s catalogStore) bool {
+	if m, ok := s.(*memoryCatalog); ok {
+		_, isList := m.data.([]interface{})
+		return isList
+	}
+	return true
+}
+
+// warnCatalogRead logs a failed catalogue read. label is a catalogKeyLabel or
+// a purpose, never a provider URL.
+func warnCatalogRead(label string, err error) {
+	utils.WarnLog("catalogue read failed (%s): %v", label, err)
 }
 
 // keepCatalogEntry reports whether the catalogue filter keeps one stream or

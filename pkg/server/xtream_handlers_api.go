@@ -449,7 +449,10 @@ func (c *Config) servePlayerAPICatalog(ctx *gin.Context, action, key string, q u
 	if categoryID != "" {
 		// Rendered per request and not memoised: players ask for each
 		// category once, and keeping every slice would duplicate the catalogue.
-		body, err = c.renderCatalog(action, categorySlice(catalogStoreOf(e.data), categoryID), false)
+		var slice []interface{}
+		if slice, err = categorySlice(catalogStoreOf(e.data), categoryID); err == nil {
+			body, err = c.renderCatalog(action, slice, false)
+		}
 	} else {
 		body, err = e.renderedJSON(func(data interface{}) ([]byte, error) {
 			return c.renderCatalog(action, data, true)
@@ -506,15 +509,15 @@ func (c *Config) renderCatalog(action string, data interface{}, whole bool) ([]b
 // provider's own category_id filter: by the entry's category_id, or by its
 // category_ids list when a panel files it under several. Never nil, so it
 // encodes as [].
-func categorySlice(s catalogStore, categoryID string) []interface{} {
+func categorySlice(s catalogStore, categoryID string) ([]interface{}, error) {
 	out := []interface{}{}
-	_ = s.each(func(m map[string]interface{}) bool {
+	err := s.each(func(m map[string]interface{}) bool {
 		if inCategory(m, categoryID) {
 			out = append(out, m)
 		}
 		return true
 	})
-	return out
+	return out, err
 }
 
 func (c *Config) xtreamPlayerAPIGET(ctx *gin.Context) {
@@ -527,10 +530,13 @@ func (c *Config) xtreamPlayerAPIGET(ctx *gin.Context) {
 // It returns the number of channel names indexed.
 func (c *Config) harvestChannelNames(resp interface{}) int {
 	h := newChannelHarvest()
-	_ = catalogStoreOf(resp).each(func(m map[string]interface{}) bool {
+	if err := catalogStoreOf(resp).each(func(m map[string]interface{}) bool {
 		h.add(m)
 		return true
-	})
+	}); err != nil {
+		warnCatalogRead("channel names", err)
+		return 0 // a partial list must not replace the index
+	}
 	return c.applyChannelHarvest(h)
 }
 

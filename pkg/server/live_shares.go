@@ -290,12 +290,15 @@ func (c *Config) liveChannel(streamID string, allowFetch bool) (map[string]inter
 	}
 	id := normalizeStreamID(streamID)
 	var found map[string]interface{}
-	_ = catalogStoreOf(resp).each(func(m map[string]interface{}) bool {
+	err := catalogStoreOf(resp).each(func(m map[string]interface{}) bool {
 		if catalogString(m["stream_id"]) == id {
 			found = m
 		}
 		return found == nil
 	})
+	if err != nil && found == nil {
+		warnCatalogRead("live channel", err)
+	}
 	return found, found != nil
 }
 
@@ -648,7 +651,7 @@ func (c *Config) shareChannelsAPI(ctx *gin.Context) {
 		Name     string `json:"name"`
 	}
 	out := []channel{}
-	_ = catalogStoreOf(resp).each(func(m map[string]interface{}) bool {
+	err = catalogStoreOf(resp).each(func(m map[string]interface{}) bool {
 		if filtered && !c.keepCatalogEntry(filter.Live, m, names) {
 			return true
 		}
@@ -662,5 +665,10 @@ func (c *Config) shareChannelsAPI(ctx *gin.Context) {
 		out = append(out, channel{StreamID: catalogString(m["stream_id"]), Num: catalogString(m["num"]), Name: name})
 		return len(out) < 25
 	})
+	if err != nil {
+		warnCatalogRead("live channels", err)
+		ctx.JSON(http.StatusBadGateway, types.APIResponse{Success: false, Error: "live catalogue unreadable: " + err.Error()})
+		return
+	}
 	ctx.JSON(http.StatusOK, types.APIResponse{Success: true, Data: out})
 }

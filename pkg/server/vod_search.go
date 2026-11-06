@@ -153,7 +153,7 @@ func (c *Config) searchXtreamMovies(query string) ([]types.VODResult, error) {
 		names = c.categoryNames("get_vod_categories")
 	}
 	out := make([]types.VODResult, 0, 50)
-	_ = catalogStoreOf(resp).each(func(m map[string]interface{}) bool {
+	err = catalogStoreOf(resp).each(func(m map[string]interface{}) bool {
 		if filtered && !c.keepCatalogEntry(filter.Movie, m, names) {
 			return true
 		}
@@ -188,6 +188,10 @@ func (c *Config) searchXtreamMovies(query string) ([]types.VODResult, error) {
 		})
 		return true
 	})
+	if err != nil {
+		utils.WarnLog("Movies search: get_vod_streams unreadable: %v", err)
+		return nil, err
+	}
 	utils.DebugLog("Movies search: returning %d results", len(out))
 	return out, nil
 }
@@ -619,7 +623,7 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 		names = c.categoryNames("get_series_categories")
 	}
 	matches := make([]seriesMatch, 0, 16)
-	_ = catalogStoreOf(resp).each(func(m map[string]interface{}) bool {
+	err = catalogStoreOf(resp).each(func(m map[string]interface{}) bool {
 		if filtered && !c.keepCatalogEntry(filter.Series, m, names) {
 			return true
 		}
@@ -642,6 +646,11 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 		})
 		return true
 	})
+
+	if err != nil {
+		utils.WarnLog("Series search: get_series unreadable: %v", err)
+		return nil, err
+	}
 
 	// Each match costs a get_series_info round trip, so a short query matching
 	// thousands of series would hammer the provider. Keep the closest matches:

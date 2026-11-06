@@ -42,7 +42,9 @@ func (c *Config) liveChannelNumber(streamID string) (int, bool) {
 	liveNumMu.Lock()
 	if liveNumEntry != e {
 		liveNumIndex = buildLiveNumIndex(e.data)
-		liveNumEntry = e
+		if liveNumIndex != nil {
+			liveNumEntry = e
+		}
 	}
 	idx := liveNumIndex
 	liveNumMu.Unlock()
@@ -54,7 +56,7 @@ func (c *Config) liveChannelNumber(streamID string) (int, bool) {
 // Both fields may be strings, json.Number or floats depending on the decoder.
 func buildLiveNumIndex(data interface{}) map[string]int {
 	idx := map[string]int{}
-	_ = catalogStoreOf(data).each(func(m map[string]interface{}) bool {
+	err := catalogStoreOf(data).each(func(m map[string]interface{}) bool {
 		id := normalizeStreamID(catalogString(m["stream_id"]))
 		f, err := strconv.ParseFloat(catalogString(m["num"]), 64)
 		if id != "" && err == nil && f > 0 {
@@ -62,6 +64,10 @@ func buildLiveNumIndex(data interface{}) map[string]int {
 		}
 		return true
 	})
+	if err != nil {
+		warnCatalogRead("channel numbers", err)
+		return nil // not memoised by the caller
+	}
 	return idx
 }
 

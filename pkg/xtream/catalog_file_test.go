@@ -20,6 +20,8 @@ package xtream
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -48,7 +50,8 @@ func TestClassifyCatalogFile(t *testing.T) {
 		{"array", `[{"a":1},{"a":2}]`, CatalogFileArray, nil, false},
 		{"padded array", " \n[{\"a\":1}]\n", CatalogFileArray, nil, false},
 		{"truncated", `[{"a":1},`, CatalogFileSmall, fb, true},
-		{"trailing garbage", `[{"a":1}] x`, CatalogFileSmall, fb, true},
+		{"truncated open", `[`, CatalogFileSmall, fb, true},
+		{"trailing garbage", `[{"a":1}] x`, CatalogFileArray, nil, false},
 		{"object", `{"1":{"a":1}}`, CatalogFileSmall, nil, false},
 	}
 	for _, tc := range cases {
@@ -60,6 +63,9 @@ func TestClassifyCatalogFile(t *testing.T) {
 			kind, small, err := ClassifyCatalogFile(p, getLiveStreams)
 			if (err != nil) != tc.wantErr || kind != tc.kind {
 				t.Fatalf("kind=%v err=%v, want kind=%v wantErr=%v", kind, err, tc.kind, tc.wantErr)
+			}
+			if tc.wantErr && !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("err = %v, want unexpected EOF", err)
 			}
 			if tc.name == "object" {
 				if m, ok := small.(map[string]interface{}); !ok || len(m) != 1 {

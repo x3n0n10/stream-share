@@ -132,28 +132,22 @@ func ClassifyCatalogFile(path, action string) (kind CatalogFileKind, small inter
 	return CatalogFileSmall, v, nil
 }
 
-// validateArray consumes one whole array and the end of input, returning the
-// element count.
+// validateArray consumes one whole array, returning the element count.
+// Anything after the closing bracket is ignored, as ActionContext's single
+// Decode does. A truncated array is io.ErrUnexpectedEOF, as Decode reports it.
 func validateArray(dec *json.Decoder) (int, error) {
-	if _, err := dec.Token(); err != nil {
-		return 0, err
-	}
 	n := 0
-	for dec.More() {
+	_, err := dec.Token()
+	for err == nil && dec.More() {
 		var el json.RawMessage
-		if err := dec.Decode(&el); err != nil {
-			return 0, err
-		}
+		err = dec.Decode(&el)
 		n++
 	}
-	if _, err := dec.Token(); err != nil {
-		return 0, err
+	if err == nil {
+		_, err = dec.Token()
 	}
-	if _, err := dec.Token(); err != io.EOF {
-		if err == nil {
-			err = io.ErrUnexpectedEOF
-		}
-		return 0, err
+	if err == io.EOF {
+		err = io.ErrUnexpectedEOF
 	}
-	return n, nil
+	return n, err
 }

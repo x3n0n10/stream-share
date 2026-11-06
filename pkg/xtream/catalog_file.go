@@ -1,6 +1,7 @@
 /*
  * stream-share is a project to efficiently share the use of an IPTV service.
  * Copyright (C) 2025  Lucas Duport
+ * Copyright (C) 2026  x3n0n10
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -22,6 +23,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -32,6 +35,21 @@ import (
 	"github.com/lucasduport/stream-share/pkg/config"
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
+
+// errLocalWrite marks a failure on our own disk: fetchWithRetry must not
+// re-download the body from the provider for it.
+var errLocalWrite = errors.New("local catalogue write")
+
+// localWriter tags write errors so they can be told from body read errors.
+type localWriter struct{ w io.Writer }
+
+func (l localWriter) Write(p []byte) (int, error) {
+	n, err := l.w.Write(p)
+	if err != nil {
+		err = fmt.Errorf("%w: %v", errLocalWrite, err)
+	}
+	return n, err
+}
 
 // ActionToFile is ActionContext that writes the 200 body to path instead of
 // decoding it: path+".part" is renamed to path on success and removed on any
@@ -49,20 +67,20 @@ func (c *Client) ActionToFile(ctx context.Context, cfg *config.ProxyConfig, acti
 	ok, lastErr := c.fetchWithRetry(ctx, rawURL, action, func(resp *http.Response, cancel context.CancelFunc) (int64, error) {
 		f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("%w: %v", errLocalWrite, err)
 		}
 		stall := time.AfterFunc(bodyStallTimeout, cancel)
 		defer stall.Stop()
-		size, err = io.Copy(f, &stallReader{r: io.LimitReader(resp.Body, maxResponseBytes+1), timer: stall})
-		if cerr := f.Close(); err == nil {
-			err = cerr
+		size, err = io.Copy(localWriter{f}, &stallReader{r: io.LimitReader(resp.Body, maxResponseBytes+1), timer: stall})
+		if cerr := f.Close(); err == nil && cerr != nil {
+			err = fmt.Errorf("%w: %v", errLocalWrite, cerr)
 		}
 		return size, err
 	})
 	if ok && size > 0 {
 		if err := os.Rename(part, path); err != nil {
 			_ = os.Remove(part)
-			return http.StatusBadGateway, err
+			return http.StatusBadGateway, fmt.Errorf("%w: %v", errLocalWrite, err)
 		}
 		return http.StatusOK, nil
 	}

@@ -545,7 +545,7 @@ func (c *Config) warmChannelNameIndex() {
 		utils.WarnLog("Channel name warm-up: get_live_streams failed: %v", err)
 		return
 	}
-	if n := c.harvestChannelNames(xtreamapi.ProcessResponse(resp)); n > 0 {
+	if n := c.harvestChannelNames(resp); n > 0 {
 		utils.InfoLog("Channel name warm-up: indexed %d channel names from get_live_streams", n)
 	} else {
 		utils.WarnLog("Channel name warm-up: get_live_streams returned no usable channel names")

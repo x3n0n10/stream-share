@@ -131,3 +131,32 @@ func TestCatalogRunDirRemovesOnlyStaleSiblings(t *testing.T) {
 		t.Fatalf("run dir %s is not a run-* directory under %s", dir, base)
 	}
 }
+
+// A run dir removed behind our back (cache folder cleared, sibling sweep) is
+// recreated instead of failing every later disk fetch.
+func TestCatalogRunDirIsRecreated(t *testing.T) {
+	t.Setenv("CACHE_FOLDER", t.TempDir())
+	catalogRunDirMu.Lock()
+	saved := catalogRunDirPath
+	catalogRunDirPath = ""
+	catalogRunDirMu.Unlock()
+	t.Cleanup(func() {
+		catalogRunDirMu.Lock()
+		catalogRunDirPath = saved
+		catalogRunDirMu.Unlock()
+	})
+	dir, err := catalogRunDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	again, err := catalogRunDir()
+	if err != nil || again != dir {
+		t.Fatalf("catalogRunDir = %q, %v; want %q", again, err, dir)
+	}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		t.Fatalf("run dir not recreated: %v", err)
+	}
+}

@@ -72,8 +72,9 @@ final measurement must use a Go 1.23 build.
 
 ## Non-goals
 
-- Persisting catalogues across restarts. The catalogue directory is wiped at
-  startup; behaviour after a restart is the same as today.
+- Persisting catalogues across restarts. Catalogue files are not reused after
+  a restart: each process uses its own run directory, and run directories older
+  than 24 h are swept at startup; behaviour after a restart is the same as today.
 - Changing the uncached player_api path (`get_vod_info`, `get_series_info`,
   etc.), the EPG cache, VOD media caching, catchup buffers or multiplexing.
 - Image URL rewriting on cached catalogues (today's cached path does not do it;

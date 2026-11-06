@@ -73,7 +73,8 @@ func catalogRunDir() (string, error) {
 	catalogRunDirMu.Lock()
 	defer catalogRunDirMu.Unlock()
 	if catalogRunDirPath != "" {
-		return catalogRunDirPath, nil
+		// Recreate it if something removed it since.
+		return catalogRunDirPath, os.MkdirAll(catalogRunDirPath, 0o700)
 	}
 	base := utils.CatalogCacheDir()
 	if err := os.MkdirAll(base, 0o700); err != nil {

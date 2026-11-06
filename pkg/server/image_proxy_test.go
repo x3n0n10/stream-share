@@ -399,7 +399,7 @@ func TestRewritePlaylistHosts(t *testing.T) {
 			`#EXTINF:-1 tvg-id="ch1" tvg-logo="/img?url=http%3A%2F%2Fupstream.example.com%2Flogo.png", Channel One` + "\n" +
 			"/anti/user/pass/0/stream1\n"
 
-		out := string(c.rewritePlaylistHosts(ctx, []byte(in)))
+		out := rewriteHostsString(t, c, ctx, in)
 
 		wantLogo := `tvg-logo="http://proxy.example.com:8080/img?url=http%3A%2F%2Fupstream.example.com%2Flogo.png"`
 		if !strings.Contains(out, wantLogo) {
@@ -416,7 +416,7 @@ func TestRewritePlaylistHosts(t *testing.T) {
 
 	t.Run("EXTINF line with no tvg-logo attribute is left alone apart from its track line", func(t *testing.T) {
 		in := `#EXTINF:-1 tvg-id="ch2", Channel Two` + "\n" + "/anti/user/pass/1/stream2\n"
-		out := string(c.rewritePlaylistHosts(ctx, []byte(in)))
+		out := rewriteHostsString(t, c, ctx, in)
 		if !strings.HasPrefix(out, `#EXTINF:-1 tvg-id="ch2", Channel Two`) {
 			t.Errorf("output %q changed the untouched EXTINF line", out)
 		}
@@ -428,7 +428,7 @@ func TestRewritePlaylistHosts(t *testing.T) {
 	t.Run("provider-absolute track and logo (streamed get.php) are mapped onto the proxy", func(t *testing.T) {
 		in := `#EXTINF:-1 tvg-logo="http://provider.example.com/l.png", Ch` + "\n" +
 			"http://provider.example.com:8080/live/localuser/localpass/12345.ts\n"
-		out := string(c.rewritePlaylistHosts(ctx, []byte(in)))
+		out := rewriteHostsString(t, c, ctx, in)
 		if !strings.Contains(out, `tvg-logo="http://proxy.example.com:8080/img?url=http%3A%2F%2Fprovider.example.com%2Fl.png"`) {
 			t.Errorf("logo not proxied: %q", out)
 		}
@@ -442,7 +442,7 @@ func TestRewritePlaylistHosts(t *testing.T) {
 
 	t.Run("a non-# line not starting with / is left alone", func(t *testing.T) {
 		in := "not-a-path-or-comment"
-		out := string(c.rewritePlaylistHosts(ctx, []byte(in)))
+		out := rewriteHostsString(t, c, ctx, in)
 		if out != in {
 			t.Errorf("output = %q, want unchanged %q", out, in)
 		}
@@ -515,8 +515,14 @@ func TestRewritePlaylistHostsToMatchesBytes(t *testing.T) {
 		if !bytes.Equal(out.Bytes(), want) {
 			t.Errorf("input %d: streamed output differs from legacy (len %d vs %d)", i, out.Len(), len(want))
 		}
-		if got := c.rewritePlaylistHosts(ctx, []byte(in)); !bytes.Equal(got, want) {
-			t.Errorf("input %d: wrapper differs from legacy", i)
-		}
 	}
+}
+
+func rewriteHostsString(t *testing.T, c *Config, ctx *gin.Context, in string) string {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := c.rewritePlaylistHostsTo(ctx, strings.NewReader(in), &buf); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
 }

@@ -23,6 +23,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -208,7 +209,8 @@ func (c *Client) requestURL(action string, q url.Values) (string, error) {
 
 // fetchWithRetry GETs rawURL up to 5 times with retryBackoff between attempts.
 // On a 200, read consumes the body and returns how many bytes it took (reading
-// at most maxResponseBytes+1); a read error or an oversized body is retried.
+// at most maxResponseBytes+1); a read error or an oversized body is retried,
+// an errLocalWrite is not.
 // It reports whether an attempt succeeded, else the last error.
 func (c *Client) fetchWithRetry(ctx context.Context, rawURL, action string, read func(resp *http.Response, cancel context.CancelFunc) (int64, error)) (bool, error) {
 	var lastErr error
@@ -249,6 +251,9 @@ func (c *Client) fetchWithRetry(ctx context.Context, rawURL, action string, read
 					err = fmt.Errorf("response body stalled for %v: %w", bodyStallTimeout, err)
 				}
 				lastErr = err
+				if errors.Is(err, errLocalWrite) {
+					return false, lastErr // retrying would only re-download into a broken disk
+				}
 				continue
 			}
 			if n > maxResponseBytes {

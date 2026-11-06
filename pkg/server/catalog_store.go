@@ -124,6 +124,14 @@ func catalogStoreOf(data interface{}) catalogStore {
 	return &memoryCatalog{data: data}
 }
 
+// catalogDataOf unwraps an in-memory store, for messages that print its type.
+func catalogDataOf(resp interface{}) interface{} {
+	if m, ok := resp.(*memoryCatalog); ok {
+		return m.data
+	}
+	return resp
+}
+
 // isCatalogList reports whether s holds a list. A store other than the
 // in-memory one only ever holds arrays.
 func isCatalogList(s catalogStore) bool {

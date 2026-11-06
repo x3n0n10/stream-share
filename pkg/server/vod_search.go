@@ -144,7 +144,7 @@ func (c *Config) searchXtreamMovies(query string) ([]types.VODResult, error) {
 		return nil, err
 	}
 	if !isCatalogList(catalogStoreOf(resp)) {
-		return nil, fmt.Errorf("unexpected get_vod_streams format: %T", resp)
+		return nil, fmt.Errorf("unexpected get_vod_streams format: %T", catalogDataOf(resp))
 	}
 	// Search what players are offered: the catalogue filter applies here too.
 	filtered := c.catalogFilter.ActiveFor(filter.Movie)
@@ -604,8 +604,8 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 		return nil, err
 	}
 	if !isCatalogList(catalogStoreOf(resp)) {
-		utils.WarnLog("Series search: unexpected get_series format: %T", resp)
-		return nil, fmt.Errorf("unexpected get_series format: %T", resp)
+		utils.WarnLog("Series search: unexpected get_series format: %T", catalogDataOf(resp))
+		return nil, fmt.Errorf("unexpected get_series format: %T", catalogDataOf(resp))
 	}
 
 	// First pass: collect matching series (name + id + metadata) without

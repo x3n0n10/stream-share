@@ -1,6 +1,7 @@
 /*
  * stream-share is a project to efficiently share the use of an IPTV service.
  * Copyright (C) 2025  Lucas Duport
+ * Copyright (C) 2026  x3n0n10
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -118,5 +119,27 @@ func TestActionToFileRetriesThenFails(t *testing.T) {
 		if _, err := os.Stat(f); !os.IsNotExist(err) {
 			t.Fatalf("%s should not exist: %v", f, err)
 		}
+	}
+}
+
+// A local write failure must not re-download the catalogue from the provider.
+func TestActionToFileLocalWriteErrorIsNotRetried(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	hits := 0
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { hits++; _, _ = w.Write([]byte(`[{"a":1}]`)) })
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	p := filepath.Join(dir, "c.json")
+	code, err := c.ActionToFile(context.Background(), &config.ProxyConfig{}, getLiveStreams, nil, p)
+	if err == nil || code != http.StatusBadGateway || hits != 1 {
+		t.Fatalf("code=%d err=%v hits=%d", code, err, hits)
+	}
+	if _, err := os.Stat(p + ".part"); !os.IsNotExist(err) {
+		t.Fatalf(".part left behind: %v", err)
 	}
 }

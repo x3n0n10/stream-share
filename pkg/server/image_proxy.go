@@ -20,7 +20,6 @@ package server
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -254,21 +253,15 @@ func (c *Config) requestBaseURL(ctx *gin.Context) string {
 	return fmt.Sprintf("%s://%s", protocol, host)
 }
 
-// rewritePlaylistHosts makes an M3U body client-ready by turning every track
+// rewritePlaylistHostsTo makes an M3U body client-ready by turning every track
 // URI and tvg-logo into an absolute URL on the current request's base URL.
 // marshallInto only emits relative values, so a value starting with "/" is
 // ours to prefix as is. The streamed get.php rewrite (m3u_stream_rewrite.go)
 // leaves the provider's absolute URLs in place, so those are mapped here the
 // way replacePath / proxyImagePath would have: a track keeps just its path
 // under the custom endpoint, a logo goes through /img.
-func (c *Config) rewritePlaylistHosts(ctx *gin.Context, body []byte) []byte {
-	var buf bytes.Buffer
-	_ = c.rewritePlaylistHostsTo(ctx, bytes.NewReader(body), &buf)
-	return buf.Bytes()
-}
-
-// rewritePlaylistHostsTo is rewritePlaylistHosts streamed line by line, so a
-// large playlist is never held in memory. ReadString has no line-length limit.
+// It works line by line, so a large playlist is never held in memory;
+// ReadString has no line-length limit.
 func (c *Config) rewritePlaylistHostsTo(ctx *gin.Context, r io.Reader, w io.Writer) error {
 	base := c.requestBaseURL(ctx)
 	customEnd := strings.Trim(c.CustomEndpoint, "/")

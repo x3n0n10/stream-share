@@ -391,3 +391,16 @@ func TestDiskModeUnwritableCacheKeepsLastGood(t *testing.T) {
 		t.Fatalf("nothing cached, unwritable dir: status %d, want 502", w.Code)
 	}
 }
+
+// Channel numbers come from a disk-backed live catalogue too.
+func TestLiveChannelNumberFromDiskCatalogue(t *testing.T) {
+	invalidateCatalogCache()
+	c := playerAPITestConfig("http://provider.invalid")
+	d, _ := writeDiskCatalog(t, `[{"num":41,"stream_id":"506638"},{"num":"7","stream_id":9}]`)
+	storeCachedCatalog(c.catalogKey("get_live_streams"), d)
+	for id, want := range map[string]int{"506638": 41, "9": 7} {
+		if n, ok := c.liveChannelNumber(id); !ok || n != want {
+			t.Errorf("liveChannelNumber(%q) = %d, %v; want %d", id, n, ok, want)
+		}
+	}
+}

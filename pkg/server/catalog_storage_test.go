@@ -22,7 +22,11 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime/debug"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/lucasduport/stream-share/pkg/config"
@@ -53,5 +57,77 @@ func TestMemoryCatalogRendersOnce(t *testing.T) {
 	store.rendered = []byte("memo")
 	if second := serve(); second != "memo" || first == second {
 		t.Fatalf("second serve re-rendered: first %q, second %q", first, second)
+	}
+}
+
+// forEachCatalogStorage runs run once per CATALOG_STORAGE value, each on an
+// empty catalog cache.
+func forEachCatalogStorage(t *testing.T, run func(t *testing.T, storage string)) {
+	for _, storage := range []string{catalogStorageMemory, catalogStorageDisk} {
+		t.Run(storage, func(t *testing.T) {
+			invalidateCatalogCache()
+			run(t, storage)
+		})
+	}
+}
+
+func TestApplyCatalogMemoryLimit(t *testing.T) {
+	prev := debug.SetMemoryLimit(-1)
+	t.Cleanup(func() { debug.SetMemoryLimit(prev) })
+
+	t.Setenv("GOMEMLIMIT", "")
+	applyCatalogMemoryLimit("memory")
+	if got := debug.SetMemoryLimit(-1); got != prev {
+		t.Fatalf("memory mode changed the limit to %d", got)
+	}
+	t.Setenv("GOMEMLIMIT", "200MiB")
+	applyCatalogMemoryLimit("disk")
+	if got := debug.SetMemoryLimit(-1); got != prev {
+		t.Fatalf("disk mode overrode GOMEMLIMIT: limit %d", got)
+	}
+	t.Setenv("GOMEMLIMIT", "")
+	applyCatalogMemoryLimit("disk")
+	if got := debug.SetMemoryLimit(-1); got != 90<<20 {
+		t.Fatalf("disk mode limit = %d, want %d", got, 90<<20)
+	}
+}
+
+func TestCatalogRunDirRemovesOnlyStaleSiblings(t *testing.T) {
+	t.Setenv("CACHE_FOLDER", t.TempDir())
+	catalogRunDirMu.Lock()
+	saved := catalogRunDirPath
+	catalogRunDirPath = ""
+	catalogRunDirMu.Unlock()
+	t.Cleanup(func() {
+		catalogRunDirMu.Lock()
+		catalogRunDirPath = saved
+		catalogRunDirMu.Unlock()
+	})
+
+	base := filepath.Join(os.Getenv("CACHE_FOLDER"), "catalog")
+	for name, age := range map[string]time.Duration{"run-old": 25 * time.Hour, "run-new": time.Hour, "keep-old": 25 * time.Hour} {
+		d := filepath.Join(base, name)
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		at := time.Now().Add(-age)
+		if err := os.Chtimes(d, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir, err := catalogRunDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := catalogRunDir(); again != dir {
+		t.Fatalf("second call made another run dir: %s, then %s", dir, again)
+	}
+	for name, want := range map[string]bool{"run-old": false, "run-new": true, "keep-old": true, filepath.Base(dir): true} {
+		if _, err := os.Stat(filepath.Join(base, name)); (err == nil) != want {
+			t.Errorf("%s exists = %v, want %v", name, err == nil, want)
+		}
+	}
+	if m, _ := filepath.Match(filepath.Join(base, "run-*"), dir); !m {
+		t.Fatalf("run dir %s is not a run-* directory under %s", dir, base)
 	}
 }

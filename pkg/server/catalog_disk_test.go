@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/lucasduport/stream-share/pkg/catchup"
@@ -289,5 +290,104 @@ func TestDiskCatalogRemoveDeletesFiles(t *testing.T) {
 	d.remove()
 	if entries, _ := os.ReadDir(filepath.Dir(d.raw)); len(entries) != 0 {
 		t.Fatalf("remove left files: %v", entries)
+	}
+}
+
+func diskModeConfig(baseURL string) *Config {
+	c := playerAPITestConfig(baseURL)
+	c.CatalogStorage = catalogStorageDisk
+	return c
+}
+
+func TestDiskModeReplacedFilesRemovedAfterGrace(t *testing.T) {
+	invalidateCatalogCache()
+	saved := catalogFileGrace
+	catalogFileGrace = 50 * time.Millisecond
+	t.Cleanup(func() { catalogFileGrace = saved })
+	c := diskModeConfig(newFakeCatalogProvider(t).srv.URL)
+	key := c.catalogKey("get_vod_streams")
+
+	decodeList(t, callPlayerAPI(t, c, "action=get_vod_streams"))
+	old, ok := peekCatalogEntry(key).data.(*diskCatalog)
+	if !ok {
+		t.Fatalf("disk mode cached %T, want *diskCatalog", peekCatalogEntry(key).data)
+	}
+	e, _, err := fetchCatalogEntry(key, true, c.catalogFetcher("get_vod_streams", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := e.data.(*diskCatalog)
+	if _, err := os.Stat(old.raw); err != nil {
+		t.Fatalf("old file removed before the grace: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if _, err := os.Stat(old.raw + ".render"); !os.IsNotExist(err) {
+		t.Fatalf("old render still there after the grace: %v", err)
+	}
+	if _, err := os.Stat(old.raw); !os.IsNotExist(err) {
+		t.Fatalf("old file still there after the grace: %v", err)
+	}
+	if _, err := os.Stat(cur.raw); err != nil {
+		t.Fatalf("current file: %v", err)
+	}
+}
+
+// A provider answering a stream list with an object is served as in memory
+// mode (Review Focus 1).
+func TestDiskModeObjectAnswerServedAsToday(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"1":{"name":"A"}}`))
+	}))
+	t.Cleanup(srv.Close)
+	bodies := map[string]string{}
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		c := playerAPITestConfig(srv.URL)
+		c.CatalogStorage = storage
+		w := callPlayerAPI(t, c, "action=get_vod_streams")
+		if w.Code != http.StatusOK {
+			t.Fatalf("status %d", w.Code)
+		}
+		bodies[storage] = w.Body.String()
+	})
+	if bodies["memory"] != bodies["disk"] {
+		t.Fatalf("disk body %q, memory body %q", bodies["disk"], bodies["memory"])
+	}
+}
+
+// A cache folder that cannot be written is a failed refresh: the last good
+// catalogue stays, and with none the player gets 502 (Review Focus 4).
+func TestDiskModeUnwritableCacheKeepsLastGood(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	invalidateCatalogCache()
+	c := diskModeConfig(newFakeCatalogProvider(t).srv.URL)
+	key := c.catalogKey("get_series")
+	first := callPlayerAPI(t, c, "action=get_series")
+	decodeList(t, first)
+
+	dir, err := catalogRunDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	t.Setenv("CATALOG_CACHE_TTL_MINUTES", "1")
+	catalogCacheMu.Lock()
+	catalogCache[key].fetchedAt = time.Now().Add(-2 * time.Minute)
+	catalogCacheMu.Unlock()
+	if e, stale, err := fetchCatalogEntry(key, true, c.catalogFetcher("get_series", nil)); err != nil || !stale || e == nil {
+		t.Fatalf("forced refresh into an unwritable dir: entry=%v stale=%v err=%v, want last good copy", e != nil, stale, err)
+	}
+	if again := callPlayerAPI(t, c, "action=get_series"); again.Code != http.StatusOK || again.Body.String() != first.Body.String() {
+		t.Fatalf("after failed refresh: %d %q, want the last good body", again.Code, again.Body.String())
+	}
+
+	invalidateCatalogCache()
+	if w := callPlayerAPI(t, c, "action=get_series"); w.Code != http.StatusBadGateway {
+		t.Fatalf("nothing cached, unwritable dir: status %d, want 502", w.Code)
 	}
 }

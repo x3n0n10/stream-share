@@ -21,12 +21,19 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	xtreamapi "github.com/lucasduport/stream-share/pkg/xtream"
 )
 
 // diskCatalog is a provider catalogue (a JSON array) kept in the file raw, so
@@ -51,6 +58,10 @@ type catalogSpan struct {
 	off int64
 	n   int32
 }
+
+// catalogFileGrace is how long a replaced catalogue's files outlive its entry,
+// so a request still reading them can finish.
+var catalogFileGrace = 10 * time.Minute
 
 func newDiskCatalog(raw string) *diskCatalog { return &diskCatalog{raw: raw} }
 
@@ -253,4 +264,50 @@ func (d *diskCatalog) remove() {
 	for _, p := range []string{d.raw, d.raw + ".render", d.raw + ".render.gz"} {
 		_ = os.Remove(p)
 	}
+}
+
+// fetchCatalogToDisk is catalogFetcher in disk mode for a whole stream list:
+// the body goes straight to a file and stays there when it is a non-empty
+// array; any other answer is decoded and handled as in memory mode. Failures
+// leave no file and come back as *catalogResultError, like a provider failure.
+func (c *Config) fetchCatalogToDisk(client *xtreamapi.Client, action string, q url.Values) (interface{}, error) {
+	key := c.catalogKey(action)
+	dir, err := catalogRunDir()
+	if err != nil {
+		return nil, &catalogResultError{err: fmt.Errorf("%s: catalogue folder: %w", action, err)}
+	}
+	path := filepath.Join(dir, fmt.Sprintf("%s-%d.json", catalogKeyLabel(key), time.Now().UnixNano()))
+	httpcode, err := client.ActionToFile(context.Background(), c.ProxyConfig, action, q, path)
+	if err != nil {
+		return nil, &catalogResultError{code: httpcode,
+			err: fmt.Errorf("%s failed (HTTP %d): %w", action, httpcode, err)}
+	}
+	if httpcode != http.StatusOK {
+		// An empty body: no file, and Action would have answered the fallback.
+		return nil, &catalogResultError{data: xtreamapi.FallbackForAction(action), code: httpcode}
+	}
+	kind, small, err := xtreamapi.ClassifyCatalogFile(path, action)
+	var data interface{}
+	switch {
+	case err != nil:
+		_ = os.Remove(path)
+		return nil, &catalogResultError{data: small, code: httpcode,
+			err: fmt.Errorf("%s failed (HTTP %d): %w", action, httpcode, err)}
+	case kind == xtreamapi.CatalogFileArray:
+		data = newDiskCatalog(path)
+	default:
+		_ = os.Remove(path)
+		if !usableCatalog(small) {
+			return nil, &catalogResultError{data: small, code: httpcode}
+		}
+		data = &memoryCatalog{data: small}
+	}
+	// This answer replaces the cached entry: drop its files once readers are done.
+	if e := peekCatalogEntry(key); e != nil {
+		if old, ok := e.data.(*diskCatalog); ok {
+			// shortcut: old files are kept for a fixed 10 min grace, not refcounted; switch to refcounting if a reader can hold an entry longer
+			time.AfterFunc(catalogFileGrace, old.remove)
+		}
+	}
+	return data, nil
 }

@@ -379,6 +379,9 @@ func (c *Config) catalogFetcher(action string, q url.Values) func() (interface{}
 		if err != nil {
 			return nil, err
 		}
+		if a, ok := catalogActions[action]; ok && !a.categories && c.diskCatalogs() && q.Get("category_id") == "" {
+			return c.fetchCatalogToDisk(client, action, q)
+		}
 		resp, httpcode, contentType, err := client.Action(c.ProxyConfig, action, q)
 		if err != nil {
 			return nil, &catalogResultError{data: resp, code: httpcode,

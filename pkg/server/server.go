@@ -115,6 +115,7 @@ type Config struct {
 // NewServer initializes a new server configuration with all necessary components.
 func NewServer(config *config.ProxyConfig) (*Config, error) {
 	config.CatalogStorage = parseCatalogStorage(config.CatalogStorage)
+	applyCatalogMemoryLimit(config.CatalogStorage)
 	var p m3u.Playlist
 
 	// Parse the M3U playlist from the remote URL if provided — unless it is the

@@ -78,7 +78,7 @@ func (c *Config) filterEntries(kind filter.Kind, items []interface{}, names map[
 			out = append(out, item)
 			continue
 		}
-		if c.catalogFilter.Keep(kind, names[catalogString(m["category_id"])], catalogString(m["name"]), catalogFlag(m["is_adult"])) {
+		if c.keepCatalogEntry(kind, m, names) {
 			out = append(out, item)
 		}
 	}
@@ -91,16 +91,8 @@ func (c *Config) filterEntries(kind filter.Kind, items []interface{}, names map[
 // is never fetched for this.
 func (c *Config) filterCategories(a catalogAction, items []interface{}) []interface{} {
 	var used map[string]bool
-	if entries, ok := peekCatalog(c.catalogKey(a.pair)); ok {
-		if list, ok := entries.([]interface{}); ok {
-			names := categoryNamesFrom(items)
-			used = make(map[string]bool)
-			for _, e := range c.filterEntries(a.kind, list, names) {
-				if m, ok := e.(map[string]interface{}); ok {
-					used[catalogString(m["category_id"])] = true
-				}
-			}
-		}
+	if entries := peekCatalogEntry(c.catalogKey(a.pair)); entries != nil {
+		used = c.usedCategories(a, entries, items)
 	}
 	out := make([]interface{}, 0, len(items))
 	for _, item := range items {
@@ -120,6 +112,40 @@ func (c *Config) filterCategories(a catalogAction, items []interface{}) []interf
 	return out
 }
 
+var (
+	usedCatMu  sync.Mutex
+	usedCatMem = map[filter.Kind]*usedCategories{}
+)
+
+// usedCategories is the set of category ids that keep an entry, for one cached
+// stream list and one cached categories list.
+type usedCategories struct {
+	src, cats *catalogEntry
+	set       map[string]bool
+}
+
+// usedCategories returns the ids of the categories that keep at least one
+// entry of the cached stream list, memoised per cached pair (like liveKeptMem)
+// so a categories request does not walk tens of thousands of entries again.
+func (c *Config) usedCategories(a catalogAction, entries *catalogEntry, items []interface{}) map[string]bool {
+	cats := peekCatalogEntry(c.catalogKey(catalogActions[a.pair].pair))
+	usedCatMu.Lock()
+	defer usedCatMu.Unlock()
+	if u := usedCatMem[a.kind]; u != nil && cats != nil && u.src == entries && u.cats == cats {
+		return u.set
+	}
+	names := categoryNamesFrom(catalogStoreOf(items))
+	set := make(map[string]bool)
+	_ = catalogStoreOf(entries.data).each(func(m map[string]interface{}) bool {
+		if c.keepCatalogEntry(a.kind, m, names) {
+			set[catalogString(m["category_id"])] = true
+		}
+		return true
+	})
+	usedCatMem[a.kind] = &usedCategories{src: entries, cats: cats, set: set}
+	return set
+}
+
 // categoryNames returns category_id -> category_name for a categories action,
 // from the catalog cache (fetching it if needed). On failure it is empty, and
 // entries are then judged on their name alone.
@@ -131,17 +157,15 @@ func (c *Config) categoryNames(categoriesAction string) map[string]string {
 	if err != nil {
 		return nil
 	}
-	items, _ := resp.([]interface{})
-	return categoryNamesFrom(items)
+	return categoryNamesFrom(catalogStoreOf(resp))
 }
 
-func categoryNamesFrom(items []interface{}) map[string]string {
-	names := make(map[string]string, len(items))
-	for _, item := range items {
-		if m, ok := item.(map[string]interface{}); ok {
-			names[catalogString(m["category_id"])] = catalogString(m["category_name"])
-		}
-	}
+func categoryNamesFrom(s catalogStore) map[string]string {
+	names := map[string]string{}
+	_ = s.each(func(m map[string]interface{}) bool {
+		names[catalogString(m["category_id"])] = catalogString(m["category_name"])
+		return true
+	})
 	return names
 }
 
@@ -244,28 +268,23 @@ func (c *Config) keptLiveIDs() *liveKeptSet {
 	if liveKeptMem != nil && liveKeptMem.src == e && liveKeptMem.cats == cats {
 		return liveKeptMem
 	}
-	items, _ := e.data.([]interface{})
 	var names map[string]string
 	if cats != nil {
-		catItems, _ := cats.data.([]interface{})
-		names = categoryNamesFrom(catItems)
+		names = categoryNamesFrom(catalogStoreOf(cats.data))
 	}
-	set := &liveKeptSet{src: e, cats: cats, ids: make(map[string]bool, len(items)), epgIDs: make(map[string]bool)}
-	for _, item := range items {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
+	set := &liveKeptSet{src: e, cats: cats, ids: make(map[string]bool), epgIDs: make(map[string]bool)}
+	_ = catalogStoreOf(e.data).each(func(m map[string]interface{}) bool {
 		id := normalizeStreamID(catalogString(m["stream_id"]))
 		if id == "" {
-			continue
+			return true
 		}
-		kept := c.catalogFilter.Keep(filter.Live, names[catalogString(m["category_id"])], catalogString(m["name"]), catalogFlag(m["is_adult"]))
+		kept := c.keepCatalogEntry(filter.Live, m, names)
 		set.ids[id] = kept
 		if epg := catalogString(m["epg_channel_id"]); kept && epg != "" {
 			set.epgIDs[epg] = true
 		}
-	}
+		return true
+	})
 	liveKeptMem = set
 	return set
 }

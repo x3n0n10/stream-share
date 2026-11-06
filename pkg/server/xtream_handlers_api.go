@@ -449,8 +449,7 @@ func (c *Config) servePlayerAPICatalog(ctx *gin.Context, action, key string, q u
 	if categoryID != "" {
 		// Rendered per request and not memoised: players ask for each
 		// category once, and keeping every slice would duplicate the catalogue.
-		items, _ := e.data.([]interface{})
-		body, err = c.renderCatalog(action, categorySlice(items, categoryID), false)
+		body, err = c.renderCatalog(action, categorySlice(catalogStoreOf(e.data), categoryID), false)
 	} else {
 		body, err = e.renderedJSON(func(data interface{}) ([]byte, error) {
 			return c.renderCatalog(action, data, true)
@@ -503,26 +502,18 @@ func (c *Config) renderCatalog(action string, data interface{}, whole bool) ([]b
 	return json.Marshal(processed)
 }
 
-// categorySlice returns the entries of items in categoryID, like the
+// categorySlice returns the entries of s in categoryID, like the
 // provider's own category_id filter: by the entry's category_id, or by its
 // category_ids list when a panel files it under several. Never nil, so it
 // encodes as [].
-func categorySlice(items []interface{}, categoryID string) []interface{} {
+func categorySlice(s catalogStore, categoryID string) []interface{} {
 	out := []interface{}{}
-	for _, item := range items {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			continue
+	_ = s.each(func(m map[string]interface{}) bool {
+		if inCategory(m, categoryID) {
+			out = append(out, m)
 		}
-		in := catalogString(m["category_id"]) == categoryID
-		ids, _ := m["category_ids"].([]interface{})
-		for _, v := range ids {
-			in = in || catalogString(v) == categoryID
-		}
-		if in {
-			out = append(out, item)
-		}
-	}
+		return true
+	})
 	return out
 }
 
@@ -535,32 +526,12 @@ func (c *Config) xtreamPlayerAPIGET(ctx *gin.Context) {
 // channel name index used by /status and logs.
 // It returns the number of channel names indexed.
 func (c *Config) harvestChannelNames(resp interface{}) int {
-	streams, ok := resp.([]interface{})
-	if !ok {
-		return 0
-	}
-	names := make(map[string]string, len(streams))
-	epgIDs := make(map[string]string, len(streams))
-	categories := make(map[string]string, len(streams))
-	for _, item := range streams {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		id := normalizeStreamID(fmt.Sprintf("%v", m["stream_id"]))
-		name := strings.TrimSpace(fmt.Sprintf("%v", m["name"]))
-		if id != "" && name != "" {
-			names[id] = name
-		}
-		if epgID, _ := m["epg_channel_id"].(string); strings.TrimSpace(epgID) != "" {
-			epgIDs[id] = strings.TrimSpace(epgID)
-		}
-		if category := resolveCategoryName(m); category != "" {
-			categories[id] = category
-		}
-	}
-	c.updateAPIChannelIndex(names, epgIDs, categories)
-	return len(names)
+	h := newChannelHarvest()
+	_ = catalogStoreOf(resp).each(func(m map[string]interface{}) bool {
+		h.add(m)
+		return true
+	})
+	return c.applyChannelHarvest(h)
 }
 
 // resolveCategoryName looks up the human-readable category for a
@@ -654,27 +625,9 @@ func (c *Config) injectCatchupFlags(resp interface{}, whole bool) interface{} {
 	upstreamCatchup := make(map[string]bool, len(streams))
 	for i, item := range streams {
 		out[i] = item
-		orig, ok := item.(map[string]interface{})
-		if !ok {
-			continue
+		if m, ok := item.(map[string]interface{}); ok {
+			out[i] = c.catchupFlagged(m, upstreamCatchup)
 		}
-		m := make(map[string]interface{}, len(orig)+1)
-		for k, v := range orig {
-			m[k] = v
-		}
-		out[i] = m
-		streamID := fmt.Sprintf("%v", m["stream_id"])
-		if v, exists := m["tv_archive"]; exists {
-			switch vv := v.(type) {
-			case json.Number:
-				n, _ := vv.Int64()
-				upstreamCatchup[streamID] = n == 1
-			case float64:
-				upstreamCatchup[streamID] = vv == 1
-			}
-		}
-		m["tv_archive"] = 1
-		m["tv_archive_duration"] = c.catchupManager.AdvertisedHours()
 	}
 	if whole {
 		c.catchupManager.SetUpstreamCatchup(upstreamCatchup)

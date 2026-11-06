@@ -53,20 +53,15 @@ func (c *Config) liveChannelNumber(streamID string) (int, bool) {
 // buildLiveNumIndex maps stream_id to num for a decoded get_live_streams list.
 // Both fields may be strings, json.Number or floats depending on the decoder.
 func buildLiveNumIndex(data interface{}) map[string]int {
-	items, _ := data.([]interface{})
-	idx := make(map[string]int, len(items))
-	for _, it := range items {
-		m, ok := it.(map[string]interface{})
-		if !ok {
-			continue
-		}
+	idx := map[string]int{}
+	_ = catalogStoreOf(data).each(func(m map[string]interface{}) bool {
 		id := normalizeStreamID(catalogString(m["stream_id"]))
 		f, err := strconv.ParseFloat(catalogString(m["num"]), 64)
-		if id == "" || err != nil || f <= 0 {
-			continue
+		if id != "" && err == nil && f > 0 {
+			idx[id] = int(f)
 		}
-		idx[id] = int(f)
-	}
+		return true
+	})
 	return idx
 }
 

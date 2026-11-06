@@ -109,13 +109,6 @@ type nopCloser struct{ io.Writer }
 
 func (nopCloser) Close() error { return nil }
 
-// serveBytesCompressed writes body through responseWriter.
-func serveBytesCompressed(ctx *gin.Context, contentType string, body []byte) {
-	w := responseWriter(ctx, contentType)
-	_, _ = w.Write(body)
-	_ = w.Close()
-}
-
 // startGzipSibling writes p+".gz" in the background unless that is already
 // under way.
 func startGzipSibling(p string) {

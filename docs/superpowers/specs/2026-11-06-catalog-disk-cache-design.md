@@ -1,4 +1,4 @@
-# Catalogue Disk Cache Design
+# Catalogue Disk Cache Design (opt-in)
 
 ## Intent
 
@@ -11,6 +11,13 @@ Discord or the dashboard see.
 
 The fix: keep the provider catalogues on disk under `CACHE_FOLDER` instead of
 as parsed Go trees in memory. Only small, purpose-built indexes stay in RAM.
+
+Disk storage is **opt-in**. A new setting `CATALOG_STORAGE` picks `memory`
+(default, today's behaviour, upstream's approach) or `disk`. Operators choose
+between RAM and disk depending on their system: plenty of RAM and a slow disk
+(NAS, SD card) favour `memory`, a small VPS or many instances favour `disk`.
+The changes that save memory without a trade-off (sections 5 and 6) apply in
+both modes.
 
 This is built in the fork (`x3n0n10/stream-share`). The upstream author
 (lucasduport) wrote the catalogue cache (#42), the filter (#46), channel
@@ -40,7 +47,8 @@ final measurement must use a Go 1.23 build.
 
 ## Goals
 
-1. ≤ 100 MB RSS at 22k live / 122k VOD / 20k series as the settled level
+1. With `CATALOG_STORAGE=disk`: ≤ 100 MB RSS at 22k live / 122k VOD /
+   20k series as the settled level
    (owner's choice: not a hard container limit). Measured 30 s after a player
    has loaded every list, category slices and `get.php`, and again 30 s after
    a forced catalogue refresh. Short spikes above 100 MB during a refresh or
@@ -57,6 +65,10 @@ final measurement must use a Go 1.23 build.
    internals that no longer exist (`catalogEntry.rendered`, `renderedGzips`);
    their assertions about behaviour stay. The cache-core tests in
    `catalog_cache_test.go` and `stream_numbers_test.go` stay unchanged (see 1).
+5. With the default `CATALOG_STORAGE=memory`, behaviour, response times and
+   memory use stay as today, except for the savings of sections 5 and 6.
+   An operator who never sets the variable notices no change other than lower
+   memory.
 
 ## Non-goals
 
@@ -88,9 +100,16 @@ The cache core stays generic: `catalogEntry.data` remains `interface{}` and
 are unchanged, so the cache-core tests (which store arbitrary values such as
 `"data"` or `[]interface{}{"a","b"}`) keep passing as they are.
 
-What changes is what the catalogue fetcher puts in `data`:
+What changes is what the catalogue fetcher puts in `data`. A JSON-array
+answer becomes a catalogue store, one of two types behind one small interface
+(`catalogStore`): walk the items (section 4), serve the whole rendered list,
+serve one category slice.
 
-- for a JSON-array answer, a `*diskCatalog` (new type): path of the provider's
+- `*memoryCatalog` (`CATALOG_STORAGE=memory`, default): the parsed
+  `[]interface{}` as today, rendered with today's code (`renderCatalog`, the
+  memoised JSON and `catalogGzip`) and sliced with `categorySlice` from
+  PR #63. This is today's code moved behind the interface, not rewritten.
+- `*diskCatalog` (`CATALOG_STORAGE=disk`): path of the provider's
   body as received, under `utils.CatalogCacheDir()` (new, a per-process
   subdirectory of `CACHE_FOLDER/catalog`, see below), plus a lazily built
   render (see 3);
@@ -98,7 +117,8 @@ What changes is what the catalogue fetcher puts in `data`:
   exactly as today, in memory.
 
 `catalogEntry` loses `renderOnce`/`rendered`/`renderErr`; the render lives on
-`*diskCatalog`.
+the store. In memory mode the fetch stays as today (section 2 only applies to
+disk mode).
 
 **Directory.** Several instances may share a host and, when `CACHE_FOLDER` is
 unset, the same temp root. Each process therefore writes into its own
@@ -113,7 +133,7 @@ entry is replaced, the old entry's files are removed after a grace period
 comment `shortcut: old files are kept for a fixed 10 min grace, not
 refcounted; switch to refcounting if a reader can hold an entry longer`.
 
-### 2. Fetching streams to disk
+### 2. Fetching streams to disk (disk mode)
 
 Add a streaming variant to the Xtream client (`pkg/xtream/xtream_proxy.go`)
 that writes the body to a file instead of returning it, sharing the existing
@@ -130,7 +150,7 @@ pass (`json.Decoder`, `UseNumber`) over the file.
 
 Peak memory of a fetch must not depend on catalogue size.
 
-### 3. Rendering once, to disk
+### 3. Rendering once, to disk (disk mode)
 
 `renderCatalog`'s semantics stay: `ProcessResponse` (a no-op for decoded
 maps; keep the call for non-array answers), channel-name harvest only for the
@@ -144,8 +164,10 @@ request (as `renderOnce` does today):
 - Apply the filter and catchup flags per item. The filter needs a
   per-item form (`filterEntries` is already per item; split it so a single map
   can be judged with a category-name map fetched once per pass).
-- Encode each kept item and write it to the rendered file and, through a
-  `gzip.Writer`, to the gzip file in the same pass.
+- Encode each kept item and write it to the rendered file. When the pass is
+  done, write its gzip sibling with the existing `writeGzipSibling`
+  (`compress.go`) before the render counts as done, so the first gzip request
+  already gets the compressed file.
 - Record for each kept item its byte span in the rendered file and its
   category ids (`category_id` and `category_ids`, the matching rules of
   `categorySlice` from PR #63).
@@ -161,18 +183,21 @@ fails (disk full, I/O error), remove the partial files, answer that request
 with a 500 as today's render error does, and let the next request try again.
 Only a successful render is kept for the entry's life.
 
-Serving a whole list: stream the rendered or gzip file to the response
-(`io.Copy` or `http.ServeContent`), same status and headers as today.
+Serving a whole list: the existing `serveFileCompressed` (`compress.go`),
+which already serves a file or its `.gz` sibling with `Vary` and
+`http.ServeContent`, with content type `application/json; charset=utf-8`.
 
 Serving a category slice: `[` + kept spans of that category joined by `,` +
-`]`, read with `ReadAt` from the rendered file, gzipped per request when
-accepted (small). Unknown category returns `[]`. This replaces the per-request
+`]`, read with `ReadAt` from the rendered file and written through the
+existing `responseWriter` (`compress.go`), which gzips on the fly when
+accepted. Unknown category returns `[]`. This replaces the per-request
 re-render from PR #63 and gives the same answer.
 
 ### 4. Consumers read through an iterator
 
-Add `func (e *catalogEntry) each(fn func(m map[string]interface{}) bool) error`
-that streams the raw file item by item (stop when `fn` returns false). Each
+`catalogStore` has `each(fn func(m map[string]interface{}) bool) error`. The
+memory store ranges over its slice; the disk store streams the raw file item
+by item. Iteration stops when `fn` returns false. Each
 consumer keeps its loop body and replaces the `[]interface{}` range with
 `each`:
 
@@ -191,7 +216,7 @@ consumer keeps its loop body and replaces the `[]interface{}` range with
 entry (or an iterator) instead of `interface{}`. The fallback value path of
 `fetchCatalogOnce` (empty but not an error) keeps returning that small value.
 
-Cost: a scan of the 36 MB VOD file per Discord search, estimated at a few
+Cost in disk mode: a scan of the 36 MB VOD file per Discord search, estimated at a few
 hundred ms. Acceptable; searches are rare and already take longer for series
 (episode crawl).
 
@@ -211,17 +236,30 @@ measurement, not upfront.
 playlist with `os.ReadFile`, rewrite it with `strings.Split` and compress it
 in memory. At this catalogue size that is tens of MB per request, more with
 concurrent players. Change `rewritePlaylistHosts` to a line-by-line rewrite
-from an `io.Reader` to an `io.Writer` (same per-line rules), and serve through
-a streaming gzip writer when the client accepts it, keeping the same
+from an `io.Reader` to an `io.Writer` (same per-line rules), and write it
+through the existing `responseWriter` (`compress.go`, already used by
+`serveBytesCompressed`), which gzips on the fly when accepted, keeping the same
 `Content-Type` and `Content-Disposition`. The response may switch to chunked
 transfer (no `Content-Length`); players already accept that for the
 uncompressed path of other routes.
 
-### 7. `GOMEMLIMIT`
+### 7. `GOMEMLIMIT` (disk mode)
 
-Set `ENV GOMEMLIMIT=90MiB` in the `Dockerfile` runtime stage (and in
-`.Dockerfile.goreleaser`). Users can override it. Document it in the README's
-environment section.
+A fixed `GOMEMLIMIT` in the Dockerfile would make the garbage collector run
+almost constantly in memory mode, where the live heap on a big catalogue is
+far above 90 MiB. So it is tied to the mode: at startup, when
+`CATALOG_STORAGE=disk` and the `GOMEMLIMIT` environment variable is not set,
+call `debug.SetMemoryLimit(90 << 20)` and log it. An operator's own
+`GOMEMLIMIT` always wins; memory mode leaves the Go default alone.
+
+### 8. Configuration
+
+`CATALOG_STORAGE` / `--catalog-storage`, registered like the other settings in
+`cmd/root.go` (viper flag + env). Values `memory` (default) and `disk`; an
+unknown value logs a warning and uses `memory`. The mode is read once at
+startup. Document it in the README's environment section (with the trade-offs
+from this design in two or three lines) and as a commented example in
+`docker-compose.yml`.
 
 ## Constraints
 
@@ -233,11 +271,14 @@ environment section.
   counter or hash.
 - `CACHE_FOLDER` may be unset: `utils.CacheRoot()` already falls back to a temp
   directory.
-- Disk cost at the owner's size: ~120–150 MB in `CACHE_FOLDER/catalog`.
+- Disk cost in disk mode at the owner's size: ~120–150 MB in
+  `CACHE_FOLDER/catalog`. Memory mode writes nothing new to disk.
 
 ## Verification
 
 - `go build`, `go vet`, `go test -race ./...` pass.
+- The player_api, filter, catchup, search, share and channel-number tests run
+  in both modes (table-driven over `CATALOG_STORAGE`).
 - Byte-identity test: rendered whole lists and category slices from the new
   path equal the old renderer's output, with filter and catchup on and off.
 - Fetch-validation tests for each provider oddity listed in 2.
@@ -246,7 +287,8 @@ environment section.
 - Memory: the throwaway harness used for the numbers above (fake provider
   with the owner's sizes, real binary, real Postgres, RSS from
   `/proc/<pid>/status`, heap profile via a temporary pprof import) is rerun
-  after each step with a Go 1.23 build. The result table goes in the PR.
+  after each step with a Go 1.23 build, in both modes. The result table goes
+  in the PR.
 
 ## Order of work
 
@@ -259,10 +301,13 @@ Each step is measured before the next:
    Request sequence: login, the three category lists, the three whole lists
    with `Accept-Encoding: gzip`, category slices 1–10 for live and VOD,
    `get.php`; RSS sampled after each phase and 30 s later.
-1. M3U index clone/intern (5), playlist streaming (6) and `GOMEMLIMIT` (7):
-   small, independent.
-2. Streaming fetch to disk and the entry/iterator change (1, 2, 4).
-3. Render-to-disk and span-based slices (3).
+1. M3U index clone/intern (5) and playlist streaming (6): small,
+   independent, both modes.
+2. `catalogStore` interface with `memoryCatalog` (today's code moved behind
+   it) and the consumers switched to `each` (1, 4); the setting (8). No
+   behaviour change yet.
+3. Disk mode: streaming fetch to disk and `diskCatalog` iteration (1, 2).
+4. Disk mode: render to disk and span-based slices (3), and `GOMEMLIMIT` (7).
 
 ## Calls made without the owner
 
@@ -271,7 +316,12 @@ Each step is measured before the next:
   updated when this work is pushed.
 - No in-RAM search index; searches scan the file.
 - Catalogue files are not reused after a restart.
-- `GOMEMLIMIT` default 90 MiB.
+- `CATALOG_STORAGE=memory` is the default, by the owner's choice, in line
+  with upstream's approach.
+- `GOMEMLIMIT` 90 MiB is applied only in disk mode and only when the operator
+  hasn't set `GOMEMLIMIT`; not baked into the Dockerfile.
+- Only catalogue storage is switchable; the M3U index and playlist streaming
+  changes always apply.
 - 10-minute grace before old catalogue files are deleted.
 - The cache core stays generic (`data interface{}`); disk storage sits in the
   catalogue fetcher, so upstream's cache code and tests stay untouched.

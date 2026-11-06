@@ -11,7 +11,7 @@ import (
 )
 
 // A per-request rewritten body is gzipped only for clients that accept it.
-func TestServeBytesCompressed(t *testing.T) {
+func TestResponseWriterGzipsOnlyWhenAccepted(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	serve := func(acceptEncoding string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
@@ -20,7 +20,9 @@ func TestServeBytesCompressed(t *testing.T) {
 		if acceptEncoding != "" {
 			ctx.Request.Header.Set("Accept-Encoding", acceptEncoding)
 		}
-		serveBytesCompressed(ctx, "application/octet-stream", []byte("#EXTM3U\n"))
+		rw := responseWriter(ctx, "application/octet-stream")
+		_, _ = rw.Write([]byte("#EXTM3U\n"))
+		_ = rw.Close()
 		return w
 	}
 

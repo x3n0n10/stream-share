@@ -23,6 +23,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -178,15 +179,12 @@ func (s *stallReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// ActionContext is Action bound to ctx: the call (retries included) stops when
-// ctx ends, e.g. when the player that asked for it disconnects.
-func (c *Client) ActionContext(ctx context.Context, cfg *config.ProxyConfig, action string, q url.Values) (respBody interface{}, httpcode int, contentType string, err error) {
-	contentType = "application/json"
-	utils.DebugLog("Processing Xtream action=%s", action)
-
+// requestURL builds the player_api.php URL for action, with the credentials
+// and the non-empty extra params in q.
+func (c *Client) requestURL(action string, q url.Values) (string, error) {
 	u, err := url.Parse(strings.TrimRight(c.BaseURL, "/") + "/player_api.php")
 	if err != nil {
-		return nil, http.StatusInternalServerError, contentType, utils.PrintErrorAndReturn(err)
+		return "", err
 	}
 	params := url.Values{}
 	params.Set("username", c.Username)
@@ -206,13 +204,16 @@ func (c *Client) ActionContext(ctx context.Context, cfg *config.ProxyConfig, act
 	}
 	u.RawQuery = params.Encode()
 	utils.DebugLog("Xtream raw request: %s", u.String())
+	return u.String(), nil
+}
 
-	client := c.Client
-
+// fetchWithRetry GETs rawURL up to 5 times with retryBackoff between attempts.
+// On a 200, read consumes the body and returns how many bytes it took (reading
+// at most maxResponseBytes+1); a read error or an oversized body is retried,
+// an errLocalWrite is not.
+// It reports whether an attempt succeeded, else the last error.
+func (c *Client) fetchWithRetry(ctx context.Context, rawURL, action string, read func(resp *http.Response, cancel context.CancelFunc) (int64, error)) (bool, error) {
 	var lastErr error
-	var resp *http.Response
-	var b []byte
-
 	for i := 0; i < 5; i++ {
 		if i > 0 {
 			select {
@@ -225,7 +226,7 @@ func (c *Client) ActionContext(ctx context.Context, cfg *config.ProxyConfig, act
 			}
 		}
 		attemptCtx, cancel := context.WithCancel(ctx)
-		req, err := http.NewRequestWithContext(attemptCtx, "GET", u.String(), nil)
+		req, err := http.NewRequestWithContext(attemptCtx, "GET", rawURL, nil)
 		if err != nil {
 			cancel()
 			lastErr = err
@@ -233,7 +234,7 @@ func (c *Client) ActionContext(ctx context.Context, cfg *config.ProxyConfig, act
 		}
 		req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
 		req.Header.Set("Accept", "application/json, text/plain, */*")
-		resp, err = client.Do(req)
+		resp, err := c.Client.Do(req)
 		if err != nil {
 			cancel()
 			lastErr = err
@@ -242,7 +243,7 @@ func (c *Client) ActionContext(ctx context.Context, cfg *config.ProxyConfig, act
 		if resp.StatusCode == http.StatusOK {
 			// Read with a large cap; if the provider sends more, fail loudly
 			// instead of silently truncating the JSON body.
-			b, err = readBody(resp, cancel)
+			n, err := read(resp, cancel)
 			_ = resp.Body.Close()
 			cancel()
 			if err != nil {
@@ -250,31 +251,52 @@ func (c *Client) ActionContext(ctx context.Context, cfg *config.ProxyConfig, act
 					err = fmt.Errorf("response body stalled for %v: %w", bodyStallTimeout, err)
 				}
 				lastErr = err
-				b = nil
+				if errors.Is(err, errLocalWrite) {
+					return false, lastErr // retrying would only re-download into a broken disk
+				}
 				continue
 			}
-			if len(b) > maxResponseBytes {
+			if n > maxResponseBytes {
 				utils.WarnLog("Xtream action=%s response exceeded %d MB cap; refusing truncated body", action, maxResponseBytes/(1024*1024))
 				lastErr = fmt.Errorf("response exceeds %d MB cap", maxResponseBytes/(1024*1024))
-				b = nil
 				continue
 			}
-			break
+			return true, nil
 		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		_ = resp.Body.Close()
 		cancel()
 		lastErr = fmt.Errorf("HTTP status %d", resp.StatusCode)
 	}
+	return false, lastErr
+}
 
-	if resp == nil || resp.StatusCode != http.StatusOK || len(b) == 0 {
+// ActionContext is Action bound to ctx: the call (retries included) stops when
+// ctx ends, e.g. when the player that asked for it disconnects.
+func (c *Client) ActionContext(ctx context.Context, cfg *config.ProxyConfig, action string, q url.Values) (respBody interface{}, httpcode int, contentType string, err error) {
+	contentType = "application/json"
+	utils.DebugLog("Processing Xtream action=%s", action)
+
+	rawURL, err := c.requestURL(action, q)
+	if err != nil {
+		return nil, http.StatusInternalServerError, contentType, utils.PrintErrorAndReturn(err)
+	}
+
+	var b []byte
+	ok, lastErr := c.fetchWithRetry(ctx, rawURL, action, func(resp *http.Response, cancel context.CancelFunc) (int64, error) {
+		var err error
+		b, err = readBody(resp, cancel)
+		return int64(len(b)), err
+	})
+
+	if !ok || len(b) == 0 {
 		utils.DebugLog("Request failed, last error: %v", lastErr)
-		return fallbackForAction(action), http.StatusBadGateway, contentType, lastErr
+		return FallbackForAction(action), http.StatusBadGateway, contentType, lastErr
 	}
 
 	trim := bytes.TrimSpace(b)
 	if len(trim) == 0 || bytes.Equal(trim, []byte("null")) || (len(trim) > 0 && trim[0] == '<') {
-		return fallbackForAction(action), http.StatusOK, contentType, nil
+		return FallbackForAction(action), http.StatusOK, contentType, nil
 	}
 	if bytes.Equal(trim, []byte("{}")) {
 		return map[string]interface{}{}, http.StatusOK, contentType, nil
@@ -288,7 +310,7 @@ func (c *Client) ActionContext(ctx context.Context, cfg *config.ProxyConfig, act
 	decoder.UseNumber()
 	if err := decoder.Decode(&result); err != nil {
 		utils.DebugLog("JSON decoding failed: %v", err)
-		return fallbackForAction(action), http.StatusOK, contentType, err
+		return FallbackForAction(action), http.StatusOK, contentType, err
 	}
 	return result, http.StatusOK, contentType, nil
 }
@@ -298,8 +320,8 @@ func createEmergencyCategoryData() []map[string]interface{} {
 	return []map[string]interface{}{{"category_id": "1", "category_name": "Default Category", "parent_id": "0"}}
 }
 
-// fallbackForAction returns a sensible empty structure per action
-func fallbackForAction(action string) interface{} {
+// FallbackForAction returns a sensible empty structure per action
+func FallbackForAction(action string) interface{} {
 	switch action {
 	case getLiveCategories, getVodCategories, getSeriesCategories:
 		return createEmergencyCategoryData()

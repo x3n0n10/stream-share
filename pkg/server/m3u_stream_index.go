@@ -65,6 +65,7 @@ func buildStreamIndex(r io.Reader) map[string]streamIndexEntry {
 
 	idx := make(map[string]streamIndexEntry, 4096)
 	lastExtinf := ""
+	exts := map[string]string{}
 
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
@@ -73,7 +74,8 @@ func buildStreamIndex(r io.Reader) map[string]streamIndexEntry {
 		}
 		if strings.HasPrefix(line, "#EXTINF") {
 			if i := strings.LastIndex(line, ","); i != -1 && i+1 < len(line) {
-				lastExtinf = strings.TrimSpace(line[i+1:])
+				// Clone: a substring would pin the whole line in the index.
+				lastExtinf = strings.Clone(strings.TrimSpace(line[i+1:]))
 			} else {
 				lastExtinf = ""
 			}
@@ -96,6 +98,12 @@ func buildStreamIndex(r io.Reader) map[string]streamIndexEntry {
 		}
 		if id == "" {
 			continue
+		}
+		if e, ok := exts[ext]; ok {
+			ext = e
+		} else {
+			ext = strings.Clone(ext)
+			exts[ext] = ext
 		}
 		key := basePath + "\x00" + id
 		if _, exists := idx[key]; !exists {

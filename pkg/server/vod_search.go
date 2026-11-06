@@ -35,6 +35,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lucasduport/stream-share/pkg/filter"
 	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
 	xtreamapi "github.com/lucasduport/stream-share/pkg/xtream"
@@ -142,28 +143,30 @@ func (c *Config) searchXtreamMovies(query string) ([]types.VODResult, error) {
 		utils.WarnLog("Movies search: get_vod_streams failed: %v", err)
 		return nil, err
 	}
+	if !isCatalogList(catalogStoreOf(resp)) {
+		return nil, fmt.Errorf("unexpected get_vod_streams format: %T", catalogDataOf(resp))
+	}
 	// Search what players are offered: the catalogue filter applies here too.
-	resp = c.filterPlayerAPICatalog("get_vod_streams", resp)
-	arr, ok := resp.([]interface{})
-	if !ok {
-		return nil, fmt.Errorf("unexpected get_vod_streams format: %T", resp)
+	filtered := c.catalogFilter.ActiveFor(filter.Movie)
+	var names map[string]string
+	if filtered {
+		names = c.categoryNames("get_vod_categories")
 	}
 	out := make([]types.VODResult, 0, 50)
-	for _, it := range arr {
-		m, ok := it.(map[string]interface{})
-		if !ok {
-			continue
+	err = catalogStoreOf(resp).each(func(m map[string]interface{}) bool {
+		if filtered && !c.keepCatalogEntry(filter.Movie, m, names) {
+			return true
 		}
 		name := fmt.Sprintf("%v", m["name"]) // movie title
 		if name == "" {
-			continue
+			return true
 		}
 		if !allTokensIn(tokens, name) {
-			continue
+			return true
 		}
 		streamID := fmt.Sprintf("%v", m["stream_id"]) // numeric as string
 		if strings.TrimSpace(streamID) == "" || streamID == "<nil>" {
-			continue
+			return true
 		}
 		year := fmt.Sprintf("%v", firstNonEmpty(m["releaseDate"], m["release_date"]))
 		rating := fmt.Sprintf("%v", firstNonEmpty(m["rating"], m["vote_average"]))
@@ -183,6 +186,11 @@ func (c *Config) searchXtreamMovies(query string) ([]types.VODResult, error) {
 			StreamID:   streamID,
 			StreamType: "movie",
 		})
+		return true
+	})
+	if err != nil {
+		utils.WarnLog("Movies search: get_vod_streams unreadable: %v", err)
+		return nil, err
 	}
 	utils.DebugLog("Movies search: returning %d results", len(out))
 	return out, nil
@@ -595,13 +603,9 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 		utils.WarnLog("Series search: get_series failed: %v", err)
 		return nil, err
 	}
-	// Search what players are offered: the catalogue filter applies here too.
-	resp = c.filterPlayerAPICatalog("get_series", resp)
-
-	arr, ok := resp.([]interface{})
-	if !ok {
-		utils.WarnLog("Series search: unexpected get_series format: %T", resp)
-		return nil, fmt.Errorf("unexpected get_series format: %T", resp)
+	if !isCatalogList(catalogStoreOf(resp)) {
+		utils.WarnLog("Series search: unexpected get_series format: %T", catalogDataOf(resp))
+		return nil, fmt.Errorf("unexpected get_series format: %T", catalogDataOf(resp))
 	}
 
 	// First pass: collect matching series (name + id + metadata) without
@@ -612,22 +616,27 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 		genre string
 		year  string
 	}
+	// Search what players are offered: the catalogue filter applies here too.
+	filtered := c.catalogFilter.ActiveFor(filter.Series)
+	var names map[string]string
+	if filtered {
+		names = c.categoryNames("get_series_categories")
+	}
 	matches := make([]seriesMatch, 0, 16)
-	for _, item := range arr {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			continue
+	err = catalogStoreOf(resp).each(func(m map[string]interface{}) bool {
+		if filtered && !c.keepCatalogEntry(filter.Series, m, names) {
+			return true
 		}
 		seriesName := fmt.Sprintf("%v", m["name"])
 		if seriesName == "" {
-			continue
+			return true
 		}
 		if !allTokensIn(qTokens, seriesName) {
-			continue
+			return true
 		}
 		seriesID := fmt.Sprintf("%v", m["series_id"])
 		if seriesID == "" || seriesID == "<nil>" {
-			continue
+			return true
 		}
 		matches = append(matches, seriesMatch{
 			name:  seriesName,
@@ -635,6 +644,12 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 			genre: fmt.Sprintf("%v", m["genre"]),
 			year:  fmt.Sprintf("%v", firstNonEmpty(m["releaseDate"], m["release_date"])),
 		})
+		return true
+	})
+
+	if err != nil {
+		utils.WarnLog("Series search: get_series unreadable: %v", err)
+		return nil, err
 	}
 
 	// Each match costs a get_series_info round trip, so a short query matching
@@ -757,13 +772,13 @@ func (c *Config) searchXtreamSeries(query string) ([]types.VODResult, error) {
 // getCachedVODCatalog returns the parsed get_vod_streams catalog, fetching and
 // caching it on first use. Concurrent callers share a single fetch.
 func (c *Config) getCachedVODCatalog() (interface{}, error) {
-	return fetchCatalogOnce(c.catalogKey("get_vod_streams", ""), c.catalogFetcher("get_vod_streams", url.Values{}))
+	return fetchCatalogOnce(c.catalogKey("get_vod_streams"), c.catalogFetcher("get_vod_streams", url.Values{}))
 }
 
 // getCachedSeriesCatalog returns the parsed get_series catalog, fetching and
 // caching it on first use. Concurrent callers share a single fetch.
 func (c *Config) getCachedSeriesCatalog() (interface{}, error) {
-	return fetchCatalogOnce(c.catalogKey("get_series", ""), c.catalogFetcher("get_series", url.Values{}))
+	return fetchCatalogOnce(c.catalogKey("get_series"), c.catalogFetcher("get_series", url.Values{}))
 }
 
 // firstNonEmpty returns the first non-empty/non-nil value among candidates

@@ -64,7 +64,7 @@ func newFakeCatalogProvider(t *testing.T) *fakeCatalogProvider {
 		case cat != "":
 			_, _ = fmt.Fprintf(w, `[{"stream_id":"9","name":"Only %s","tv_archive":0}]`, cat)
 		default:
-			_, _ = w.Write([]byte(`[{"stream_id":"1","name":"One","tv_archive":0},{"stream_id":"2","name":"Two","tv_archive":1}]`))
+			_, _ = w.Write([]byte(`[{"stream_id":"1","name":"One","category_id":"42","tv_archive":0},{"stream_id":"2","name":"Two","category_id":43,"tv_archive":1}]`))
 		}
 	}))
 	t.Cleanup(p.srv.Close)
@@ -108,41 +108,62 @@ func decodeList(t *testing.T, w *httptest.ResponseRecorder) []map[string]interfa
 }
 
 func TestPlayerAPICatalogServedFromCache(t *testing.T) {
-	invalidateCatalogCache()
-	p := newFakeCatalogProvider(t)
-	c := playerAPITestConfig(p.srv.URL)
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		p := newFakeCatalogProvider(t)
+		c := playerAPITestConfig(p.srv.URL)
+		c.CatalogStorage = storage
 
-	for i := 0; i < 3; i++ {
-		if got := decodeList(t, callPlayerAPI(t, c, "action=get_vod_streams")); len(got) != 2 {
-			t.Fatalf("call %d: %d items, want 2", i, len(got))
+		for i := 0; i < 3; i++ {
+			if got := decodeList(t, callPlayerAPI(t, c, "action=get_vod_streams")); len(got) != 2 {
+				t.Fatalf("call %d: %d items, want 2", i, len(got))
+			}
 		}
-	}
-	if n := p.count("get_vod_streams", ""); n != 1 {
-		t.Fatalf("provider hit %d times, want 1", n)
-	}
-	// The /watch search shares the same cache entry.
-	if _, err := c.getCachedVODCatalog(); err != nil {
-		t.Fatal(err)
-	}
-	if n := p.count("get_vod_streams", ""); n != 1 {
-		t.Fatalf("search re-fetched the catalogue: %d provider hits", n)
-	}
+		if n := p.count("get_vod_streams", ""); n != 1 {
+			t.Fatalf("provider hit %d times, want 1", n)
+		}
+		// The /watch search shares the same cache entry.
+		if _, err := c.getCachedVODCatalog(); err != nil {
+			t.Fatal(err)
+		}
+		if n := p.count("get_vod_streams", ""); n != 1 {
+			t.Fatalf("search re-fetched the catalogue: %d provider hits", n)
+		}
+	})
 }
 
-func TestPlayerAPICategoryNotServedFromFullCatalogue(t *testing.T) {
-	invalidateCatalogCache()
-	p := newFakeCatalogProvider(t)
-	c := playerAPITestConfig(p.srv.URL)
+func TestPlayerAPICategorySlicedFromFullCatalogue(t *testing.T) {
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		p := newFakeCatalogProvider(t)
+		c := playerAPITestConfig(p.srv.URL)
+		c.CatalogStorage = storage
 
-	decodeList(t, callPlayerAPI(t, c, "action=get_live_streams"))
-	got := decodeList(t, callPlayerAPI(t, c, "action=get_live_streams&category_id=42"))
-	if len(got) != 1 || got[0]["name"] != "Only 42" {
-		t.Fatalf("category request got %v, want the provider's filtered list", got)
-	}
-	decodeList(t, callPlayerAPI(t, c, "action=get_live_streams&category_id=42"))
-	if a, b := p.count("get_live_streams", ""), p.count("get_live_streams", "42"); a != 1 || b != 1 {
-		t.Fatalf("provider hits: full=%d category=%d, want 1 and 1", a, b)
-	}
+		for _, tc := range []struct {
+			cat  string
+			want []string
+		}{{"42", []string{"One"}}, {"43", []string{"Two"}}, {"999", nil}} {
+			got := decodeList(t, callPlayerAPI(t, c, "action=get_live_streams&category_id="+tc.cat))
+			if len(got) != len(tc.want) {
+				t.Fatalf("category %s: got %v, want %v", tc.cat, got, tc.want)
+			}
+			for i, name := range tc.want {
+				if got[i]["name"] != name {
+					t.Fatalf("category %s: got %v, want %v", tc.cat, got, tc.want)
+				}
+			}
+		}
+		if a, b := p.count("get_live_streams", ""), p.count("get_live_streams", "42"); a != 1 || b != 0 {
+			t.Fatalf("provider hits: full=%d category=%d, want 1 and 0", a, b)
+		}
+		catalogCacheMu.RLock()
+		n := len(catalogCache)
+		catalogCacheMu.RUnlock()
+		if n != 1 {
+			t.Fatalf("catalog cache holds %d entries, want only the full list", n)
+		}
+		if _, ok := c.playerAPICatalogKey("get_live_categories", url.Values{"category_id": {"42"}}); ok {
+			t.Fatal("a category list has no category_id slice and must bypass the cache")
+		}
+	})
 }
 
 func TestPlayerAPIUnknownParamsBypassCache(t *testing.T) {
@@ -157,97 +178,105 @@ func TestPlayerAPIUnknownParamsBypassCache(t *testing.T) {
 }
 
 func TestPlayerAPIServesLastGoodCatalogueWhenProviderFails(t *testing.T) {
-	invalidateCatalogCache()
-	p := newFakeCatalogProvider(t)
-	c := playerAPITestConfig(p.srv.URL)
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		p := newFakeCatalogProvider(t)
+		c := playerAPITestConfig(p.srv.URL)
+		c.CatalogStorage = storage
 
-	decodeList(t, callPlayerAPI(t, c, "action=get_series"))
-	p.fail.Store(true)
+		decodeList(t, callPlayerAPI(t, c, "action=get_series"))
+		p.fail.Store(true)
 
-	// Expire the entry: the next request must still answer, from the last
-	// good copy, while a refresh is attempted.
-	key := c.catalogKey("get_series", "")
-	catalogCacheMu.Lock()
-	catalogCache[key].fetchedAt = time.Now().Add(-2 * catalogCacheTTL())
-	catalogCacheMu.Unlock()
+		// Expire the entry: the next request must still answer, from the last
+		// good copy, while a refresh is attempted.
+		key := c.catalogKey("get_series")
+		catalogCacheMu.Lock()
+		catalogCache[key].fetchedAt = time.Now().Add(-2 * catalogCacheTTL())
+		catalogCacheMu.Unlock()
 
-	if got := decodeList(t, callPlayerAPI(t, c, "action=get_series")); len(got) != 2 {
-		t.Fatalf("stale catalogue: %d items, want 2", len(got))
-	}
-	// A forced refresh failing also falls back to the last good copy.
-	e, stale, err := fetchCatalogEntry(key, true, c.catalogFetcher("get_series", nil))
-	if err != nil || !stale || e == nil {
-		t.Fatalf("forced refresh on failure: entry=%v stale=%v err=%v, want last good copy", e != nil, stale, err)
-	}
-	waitFor(t, func() bool { return p.count("get_series", "") >= 2 })
+		if got := decodeList(t, callPlayerAPI(t, c, "action=get_series")); len(got) != 2 {
+			t.Fatalf("stale catalogue: %d items, want 2", len(got))
+		}
+		// A forced refresh failing also falls back to the last good copy.
+		e, stale, err := fetchCatalogEntry(key, true, c.catalogFetcher("get_series", nil))
+		if err != nil || !stale || e == nil {
+			t.Fatalf("forced refresh on failure: entry=%v stale=%v err=%v, want last good copy", e != nil, stale, err)
+		}
+		waitFor(t, func() bool { return p.count("get_series", "") >= 2 })
+	})
 }
 
 func TestPlayerAPIEmptyAnswerNotCached(t *testing.T) {
-	invalidateCatalogCache()
-	var hits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
-		_, _ = w.Write([]byte(`[]`))
-	}))
-	defer srv.Close()
-	c := playerAPITestConfig(srv.URL)
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		var hits int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&hits, 1)
+			_, _ = w.Write([]byte(`[]`))
+		}))
+		defer srv.Close()
+		c := playerAPITestConfig(srv.URL)
+		c.CatalogStorage = storage
 
-	for i := 0; i < 2; i++ {
-		if got := decodeList(t, callPlayerAPI(t, c, "action=get_vod_streams")); len(got) != 0 {
-			t.Fatalf("got %d items, want the provider's empty list", len(got))
+		for i := 0; i < 2; i++ {
+			if got := decodeList(t, callPlayerAPI(t, c, "action=get_vod_streams")); len(got) != 0 {
+				t.Fatalf("got %d items, want the provider's empty list", len(got))
+			}
 		}
-	}
-	if n := atomic.LoadInt32(&hits); n != 2 {
-		t.Fatalf("provider hit %d times, want 2 (empty answers are not cached)", n)
-	}
+		if n := atomic.LoadInt32(&hits); n != 2 {
+			t.Fatalf("provider hit %d times, want 2 (empty answers are not cached)", n)
+		}
+	})
 }
 
 func TestPlayerAPIConcurrentRequestsCoalesce(t *testing.T) {
-	invalidateCatalogCache()
-	p := newFakeCatalogProvider(t)
-	p.delay = 50 * time.Millisecond
-	c := playerAPITestConfig(p.srv.URL)
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		p := newFakeCatalogProvider(t)
+		p.delay = 50 * time.Millisecond
+		c := playerAPITestConfig(p.srv.URL)
+		c.CatalogStorage = storage
 
-	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if w := callPlayerAPI(t, c, "action=get_vod_streams"); w.Code != http.StatusOK {
-				t.Errorf("status = %d", w.Code)
-			}
-		}()
-	}
-	wg.Wait()
-	if n := p.count("get_vod_streams", ""); n != 1 {
-		t.Fatalf("provider hit %d times, want 1", n)
-	}
+		var wg sync.WaitGroup
+		for i := 0; i < 10; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if w := callPlayerAPI(t, c, "action=get_vod_streams"); w.Code != http.StatusOK {
+					t.Errorf("status = %d", w.Code)
+				}
+			}()
+		}
+		wg.Wait()
+		if n := p.count("get_vod_streams", ""); n != 1 {
+			t.Fatalf("provider hit %d times, want 1", n)
+		}
+	})
 }
 
 func TestPlayerAPICatchupFlagsDoNotMutateCachedCatalogue(t *testing.T) {
-	invalidateCatalogCache()
-	p := newFakeCatalogProvider(t)
-	c := playerAPITestConfig(p.srv.URL)
-	c.catchupManager = catchup.New(true, t.TempDir(), 3)
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		p := newFakeCatalogProvider(t)
+		c := playerAPITestConfig(p.srv.URL)
+		c.CatalogStorage = storage
+		c.catchupManager = catchup.New(true, t.TempDir(), 3)
 
-	for _, it := range decodeList(t, callPlayerAPI(t, c, "action=get_live_streams")) {
-		if fmt.Sprint(it["tv_archive"]) != "1" {
-			t.Fatalf("player answer not flagged for catchup: %v", it)
+		for _, it := range decodeList(t, callPlayerAPI(t, c, "action=get_live_streams")) {
+			if fmt.Sprint(it["tv_archive"]) != "1" {
+				t.Fatalf("player answer not flagged for catchup: %v", it)
+			}
 		}
-	}
-	if !c.catchupManager.HasUpstreamCatchup("2") || c.catchupManager.HasUpstreamCatchup("1") {
-		t.Fatal("upstream catchup support must come from the provider's own tv_archive")
-	}
-	raw, ok := getCachedCatalog(c.catalogKey("get_live_streams", ""))
-	if !ok {
-		t.Fatal("catalogue not cached")
-	}
-	for _, it := range raw.([]interface{}) {
-		m := it.(map[string]interface{})
-		if m["stream_id"] == "1" && fmt.Sprint(m["tv_archive"]) != "0" {
-			t.Fatalf("cached catalogue was mutated: %v", m)
+		if !c.catchupManager.HasUpstreamCatchup("2") || c.catchupManager.HasUpstreamCatchup("1") {
+			t.Fatal("upstream catchup support must come from the provider's own tv_archive")
 		}
-	}
+		raw, ok := getCachedCatalog(c.catalogKey("get_live_streams"))
+		if !ok {
+			t.Fatal("catalogue not cached")
+		}
+		_ = catalogStoreOf(raw).each(func(m map[string]interface{}) bool {
+			if m["stream_id"] == "1" && fmt.Sprint(m["tv_archive"]) != "0" {
+				t.Fatalf("cached catalogue was mutated: %v", m)
+			}
+			return true
+		})
+	})
 }
 
 func waitFor(t *testing.T, cond func() bool) {
@@ -291,4 +320,45 @@ func BenchmarkPlayerAPIVODStreams(b *testing.B) {
 			b.Fatalf("status %d", w.Code)
 		}
 	}
+}
+
+// A category slice is flagged for catchup like the whole list, but must not
+// replace the manager's provider-wide upstream-catchup map with its own subset.
+func TestPlayerAPICategorySliceKeepsUpstreamCatchupMap(t *testing.T) {
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		p := newFakeCatalogProvider(t)
+		c := playerAPITestConfig(p.srv.URL)
+		c.CatalogStorage = storage
+		c.catchupManager = catchup.New(true, t.TempDir(), 3)
+
+		decodeList(t, callPlayerAPI(t, c, "action=get_live_streams"))
+		got := decodeList(t, callPlayerAPI(t, c, "action=get_live_streams&category_id=42"))
+		if len(got) != 1 || fmt.Sprint(got[0]["tv_archive"]) != "1" {
+			t.Fatalf("slice not flagged for catchup: %v", got)
+		}
+		// Stream 2 is in category 43, outside the slice, and has native catchup.
+		if !c.catchupManager.HasUpstreamCatchup("2") {
+			t.Fatal("a category request wiped the upstream catchup map for other categories")
+		}
+	})
+}
+
+// An item a panel lists under several categories (category_ids) is part of
+// each of them, as it is when the provider filters.
+func TestPlayerAPICategorySliceMatchesCategoryIDs(t *testing.T) {
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`[{"stream_id":"1","category_id":"10","category_ids":[10,20]},` +
+				`{"stream_id":"2","category_id":"20"},{"stream_id":"3","category_id":"30","category_ids":[30]}]`))
+		}))
+		t.Cleanup(srv.Close)
+		c := playerAPITestConfig(srv.URL)
+		c.CatalogStorage = storage
+
+		for cat, want := range map[string]string{"10": "1", "20": "1,2", "30": "3", "99": ""} {
+			if got := ids(decodeList(t, callPlayerAPI(t, c, "action=get_vod_streams&category_id="+cat)), "stream_id"); got != want {
+				t.Fatalf("category %s: got streams %q, want %q", cat, got, want)
+			}
+		}
+	})
 }

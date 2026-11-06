@@ -109,13 +109,6 @@ type nopCloser struct{ io.Writer }
 
 func (nopCloser) Close() error { return nil }
 
-// serveBytesCompressed writes body through responseWriter.
-func serveBytesCompressed(ctx *gin.Context, contentType string, body []byte) {
-	w := responseWriter(ctx, contentType)
-	_, _ = w.Write(body)
-	_ = w.Close()
-}
-
 // startGzipSibling writes p+".gz" in the background unless that is already
 // under way.
 func startGzipSibling(p string) {
@@ -185,32 +178,4 @@ func gzipBytes(b []byte) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
-}
-
-// renderedGzip memoises the gzip form of a cached catalogue's rendered JSON,
-// one slot per cache key, replaced when the key's entry is replaced.
-type renderedGzip struct {
-	entry *catalogEntry
-	once  sync.Once
-	body  []byte
-	err   error
-}
-
-var (
-	renderedGzipMu sync.Mutex
-	renderedGzips  = map[string]*renderedGzip{}
-)
-
-// catalogGzip returns the gzip form of body, the rendered JSON of entry e
-// cached under key, compressing it once per entry.
-func catalogGzip(key string, e *catalogEntry, body []byte) ([]byte, error) {
-	renderedGzipMu.Lock()
-	g := renderedGzips[key]
-	if g == nil || g.entry != e {
-		g = &renderedGzip{entry: e}
-		renderedGzips[key] = g
-	}
-	renderedGzipMu.Unlock()
-	g.once.Do(func() { g.body, g.err = gzipBytes(body) })
-	return g.body, g.err
 }

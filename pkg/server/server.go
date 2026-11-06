@@ -114,6 +114,8 @@ type Config struct {
 
 // NewServer initializes a new server configuration with all necessary components.
 func NewServer(config *config.ProxyConfig) (*Config, error) {
+	config.CatalogStorage = parseCatalogStorage(config.CatalogStorage)
+	applyCatalogMemoryLimit(config.CatalogStorage)
 	var p m3u.Playlist
 
 	// Parse the M3U playlist from the remote URL if provided — unless it is the
@@ -1087,12 +1089,12 @@ func (c *Config) refreshAPIChannelIndex() {
 	}
 	// Force a provider round-trip; on failure the cache keeps (and players
 	// keep getting) the last good catalogue.
-	e, stale, err := fetchCatalogEntry(c.catalogKey("get_live_streams", ""), true, c.catalogFetcher("get_live_streams", nil))
+	e, stale, err := fetchCatalogEntry(c.catalogKey("get_live_streams"), true, c.catalogFetcher("get_live_streams", nil))
 	if err != nil || stale {
 		utils.WarnLog("stream_names refresh: get_live_streams failed: %v", err)
 		return
 	}
-	if n := c.harvestChannelNames(xtreamapi.ProcessResponse(e.data)); n > 0 {
+	if n := c.harvestChannelNames(e.data); n > 0 {
 		utils.DebugLog("stream_names: refreshed %d live channel names from upstream", n)
 	}
 }

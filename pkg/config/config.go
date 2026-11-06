@@ -49,6 +49,8 @@ type HostConfiguration struct {
 
 // ProxyConfig Contain original m3u playlist and HostConfiguration
 type ProxyConfig struct {
+	// CatalogStorage is where cached provider catalogues are kept: memory or disk.
+	CatalogStorage       string
 	HostConfig           *HostConfiguration
 	XtreamUser           CredentialString
 	XtreamPassword       CredentialString

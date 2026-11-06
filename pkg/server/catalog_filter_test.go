@@ -80,132 +80,146 @@ func ids(items []map[string]interface{}, field string) string {
 var aOnlyNoAdult = filter.Config{All: filter.Patterns{Group: `^A\|`, Name: `^A\|`}, ExcludeAdult: true}
 
 func TestPlayerAPIFiltersLiveListAndKeepsNamesFromFullList(t *testing.T) {
-	invalidateCatalogCache()
-	c := filteredTestConfig(t, filterProvider(t).URL, aOnlyNoAdult)
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		c := filteredTestConfig(t, filterProvider(t).URL, aOnlyNoAdult)
+		c.CatalogStorage = storage
 
-	got := decodeList(t, callPlayerAPI(t, c, "action=get_live_streams"))
-	if s := ids(got, "stream_id"); s != "1" {
-		t.Fatalf("players should get only stream 1, got %s", s)
-	}
-	// The channel-name index (for /status and logs) comes from the full list.
-	for _, id := range []string{"1", "2", "3"} {
-		if _, ok := lookupAPIChannelName(id); !ok {
-			t.Fatalf("channel %s missing from the name index", id)
+		got := decodeList(t, callPlayerAPI(t, c, "action=get_live_streams"))
+		if s := ids(got, "stream_id"); s != "1" {
+			t.Fatalf("players should get only stream 1, got %s", s)
 		}
-	}
-	// The cached catalogue (used by /watch) stays unfiltered.
-	full, err := c.getCachedLiveStreamsCatalog()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n := len(full.([]interface{})); n != 4 {
-		t.Fatalf("cached catalogue has %d entries, want the provider's 4", n)
-	}
+		// The channel-name index (for /status and logs) comes from the full list.
+		for _, id := range []string{"1", "2", "3"} {
+			if _, ok := lookupAPIChannelName(id); !ok {
+				t.Fatalf("channel %s missing from the name index", id)
+			}
+		}
+		// The cached catalogue (used by /watch) stays unfiltered.
+		full, err := c.getCachedLiveStreamsCatalog()
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		_ = catalogStoreOf(full).each(func(map[string]interface{}) bool { n++; return true })
+		if n != 4 {
+			t.Fatalf("cached catalogue has %d entries, want the provider's 4", n)
+		}
+	})
 }
 
 func TestPlayerAPIFiltersCategoriesAndPrunesEmptyOnes(t *testing.T) {
-	invalidateCatalogCache()
-	c := filteredTestConfig(t, filterProvider(t).URL, aOnlyNoAdult)
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		c := filteredTestConfig(t, filterProvider(t).URL, aOnlyNoAdult)
+		c.CatalogStorage = storage
 
-	// Without the stream list cached, categories are filtered by name only.
-	if s := ids(decodeList(t, callPlayerAPI(t, c, "action=get_live_categories")), "category_id"); s != "10,30" {
-		t.Fatalf("categories by name = %s, want 10,30", s)
-	}
-	// Once the list is cached, a category left empty (30: only an adult
-	// channel) disappears. The rendered answer is memoised per cached
-	// entry, so drop the cache to render again.
-	invalidateCatalogCache()
-	decodeList(t, callPlayerAPI(t, c, "action=get_live_streams"))
-	if s := ids(decodeList(t, callPlayerAPI(t, c, "action=get_live_categories")), "category_id"); s != "10" {
-		t.Fatalf("categories after pruning = %s, want 10", s)
-	}
+		// Without the stream list cached, categories are filtered by name only.
+		if s := ids(decodeList(t, callPlayerAPI(t, c, "action=get_live_categories")), "category_id"); s != "10,30" {
+			t.Fatalf("categories by name = %s, want 10,30", s)
+		}
+		// Once the list is cached, a category left empty (30: only an adult
+		// channel) disappears. The rendered answer is memoised per cached
+		// entry, so drop the cache to render again.
+		invalidateCatalogCache()
+		decodeList(t, callPlayerAPI(t, c, "action=get_live_streams"))
+		if s := ids(decodeList(t, callPlayerAPI(t, c, "action=get_live_categories")), "category_id"); s != "10" {
+			t.Fatalf("categories after pruning = %s, want 10", s)
+		}
+	})
 }
 
 func TestPlayerAPIFiltersUncategorizedMoviesByName(t *testing.T) {
-	invalidateCatalogCache()
-	c := filteredTestConfig(t, filterProvider(t).URL, filter.Config{All: filter.Patterns{Group: `^A\|`, Name: `^A\|`}})
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		c := filteredTestConfig(t, filterProvider(t).URL, filter.Config{All: filter.Patterns{Group: `^A\|`, Name: `^A\|`}})
+		c.CatalogStorage = storage
 
-	if s := ids(decodeList(t, callPlayerAPI(t, c, "action=get_vod_streams")), "stream_id"); s != "7" {
-		t.Fatalf("movies = %s, want 7 (judged on name, no category)", s)
-	}
+		if s := ids(decodeList(t, callPlayerAPI(t, c, "action=get_vod_streams")), "stream_id"); s != "7" {
+			t.Fatalf("movies = %s, want 7 (judged on name, no category)", s)
+		}
+	})
 }
 
 func TestPlayerAPIUnfilteredWithoutRules(t *testing.T) {
-	invalidateCatalogCache()
-	c := playerAPITestConfig(filterProvider(t).URL)
-	if s := ids(decodeList(t, callPlayerAPI(t, c, "action=get_live_streams")), "stream_id"); s != "1,2,3,4" {
-		t.Fatalf("no rules must pass everything, got %s", s)
-	}
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		c := playerAPITestConfig(filterProvider(t).URL)
+		c.CatalogStorage = storage
+		if s := ids(decodeList(t, callPlayerAPI(t, c, "action=get_live_streams")), "stream_id"); s != "1,2,3,4" {
+			t.Fatalf("no rules must pass everything, got %s", s)
+		}
+	})
 }
 
 func TestFilteredLiveStreamIsNotFound(t *testing.T) {
-	invalidateCatalogCache()
-	liveKeptMem = nil
-	c := filteredTestConfig(t, filterProvider(t).URL, aOnlyNoAdult)
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		liveKeptMem = nil
+		c := filteredTestConfig(t, filterProvider(t).URL, aOnlyNoAdult)
+		c.CatalogStorage = storage
 
-	// No catalogue cached yet: fail open.
-	if c.liveStreamFiltered("2") {
-		t.Fatal("unknown catalogue must not block streams")
-	}
-	if _, err := c.getCachedLiveStreamsCatalog(); err != nil {
-		t.Fatal(err)
-	}
-	if !c.liveStreamFiltered("2") || !c.liveStreamFiltered("3.ts") {
-		t.Fatal("filtered channels must be refused")
-	}
-	if c.liveStreamFiltered("1") || c.liveStreamFiltered("999") {
-		t.Fatal("kept and unknown channels must be allowed")
-	}
+		// No catalogue cached yet: fail open.
+		if c.liveStreamFiltered("2") {
+			t.Fatal("unknown catalogue must not block streams")
+		}
+		if _, err := c.getCachedLiveStreamsCatalog(); err != nil {
+			t.Fatal(err)
+		}
+		if !c.liveStreamFiltered("2") || !c.liveStreamFiltered("3.ts") {
+			t.Fatal("filtered channels must be refused")
+		}
+		if c.liveStreamFiltered("1") || c.liveStreamFiltered("999") {
+			t.Fatal("kept and unknown channels must be allowed")
+		}
 
-	w := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(w)
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/live/u/p/2.ts", nil)
-	ctx.Params = gin.Params{{Key: "id", Value: "2.ts"}}
-	c.xtreamStreamLive(ctx)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", w.Code)
-	}
+		w := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(w)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/live/u/p/2.ts", nil)
+		ctx.Params = gin.Params{{Key: "id", Value: "2.ts"}}
+		c.xtreamStreamLive(ctx)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", w.Code)
+		}
+	})
 }
 
 func TestFilteredEPGPath(t *testing.T) {
-	invalidateCatalogCache()
-	liveKeptMem = nil
-	dir := t.TempDir()
-	raw := filepath.Join(dir, "xmltv.xml")
-	guide := `<tv><channel id="one.a"></channel><channel id="two.b"></channel>` +
-		`<programme channel="one.a"/><programme channel="two.b"/></tv>`
-	if err := os.WriteFile(raw, []byte(guide), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	c := filteredTestConfig(t, filterProvider(t).URL, aOnlyNoAdult)
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		liveKeptMem = nil
+		dir := t.TempDir()
+		raw := filepath.Join(dir, "xmltv.xml")
+		guide := `<tv><channel id="one.a"></channel><channel id="two.b"></channel>` +
+			`<programme channel="one.a"/><programme channel="two.b"/></tv>`
+		if err := os.WriteFile(raw, []byte(guide), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		c := filteredTestConfig(t, filterProvider(t).URL, aOnlyNoAdult)
+		c.CatalogStorage = storage
 
-	// No live catalogue cached: serve the provider's guide as is.
-	if p := c.filteredEPGPath(raw); p != raw {
-		t.Fatalf("without a live catalogue the raw guide is served, got %s", p)
-	}
-	if _, err := c.getCachedLiveStreamsCatalog(); err != nil {
-		t.Fatal(err)
-	}
-	p := c.filteredEPGPath(raw)
-	if p == raw {
-		t.Fatal("a filtered guide should be built")
-	}
-	got, _ := os.ReadFile(p)
-	if want := `<tv><channel id="one.a"></channel><programme channel="one.a"/></tv>`; string(got) != want {
-		t.Fatalf("filtered guide = %q, want %q", got, want)
-	}
-	if again := c.filteredEPGPath(raw); again != p {
-		t.Fatal("the filtered guide must be reused while nothing changed")
-	}
-	if b, _ := os.ReadFile(raw); string(b) != guide {
-		t.Fatal("the provider's guide must be left untouched")
-	}
+		// No live catalogue cached: serve the provider's guide as is.
+		if p := c.filteredEPGPath(raw); p != raw {
+			t.Fatalf("without a live catalogue the raw guide is served, got %s", p)
+		}
+		if _, err := c.getCachedLiveStreamsCatalog(); err != nil {
+			t.Fatal(err)
+		}
+		p := c.filteredEPGPath(raw)
+		if p == raw {
+			t.Fatal("a filtered guide should be built")
+		}
+		got, _ := os.ReadFile(p)
+		if want := `<tv><channel id="one.a"></channel><programme channel="one.a"/></tv>`; string(got) != want {
+			t.Fatalf("filtered guide = %q, want %q", got, want)
+		}
+		if again := c.filteredEPGPath(raw); again != p {
+			t.Fatal("the filtered guide must be reused while nothing changed")
+		}
+		if b, _ := os.ReadFile(raw); string(b) != guide {
+			t.Fatal("the provider's guide must be left untouched")
+		}
 
-	// No live rule: the raw guide is served.
-	c2 := filteredTestConfig(t, "", filter.Config{Movie: filter.Patterns{Name: "x"}})
-	if p := c2.filteredEPGPath(raw); p != raw {
-		t.Fatalf("movie-only rules must not filter the guide, got %s", p)
-	}
+		// No live rule: the raw guide is served.
+		c2 := filteredTestConfig(t, "", filter.Config{Movie: filter.Patterns{Name: "x"}})
+		if p := c2.filteredEPGPath(raw); p != raw {
+			t.Fatalf("movie-only rules must not filter the guide, got %s", p)
+		}
+	})
 }
 
 func benchLiveList(n int) []interface{} {
@@ -229,4 +243,20 @@ func BenchmarkFilterLiveList50k(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = c.filterEntries(filter.Live, items, names)
 	}
+}
+
+// The catalogue filter applies to a category slice like to the whole list.
+func TestPlayerAPIFiltersCategorySlice(t *testing.T) {
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		c := filteredTestConfig(t, filterProvider(t).URL, aOnlyNoAdult)
+		c.CatalogStorage = storage
+
+		// Category 10 holds streams 1 and 3; 3 is flagged adult.
+		if s := ids(decodeList(t, callPlayerAPI(t, c, "action=get_live_streams&category_id=10")), "stream_id"); s != "1" {
+			t.Fatalf("category 10 should show only stream 1, got %q", s)
+		}
+		if s := ids(decodeList(t, callPlayerAPI(t, c, "action=get_live_streams&category_id=20")), "stream_id"); s != "" {
+			t.Fatalf("category 20 holds only a stream the filter hides, got %q", s)
+		}
+	})
 }

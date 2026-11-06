@@ -109,6 +109,8 @@ streamshare --m3u-url http://provider.com/get.php?username=user&password=pass&ty
 Access your playlist at:  
 `http://streamshare.example.com:8080/iptv.m3u?username=test&password=passwordtest`
 
+`get.php` and the M3U routes are streamed (chunked, no `Content-Length`) and gzipped when the client accepts it.
+
 ### M3U Deduplication
 
 Provider playlists routinely contain redundant entries: the same channel or movie
@@ -515,6 +517,9 @@ Cache movies or episodes to disk for faster start times and to reduce upstream u
 
 Configuration:
 - `CACHE_FOLDER` — Absolute path to the root cache directory. stream-share creates purpose-specific subfolders underneath it: `<CACHE_FOLDER>/vod` for cached VOD media, `<CACHE_FOLDER>/catchup` for live catchup buffers and `<CACHE_FOLDER>/epg` for the cached XMLTV guide (`xmltv.php` is downloaded once from the provider at startup, served from disk to every player, refreshed in the background after `M3U_CACHE_EXPIRATION_HOURS`, and the last good guide keeps being served if the provider fails). Defaults to `$TMPDIR/stream-share` when unset.
+- `CATALOG_STORAGE` — Where cached provider catalogues are kept: `memory` (default) or `disk`. `memory` is the fastest, but RAM grows with the catalogue.
+  `disk` uses far less RAM and about 2–3× the provider's catalogue size on disk (under `CACHE_FOLDER`), with slightly slower searches.
+  Disk mode sets `GOMEMLIMIT=90MiB` unless you set `GOMEMLIMIT` yourself. After a restart the previous run's catalogue folder is kept for up to 24 h (disk use is briefly ~2×).
 - `INTERNAL_API_KEY` — API key used by the internal API (Discord bot and tools).
 
 #### Provider connection limit

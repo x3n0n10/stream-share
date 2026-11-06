@@ -282,21 +282,24 @@ func (c *Config) liveChannel(streamID string, allowFetch bool) (map[string]inter
 		}
 		resp = r
 	} else {
-		r, ok := peekCatalog(c.catalogKey("get_live_streams", ""))
+		r, ok := peekCatalog(c.catalogKey("get_live_streams"))
 		if !ok {
 			return nil, false
 		}
 		resp = r
 	}
-	items, _ := resp.([]interface{})
 	id := normalizeStreamID(streamID)
-	for _, it := range items {
-		m, ok := it.(map[string]interface{})
-		if ok && catalogString(m["stream_id"]) == id {
-			return m, true
+	var found map[string]interface{}
+	err := catalogStoreOf(resp).each(func(m map[string]interface{}) bool {
+		if catalogString(m["stream_id"]) == id {
+			found = m
 		}
+		return found == nil
+	})
+	if err != nil && found == nil {
+		warnCatalogRead("live channel", err)
 	}
-	return nil, false
+	return found, found != nil
 }
 
 // createLiveShare validates and stores a new link.
@@ -637,33 +640,35 @@ func (c *Config) shareChannelsAPI(ctx *gin.Context) {
 		ctx.JSON(http.StatusBadGateway, types.APIResponse{Success: false, Error: "live catalogue unavailable: " + err.Error()})
 		return
 	}
-	items, _ := c.filterPlayerAPICatalog("get_live_streams", resp).([]interface{})
+	var names map[string]string
+	filtered := c.catalogFilter.ActiveFor(filter.Live)
+	if filtered {
+		names = c.categoryNames("get_live_categories")
+	}
 	type channel struct {
 		StreamID string `json:"stream_id"`
 		Num      string `json:"num"`
 		Name     string `json:"name"`
 	}
 	out := []channel{}
-	for _, it := range items {
-		m, ok := it.(map[string]interface{})
-		if !ok {
-			continue
+	err = catalogStoreOf(resp).each(func(m map[string]interface{}) bool {
+		if filtered && !c.keepCatalogEntry(filter.Live, m, names) {
+			return true
 		}
 		name := catalogString(m["name"])
 		lower := strings.ToLower(name)
-		match := true
 		for _, w := range words {
 			if !strings.Contains(lower, w) {
-				match = false
-				break
+				return true
 			}
 		}
-		if match {
-			out = append(out, channel{StreamID: catalogString(m["stream_id"]), Num: catalogString(m["num"]), Name: name})
-			if len(out) == 25 {
-				break
-			}
-		}
+		out = append(out, channel{StreamID: catalogString(m["stream_id"]), Num: catalogString(m["num"]), Name: name})
+		return len(out) < 25
+	})
+	if err != nil {
+		warnCatalogRead("live channels", err)
+		ctx.JSON(http.StatusBadGateway, types.APIResponse{Success: false, Error: "live catalogue unreadable: " + err.Error()})
+		return
 	}
 	ctx.JSON(http.StatusOK, types.APIResponse{Success: true, Data: out})
 }

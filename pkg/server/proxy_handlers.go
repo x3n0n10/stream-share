@@ -21,12 +21,10 @@ package server
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -58,13 +56,7 @@ var streamHTTPClient = &http.Client{Transport: streamTransport}
 // getM3U sends the proxified M3U file generated during bootstrap, with
 // track URIs and tvg-logo values prefixed for the current request's host.
 func (c *Config) getM3U(ctx *gin.Context) {
-	body, err := os.ReadFile(c.proxyfiedM3UPath)
-	if err != nil {
-		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
-		return
-	}
-	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, c.M3UFileName))
-	serveBytesCompressed(ctx, "application/octet-stream", c.rewritePlaylistHosts(ctx, body))
+	c.streamPlaylist(ctx, c.proxyfiedM3UPath)
 }
 
 // reverseProxy forwards a track request to the upstream using Xtream creds.

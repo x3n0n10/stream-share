@@ -23,6 +23,37 @@ import (
 	"testing"
 )
 
+// Providers often send a UTF-8 BOM or a blank line before the XML
+// declaration, and some concatenate guides; the rewrite must still emit the
+// whole guide instead of aborting at the declaration.
+func TestRewriteXMLTVIconsToToleratesLeadingDataAndRepeatedDeclarations(t *testing.T) {
+	c := testImageProxyConfig()
+	ctx := testRequestContext()
+	decl := `<?xml version="1.0" encoding="UTF-8"?>`
+	body := `<tv><channel id="1"><icon src="http://upstream.example.com/ch1.png"/></channel></tv>`
+	for name, in := range map[string]string{
+		"BOM":                  "\xef\xbb\xbf" + decl + body,
+		"leading blank line":   "\n\r\n" + decl + body,
+		"repeated declaration": decl + body + "\n" + decl,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var out strings.Builder
+			if err := c.rewriteXMLTVIconsTo(ctx, strings.NewReader(in), &out); err != nil {
+				t.Fatalf("rewrite failed: %v", err)
+			}
+			if !strings.HasPrefix(out.String(), decl) {
+				t.Errorf("output does not start with the declaration: %q", out.String())
+			}
+			if strings.Count(out.String(), "<?xml") != 1 {
+				t.Errorf("want exactly one declaration, got %q", out.String())
+			}
+			if !strings.Contains(out.String(), `<channel id="1">`) || !strings.Contains(out.String(), "/img?url=") {
+				t.Errorf("guide body missing or icon not rewritten: %q", out.String())
+			}
+		})
+	}
+}
+
 func TestRewriteXMLTVIcons(t *testing.T) {
 	c := testImageProxyConfig()
 	ctx := testRequestContext()

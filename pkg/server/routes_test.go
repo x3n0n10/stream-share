@@ -34,8 +34,7 @@ import (
 // per-request track Config must sign with the server's key, or /img (main
 // Config) rejects every HLS child link of an M3U-mode track.
 func TestTrackManifestLinksFetchThroughImg(t *testing.T) {
-	var up *httptest.Server
-	up = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, ".m3u8") {
 			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 			_, _ = w.Write([]byte("#EXTM3U\nseg.ts\n"))

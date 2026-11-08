@@ -20,7 +20,6 @@
 package server
 
 import (
-	"fmt"
 	"net/http"
 	"runtime/debug"
 	"time"
@@ -47,15 +46,15 @@ func (c *Config) setupInternalAPI(r *gin.Engine) {
 	api := r.Group("/api/internal")
 	api.Use(c.apiKeyAuth())
 
-	// Add recovery middleware to prevent panics from taking down the server
-	api.Use(gin.Recovery())
+	// Recover panics so they don't take down the server; the detail goes to
+	// the log only, since panic text can expose internals to API callers
 	api.Use(func(ctx *gin.Context) {
 		defer func() {
 			if err := recover(); err != nil {
 				utils.ErrorLog("API PANIC RECOVERED: %v\nStack trace: %s", err, debug.Stack())
 				ctx.AbortWithStatusJSON(http.StatusInternalServerError, types.APIResponse{
 					Success: false,
-					Error:   fmt.Sprintf("Internal server error: %v", err),
+					Error:   "Internal server error",
 				})
 			}
 		}()

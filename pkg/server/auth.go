@@ -130,8 +130,8 @@ func sweepRecentAuth(now time.Time) {
 }
 
 // requireRecentAuth guards routes that can never carry credentials
-// themselves (the stream routes record the trust; later tasks guard /play
-// and /hls with it), by requiring the calling IP to have
+// themselves (the stream routes record the trust; /play and /hls are
+// guarded with it), by requiring the calling IP to have
 // authenticated successfully elsewhere within recentAuthTTL. This is
 // IP-based, not per-viewer: a client sharing a NAT/office IP with someone
 // who just authenticated gets the same trust window. Weaker than real

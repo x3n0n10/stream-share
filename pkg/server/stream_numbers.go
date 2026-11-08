@@ -35,14 +35,16 @@ var (
 // liveChannelNumber returns the channel number of a live stream id, when the
 // cached live catalogue knows it.
 func (c *Config) liveChannelNumber(streamID string) (int, bool) {
-	e := peekCatalogEntry(c.catalogKey("get_live_streams", ""))
+	e := peekCatalogEntry(c.catalogKey("get_live_streams"))
 	if e == nil {
 		return 0, false
 	}
 	liveNumMu.Lock()
 	if liveNumEntry != e {
 		liveNumIndex = buildLiveNumIndex(e.data)
-		liveNumEntry = e
+		if liveNumIndex != nil {
+			liveNumEntry = e
+		}
 	}
 	idx := liveNumIndex
 	liveNumMu.Unlock()
@@ -53,19 +55,18 @@ func (c *Config) liveChannelNumber(streamID string) (int, bool) {
 // buildLiveNumIndex maps stream_id to num for a decoded get_live_streams list.
 // Both fields may be strings, json.Number or floats depending on the decoder.
 func buildLiveNumIndex(data interface{}) map[string]int {
-	items, _ := data.([]interface{})
-	idx := make(map[string]int, len(items))
-	for _, it := range items {
-		m, ok := it.(map[string]interface{})
-		if !ok {
-			continue
-		}
+	idx := map[string]int{}
+	err := catalogStoreOf(data).each(func(m map[string]interface{}) bool {
 		id := normalizeStreamID(catalogString(m["stream_id"]))
 		f, err := strconv.ParseFloat(catalogString(m["num"]), 64)
-		if id == "" || err != nil || f <= 0 {
-			continue
+		if id != "" && err == nil && f > 0 {
+			idx[id] = int(f)
 		}
-		idx[id] = int(f)
+		return true
+	})
+	if err != nil {
+		warnCatalogRead("channel numbers", err)
+		return nil // not memoised by the caller
 	}
 	return idx
 }

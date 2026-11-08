@@ -69,57 +69,61 @@ func resultTitles(rs []types.VODResult) string {
 // /watch searches what players are offered: the catalogue filter (language
 // rules and the adult flag) applies to its movie and series results.
 func TestWatchSearchFollowsCatalogueFilter(t *testing.T) {
-	invalidateCatalogCache()
-	rules := filter.Config{
-		Movie:        filter.Patterns{Any: `^A - `},
-		Series:       filter.Patterns{Any: `^A - `},
-		ExcludeAdult: true,
-	}
-	c := filteredTestConfig(t, watchProvider(t).URL, rules)
-
-	movies, err := c.searchXtreamMovies("some film")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := resultTitles(movies); got != "A - Some Film" {
-		t.Fatalf("movies = %q, want only the kept, non-adult one", got)
-	}
-
-	series, err := c.searchXtreamSeries("some show")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, r := range series {
-		if !strings.HasPrefix(r.SeriesTitle, "A - ") {
-			t.Fatalf("series result %q is filtered out for players", r.SeriesTitle)
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		rules := filter.Config{
+			Movie:        filter.Patterns{Any: `^A - `},
+			Series:       filter.Patterns{Any: `^A - `},
+			ExcludeAdult: true,
 		}
-	}
-	if len(series) == 0 {
-		t.Fatal("the kept series should still be found")
-	}
+		c := filteredTestConfig(t, watchProvider(t).URL, rules)
+		c.CatalogStorage = storage
+
+		movies, err := c.searchXtreamMovies("some film")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := resultTitles(movies); got != "A - Some Film" {
+			t.Fatalf("movies = %q, want only the kept, non-adult one", got)
+		}
+
+		series, err := c.searchXtreamSeries("some show")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range series {
+			if !strings.HasPrefix(r.SeriesTitle, "A - ") {
+				t.Fatalf("series result %q is filtered out for players", r.SeriesTitle)
+			}
+		}
+		if len(series) == 0 {
+			t.Fatal("the kept series should still be found")
+		}
+	})
 }
 
 // Without rules, /watch searches the whole catalogue as before.
 func TestWatchSearchUnfilteredWithoutRules(t *testing.T) {
-	invalidateCatalogCache()
-	c := playerAPITestConfig(watchProvider(t).URL)
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		c := playerAPITestConfig(watchProvider(t).URL)
+		c.CatalogStorage = storage
 
-	movies, err := c.searchXtreamMovies("some film")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(movies) != 3 {
-		t.Fatalf("movies = %q, want all 3 without rules", resultTitles(movies))
-	}
-	series, err := c.searchXtreamSeries("some show")
-	if err != nil {
-		t.Fatal(err)
-	}
-	seen := map[string]bool{}
-	for _, r := range series {
-		seen[r.SeriesTitle[:1]] = true
-	}
-	if !seen["A"] || !seen["C"] {
-		t.Fatalf("series = %q, want both A and C without rules", resultTitles(series))
-	}
+		movies, err := c.searchXtreamMovies("some film")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(movies) != 3 {
+			t.Fatalf("movies = %q, want all 3 without rules", resultTitles(movies))
+		}
+		series, err := c.searchXtreamSeries("some show")
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := map[string]bool{}
+		for _, r := range series {
+			seen[r.SeriesTitle[:1]] = true
+		}
+		if !seen["A"] || !seen["C"] {
+			t.Fatalf("series = %q, want both A and C without rules", resultTitles(series))
+		}
+	})
 }

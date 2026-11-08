@@ -19,10 +19,12 @@
 package server
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 
@@ -251,25 +253,31 @@ func (c *Config) requestBaseURL(ctx *gin.Context) string {
 	return fmt.Sprintf("%s://%s", protocol, host)
 }
 
-// rewritePlaylistHosts makes an M3U body client-ready by turning every track
+// rewritePlaylistHostsTo makes an M3U body client-ready by turning every track
 // URI and tvg-logo into an absolute URL on the current request's base URL.
 // marshallInto only emits relative values, so a value starting with "/" is
 // ours to prefix as is. The streamed get.php rewrite (m3u_stream_rewrite.go)
 // leaves the provider's absolute URLs in place, so those are mapped here the
 // way replacePath / proxyImagePath would have: a track keeps just its path
 // under the custom endpoint, a logo goes through /img.
-func (c *Config) rewritePlaylistHosts(ctx *gin.Context, body []byte) []byte {
+// It works line by line, so a large playlist is never held in memory;
+// ReadString has no line-length limit.
+func (c *Config) rewritePlaylistHostsTo(ctx *gin.Context, r io.Reader, w io.Writer) error {
 	base := c.requestBaseURL(ctx)
 	customEnd := strings.Trim(c.CustomEndpoint, "/")
 	if customEnd != "" {
 		customEnd = "/" + customEnd
 	}
-	lines := strings.Split(string(body), "\n")
-	for i, line := range lines {
+	br := bufio.NewReader(r)
+	bw := bufio.NewWriter(w)
+	for {
+		line, readErr := br.ReadString('\n')
+		hasNL := strings.HasSuffix(line, "\n")
+		line = strings.TrimSuffix(line, "\n")
 		trimmed := strings.TrimRight(line, "\r")
 		switch {
 		case strings.HasPrefix(trimmed, "#EXTINF") && strings.Contains(trimmed, "tvg-logo="):
-			lines[i] = rewriteQuotedURI(trimmed, "tvg-logo=", func(raw string) string {
+			line = rewriteQuotedURI(trimmed, "tvg-logo=", func(raw string) string {
 				if strings.HasPrefix(raw, "/") {
 					return base + raw
 				}
@@ -280,14 +288,43 @@ func (c *Config) rewritePlaylistHosts(ctx *gin.Context, body []byte) []byte {
 			})
 		case strings.HasPrefix(trimmed, "#"):
 		case strings.HasPrefix(trimmed, "/"):
-			lines[i] = base + trimmed
+			line = base + trimmed
 		case isHTTPURL(trimmed):
 			if u, err := url.Parse(trimmed); err == nil {
-				lines[i] = base + customEnd + u.EscapedPath()
+				line = base + customEnd + u.EscapedPath()
 			}
 		}
+		if _, err := bw.WriteString(line); err != nil {
+			return err
+		}
+		if hasNL {
+			if err := bw.WriteByte('\n'); err != nil {
+				return err
+			}
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				return readErr
+			}
+			return bw.Flush()
+		}
 	}
-	return []byte(strings.Join(lines, "\n"))
+}
+
+// streamPlaylist serves the M3U file at path rewritten for this request.
+func (c *Config) streamPlaylist(ctx *gin.Context, path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+		return
+	}
+	defer func() { _ = f.Close() }()
+	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, c.M3UFileName))
+	w := responseWriter(ctx, "application/octet-stream")
+	if err := c.rewritePlaylistHostsTo(ctx, f, w); err != nil {
+		utils.WarnLog("playlist stream aborted: %v", err) // headers are already sent
+	}
+	_ = w.Close()
 }
 
 func isHTTPURL(s string) bool {

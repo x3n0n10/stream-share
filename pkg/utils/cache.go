@@ -35,6 +35,7 @@ const (
 	catchupSubdir    = "catchup"
 	slateSubdir      = "slate"
 	epgSubdir        = "epg"
+	catalogSubdir    = "catalog"
 )
 
 // CacheRoot returns the root cache directory: CACHE_FOLDER when set, otherwise a
@@ -64,4 +65,10 @@ func EPGCacheDir() string {
 // SlateCacheDir returns the subdirectory holding generated error-slate clips.
 func SlateCacheDir() string {
 	return filepath.Join(CacheRoot(), slateSubdir)
+}
+
+// CatalogCacheDir returns the subdirectory holding player_api catalogues kept
+// on disk (CATALOG_STORAGE=disk).
+func CatalogCacheDir() string {
+	return filepath.Join(CacheRoot(), catalogSubdir)
 }

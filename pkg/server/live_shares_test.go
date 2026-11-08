@@ -191,70 +191,76 @@ func eventually(d time.Duration, cond func() bool) bool {
 // guest can set it up), the stream only inside it; ended and revoked links are
 // gone, unknown ones not found. Nothing is cacheable.
 func TestShareLinkStates(t *testing.T) {
-	e := shareTestServer(t, 1, nil)
-	now := time.Now()
-	later := e.share(t, "101", now.Add(time.Hour), now.Add(2*time.Hour))
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		e := shareTestServer(t, 1, nil)
+		e.c.CatalogStorage = storage
+		now := time.Now()
+		later := e.share(t, "101", now.Add(time.Hour), now.Add(2*time.Hour))
 
-	code, h, body := getBody(t, e.front.URL+"/share/"+later.Token+".m3u")
-	if code != http.StatusOK || h.Get("Cache-Control") != "no-store" {
-		t.Fatalf("scheduled playlist: %d %q", code, h.Get("Cache-Control"))
-	}
-	for _, want := range []string{"#EXTM3U", `tvg-id="one.a"`, `tvg-logo="https://tv.example/img?url=http%3A%2F%2Flogo%2Fone.png"`, ",A| Channel One",
-		"https://tv.example/share/" + later.Token + "/live.ts"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("playlist lacks %q:\n%s", want, body)
+		code, h, body := getBody(t, e.front.URL+"/share/"+later.Token+".m3u")
+		if code != http.StatusOK || h.Get("Cache-Control") != "no-store" {
+			t.Fatalf("scheduled playlist: %d %q", code, h.Get("Cache-Control"))
 		}
-	}
-	if code, _, body := getBody(t, e.front.URL+"/share/"+later.Token+"/live.ts"); code != http.StatusForbidden || !strings.Contains(body, "not active yet") {
-		t.Fatalf("scheduled stream: %d %q", code, body)
-	}
+		for _, want := range []string{"#EXTM3U", `tvg-id="one.a"`, `tvg-logo="https://tv.example/img?url=http%3A%2F%2Flogo%2Fone.png"`, ",A| Channel One",
+			"https://tv.example/share/" + later.Token + "/live.ts"} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("playlist lacks %q:\n%s", want, body)
+			}
+		}
+		if code, _, body := getBody(t, e.front.URL+"/share/"+later.Token+"/live.ts"); code != http.StatusForbidden || !strings.Contains(body, "not active yet") {
+			t.Fatalf("scheduled stream: %d %q", code, body)
+		}
 
-	ended := e.share(t, "101", now.Add(-2*time.Hour), now.Add(time.Second))
-	e.c.shares.mu.Lock()
-	e.c.shares.byToken[ended.Token].EndsAt = now.Add(-time.Minute)
-	e.c.shares.mu.Unlock()
-	if code, _, _ := getBody(t, e.front.URL+"/share/"+ended.Token+"/live.ts"); code != http.StatusGone {
-		t.Fatalf("ended stream: %d", code)
-	}
+		ended := e.share(t, "101", now.Add(-2*time.Hour), now.Add(time.Second))
+		e.c.shares.mu.Lock()
+		e.c.shares.byToken[ended.Token].EndsAt = now.Add(-time.Minute)
+		e.c.shares.mu.Unlock()
+		if code, _, _ := getBody(t, e.front.URL+"/share/"+ended.Token+"/live.ts"); code != http.StatusGone {
+			t.Fatalf("ended stream: %d", code)
+		}
 
-	revoked := e.share(t, "101", now, now.Add(time.Hour))
-	e.c.revokeLiveShare(revoked.Token)
-	if code, _, _ := getBody(t, e.front.URL+"/share/"+revoked.Token+".m3u"); code != http.StatusGone {
-		t.Fatalf("revoked playlist: %d", code)
-	}
-	if code, _, _ := getBody(t, e.front.URL+"/share/doesnotexist/live.ts"); code != http.StatusNotFound {
-		t.Fatalf("unknown: %d", code)
-	}
+		revoked := e.share(t, "101", now, now.Add(time.Hour))
+		e.c.revokeLiveShare(revoked.Token)
+		if code, _, _ := getBody(t, e.front.URL+"/share/"+revoked.Token+".m3u"); code != http.StatusGone {
+			t.Fatalf("revoked playlist: %d", code)
+		}
+		if code, _, _ := getBody(t, e.front.URL+"/share/doesnotexist/live.ts"); code != http.StatusNotFound {
+			t.Fatalf("unknown: %d", code)
+		}
+	})
 }
 
 // Creation refuses bad windows, unknown channels and channels the catalogue
 // filter hides from players.
 func TestShareCreationValidation(t *testing.T) {
-	rules := filter.Config{Live: filter.Patterns{Group: `^A\|`}}
-	e := shareTestServer(t, 1, &rules)
-	now := time.Now()
-	cases := []struct {
-		name       string
-		id         string
-		start, end time.Time
-		code       int
-	}{
-		{"end before start", "101", now.Add(time.Hour), now, http.StatusBadRequest},
-		{"too long", "101", now, now.Add(25 * time.Hour), http.StatusBadRequest},
-		{"already over", "101", now.Add(-3 * time.Hour), now.Add(-time.Hour), http.StatusBadRequest},
-		{"unknown channel", "999", now, now.Add(time.Hour), http.StatusNotFound},
-		{"filtered channel", "103", now, now.Add(time.Hour), http.StatusForbidden},
-		{"bad id", "../1", now, now.Add(time.Hour), http.StatusBadRequest},
-	}
-	for _, tc := range cases {
-		if _, code, err := e.c.createLiveShare("lucas", "", tc.id, tc.start, tc.end, now); err == nil || code != tc.code {
-			t.Errorf("%s: code=%d err=%v, want %d", tc.name, code, err, tc.code)
+	forEachCatalogStorage(t, func(t *testing.T, storage string) {
+		rules := filter.Config{Live: filter.Patterns{Group: `^A\|`}}
+		e := shareTestServer(t, 1, &rules)
+		e.c.CatalogStorage = storage
+		now := time.Now()
+		cases := []struct {
+			name       string
+			id         string
+			start, end time.Time
+			code       int
+		}{
+			{"end before start", "101", now.Add(time.Hour), now, http.StatusBadRequest},
+			{"too long", "101", now, now.Add(25 * time.Hour), http.StatusBadRequest},
+			{"already over", "101", now.Add(-3 * time.Hour), now.Add(-time.Hour), http.StatusBadRequest},
+			{"unknown channel", "999", now, now.Add(time.Hour), http.StatusNotFound},
+			{"filtered channel", "103", now, now.Add(time.Hour), http.StatusForbidden},
+			{"bad id", "../1", now, now.Add(time.Hour), http.StatusBadRequest},
 		}
-	}
-	sh, _, err := e.c.createLiveShare("lucas", "", "101.ts", now, now.Add(time.Hour), now)
-	if err != nil || sh.StreamID != "101" || sh.Title != "A| Channel One" || len(sh.Token) != 22 {
-		t.Fatalf("valid share: %+v %v", sh, err)
-	}
+		for _, tc := range cases {
+			if _, code, err := e.c.createLiveShare("lucas", "", tc.id, tc.start, tc.end, now); err == nil || code != tc.code {
+				t.Errorf("%s: code=%d err=%v, want %d", tc.name, code, err, tc.code)
+			}
+		}
+		sh, _, err := e.c.createLiveShare("lucas", "", "101.ts", now, now.Add(time.Hour), now)
+		if err != nil || sh.StreamID != "101" || sh.Title != "A| Channel One" || len(sh.Token) != 22 {
+			t.Fatalf("valid share: %+v %v", sh, err)
+		}
+	})
 }
 
 // A share link plays its channel, at most three devices at once.

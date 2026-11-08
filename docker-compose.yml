@@ -126,6 +126,7 @@ services:
       # Caching (single root; subfolders are created internally: <root>/vod and <root>/catchup)
       VOD_CACHE_ENABLED: "true"          # Enable on-demand VOD caching
       CACHE_FOLDER: "/cache"           # Root cache folder — VOD files go in /cache/vod, catchup buffers in /cache/catchup
+      # CATALOG_STORAGE: disk            # Keep cached provider catalogues on disk (under CACHE_FOLDER) instead of RAM; default: memory
       # Delete cached VOD files not accessed for this many hours. The sweep also
       # removes files whose entry has expired, orphaned files no longer tracked in
       # the database, and leftover ".part" files from failed downloads. It runs

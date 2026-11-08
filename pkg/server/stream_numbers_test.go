@@ -33,7 +33,7 @@ import (
 func TestLiveChannelNumberFromCachedCatalogue(t *testing.T) {
 	invalidateCatalogCache()
 	c := playerAPITestConfig("http://provider.invalid")
-	key := c.catalogKey("get_live_streams", "")
+	key := c.catalogKey("get_live_streams")
 
 	if _, ok := c.liveChannelNumber("506638"); ok {
 		t.Fatal("no catalogue cached: number must be unknown")
@@ -76,7 +76,7 @@ func TestStreamRef(t *testing.T) {
 func TestActiveStreamItemLiveNumber(t *testing.T) {
 	invalidateCatalogCache()
 	c := playerAPITestConfig("http://provider.invalid")
-	storeCachedCatalog(c.catalogKey("get_live_streams", ""), []interface{}{
+	storeCachedCatalog(c.catalogKey("get_live_streams"), []interface{}{
 		map[string]interface{}{"num": json.Number("41"), "stream_id": json.Number("506638")},
 	})
 	s := &types.StreamSession{StreamID: "506638", StreamType: "live", StreamTitle: "XX| CHANNEL FHD",

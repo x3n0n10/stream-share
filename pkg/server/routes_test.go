@@ -23,7 +23,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jamesnetherton/m3u"
 )
@@ -65,5 +67,34 @@ func TestTrackManifestLinksFetchThroughImg(t *testing.T) {
 	u, _ := url.Parse(link)
 	if w := getImg(router, u.RequestURI()); w.Code != http.StatusOK || w.Body.String() != "segment-bytes" {
 		t.Fatalf("segment: status = %d, body = %q", w.Code, w.Body.String())
+	}
+}
+
+func TestPlayAndHLSRequireRecentAuth(t *testing.T) {
+	up, hits := countingUpstream(t)
+	c := testImageProxyConfig()
+	c.XtreamUser, c.XtreamPassword, c.XtreamBaseURL = "u", "p", up.URL
+	router := newImgRouter(c)
+
+	recentlyAuthenticatedMu.Lock()
+	recentlyAuthenticated = map[string]time.Time{}
+	recentlyAuthenticatedMu.Unlock()
+
+	for _, path := range []string{"/play/tok/ts", "/hls/tok/1_2"} {
+		if w := getImg(router, path); w.Code != http.StatusForbidden {
+			t.Fatalf("%s fresh IP: status = %d, want 403", path, w.Code)
+		}
+		if n := atomic.LoadInt32(hits); n != 0 {
+			t.Fatalf("%s: provider saw %d requests", path, n)
+		}
+	}
+
+	recentlyAuthenticatedMu.Lock()
+	recentlyAuthenticated["192.0.2.1"] = time.Now()
+	recentlyAuthenticatedMu.Unlock()
+	for _, path := range []string{"/play/tok/ts", "/hls/tok/1_2"} {
+		if w := getImg(router, path); w.Code == http.StatusForbidden {
+			t.Fatalf("%s after auth: still 403", path)
+		}
 	}
 }

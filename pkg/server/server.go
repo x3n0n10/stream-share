@@ -467,6 +467,21 @@ func (c *Config) Serve() error {
 		defer close(ldapSweepStop)
 	}
 
+	recentAuthSweepStop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-recentAuthSweepStop:
+				return
+			case now := <-ticker.C:
+				sweepRecentAuth(now)
+			}
+		}
+	}()
+	defer close(recentAuthSweepStop)
+
 	if c.sessionManager != nil {
 		defer c.sessionManager.Stop()
 	}

@@ -95,3 +95,21 @@ func TestCredentialsValidLocal(t *testing.T) {
 		}
 	}
 }
+
+func TestSweepRecentAuth(t *testing.T) {
+	now := time.Now()
+	recentlyAuthenticatedMu.Lock()
+	recentlyAuthenticated = map[string]time.Time{"old": now.Add(-25 * time.Hour), "new": now.Add(-time.Hour)}
+	recentlyAuthenticatedMu.Unlock()
+
+	sweepRecentAuth(now)
+
+	recentlyAuthenticatedMu.Lock()
+	defer recentlyAuthenticatedMu.Unlock()
+	if _, ok := recentlyAuthenticated["old"]; ok {
+		t.Error("25h-old entry not swept")
+	}
+	if _, ok := recentlyAuthenticated["new"]; !ok {
+		t.Error("1h-old entry swept")
+	}
+}

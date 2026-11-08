@@ -92,8 +92,8 @@ func (c *Config) xtreamRoutes(r *gin.RouterGroup) {
 	r.GET(fmt.Sprintf("/movie/%s/%s/:id", c.XtreamUser.String(), c.XtreamPassword.String()), recordRecentAuth, c.xtreamStreamMovie)
 	r.GET(fmt.Sprintf("/series/%s/%s/:id", c.XtreamUser.String(), c.XtreamPassword.String()), recordRecentAuth, c.xtreamStreamSeries)
 	r.GET(fmt.Sprintf("/hlsr/:token/%s/%s/:channel/:hash/:chunk", c.XtreamUser.String(), c.XtreamPassword.String()), recordRecentAuth, c.xtreamHlsrStream)
-	r.GET("/hls/:token/:chunk", c.xtreamHlsStream)
-	r.GET("/play/:token/:type", c.xtreamStreamPlay)
+	r.GET("/hls/:token/:chunk", requireRecentAuth, c.xtreamHlsStream)
+	r.GET("/play/:token/:type", requireRecentAuth, c.xtreamStreamPlay)
 }
 
 // m3uRoutes exposes a proxified, credential-rewritten M3U and its track endpoints.

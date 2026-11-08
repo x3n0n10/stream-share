@@ -117,6 +117,18 @@ func recordRecentAuth(ctx *gin.Context) {
 	recentlyAuthenticatedMu.Unlock()
 }
 
+// sweepRecentAuth drops entries past recentAuthTTL so IPs that never come
+// back do not accumulate for the life of the process.
+func sweepRecentAuth(now time.Time) {
+	recentlyAuthenticatedMu.Lock()
+	defer recentlyAuthenticatedMu.Unlock()
+	for ip, last := range recentlyAuthenticated {
+		if now.Sub(last) > recentAuthTTL {
+			delete(recentlyAuthenticated, ip)
+		}
+	}
+}
+
 // requireRecentAuth guards routes that can never carry credentials
 // themselves (the stream routes record the trust; later tasks guard /play
 // and /hls with it), by requiring the calling IP to have

@@ -24,7 +24,6 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -152,30 +151,23 @@ func (c *Config) authenticate(ctx *gin.Context) {
 		return
 	}
 
-	// Only use LDAP authentication to validate client access
-	if c.LDAPEnabled {
-		utils.DebugLog("LDAP authentication enabled for user: %s", authReq.Username)
-		ok := c.ldapAuthenticateCached(authReq.Username, authReq.Password)
-		if !ok {
-			utils.DebugLog("LDAP authentication failed for user: %s", authReq.Username)
-			ctx.AbortWithStatus(http.StatusUnauthorized)
-			return
-		}
-		utils.DebugLog("LDAP authentication succeeded for user: %s", authReq.Username)
-		recordRecentAuth(ctx)
-		return
-	}
-
-	// If LDAP is not enabled, fallback to local credentials
-	utils.DebugLog("Local authentication for user: %s", authReq.Username)
-	userMatch := subtle.ConstantTimeCompare([]byte(c.User.String()), []byte(authReq.Username))
-	passMatch := subtle.ConstantTimeCompare([]byte(c.Password.String()), []byte(authReq.Password))
-	if userMatch&passMatch != 1 {
-		utils.DebugLog("Local authentication failed for user: %s", authReq.Username)
+	if !c.credentialsValid(authReq.Username, authReq.Password) {
+		utils.DebugLog("Authentication failed for user: %s", authReq.Username)
 		ctx.AbortWithStatus(http.StatusUnauthorized)
 		return
 	}
 	recordRecentAuth(ctx)
+}
+
+// credentialsValid is the single login rule: LDAP when enabled, else the local
+// user/password, compared in constant time (both always evaluated).
+func (c *Config) credentialsValid(user, pass string) bool {
+	if c.LDAPEnabled {
+		return c.ldapAuthenticateCached(user, pass)
+	}
+	userMatch := subtle.ConstantTimeCompare([]byte(c.User.String()), []byte(user))
+	passMatch := subtle.ConstantTimeCompare([]byte(c.Password.String()), []byte(pass))
+	return userMatch&passMatch == 1
 }
 
 // appAuthenticate validates credentials for application/x-www-form-urlencoded
@@ -198,26 +190,12 @@ func (c *Config) appAuthenticate(ctx *gin.Context) {
 		ctx.AbortWithError(http.StatusBadRequest, fmt.Errorf("bad body url query parameters")) // nolint: errcheck
 		return
 	}
-	log.Printf("[stream-share] %v | %s |App Auth\n", time.Now().Format("2006/01/02 - 15:04:05"), ctx.ClientIP())
+	utils.DebugLog("App auth from %s", ctx.ClientIP())
 
-	// Use LDAP authentication if enabled
-	if c.LDAPEnabled {
-		utils.DebugLog("LDAP app authentication for user: %s", q["username"][0])
-		ok := c.ldapAuthenticateCached(q["username"][0], q["password"][0])
-		if !ok {
-			utils.DebugLog("LDAP app authentication failed for user: %s", q["username"][0])
-			ctx.AbortWithStatus(http.StatusUnauthorized)
-			return
-		}
-		utils.DebugLog("LDAP app authentication succeeded for user: %s", q["username"][0])
-	} else {
-		userMatch := subtle.ConstantTimeCompare([]byte(c.User.String()), []byte(q["username"][0]))
-		passMatch := subtle.ConstantTimeCompare([]byte(c.Password.String()), []byte(q["password"][0]))
-		if userMatch&passMatch != 1 {
-			utils.DebugLog("Local app authentication failed for user: %s", q["username"][0])
-			ctx.AbortWithStatus(http.StatusUnauthorized)
-			return
-		}
+	if !c.credentialsValid(q["username"][0], q["password"][0]) {
+		utils.DebugLog("App authentication failed for user: %s", q["username"][0])
+		ctx.AbortWithStatus(http.StatusUnauthorized)
+		return
 	}
 
 	recordRecentAuth(ctx)

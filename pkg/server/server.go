@@ -638,17 +638,8 @@ func (c *Config) authWithPathCredentials() gin.HandlerFunc {
 
 		utils.DebugLog("Path credentials auth check: username=%s, IP=%s", username, ip)
 
-		// If LDAP is enabled, authenticate against LDAP
-		if c.LDAPEnabled {
-			ok := c.ldapAuthenticateCached(username, password)
-			if !ok {
-				utils.DebugLog("LDAP authentication failed for user in path: %s", username)
-				ctx.AbortWithStatus(http.StatusUnauthorized)
-				return
-			}
-			utils.DebugLog("LDAP authentication succeeded for user in path: %s", username)
-		} else if c.User.String() != username || c.Password.String() != password {
-			utils.DebugLog("Local authentication failed for user in path: %s", username)
+		if !c.credentialsValid(username, password) {
+			utils.DebugLog("Authentication failed for user in path: %s", username)
 			ctx.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}

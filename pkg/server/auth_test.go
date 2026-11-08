@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lucasduport/stream-share/pkg/config"
 )
 
 func TestRequireRecentAuth(t *testing.T) {
@@ -76,4 +77,21 @@ func TestRequireRecentAuth(t *testing.T) {
 			t.Errorf("expired entry for %s was not pruned", ip)
 		}
 	})
+}
+
+func TestCredentialsValidLocal(t *testing.T) {
+	c := &Config{ProxyConfig: &config.ProxyConfig{User: "u", Password: "p"}}
+	for _, tc := range []struct {
+		name, user, pass string
+		want             bool
+	}{
+		{"right", "u", "p", true},
+		{"wrong user", "x", "p", false},
+		{"wrong pass", "u", "x", false},
+		{"both empty", "", "", false},
+	} {
+		if got := c.credentialsValid(tc.user, tc.pass); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
 }

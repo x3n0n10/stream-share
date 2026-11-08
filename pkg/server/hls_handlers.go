@@ -114,7 +114,7 @@ func (c *Config) xtreamHlsStream(ctx *gin.Context) {
 }
 
 func (c *Config) hlsXtreamStream(ctx *gin.Context, oriURL *url.URL) {
-	utils.DebugLog("HLS stream request with URL: %s", oriURL.String())
+	utils.DebugLog("HLS stream request with URL: %s", utils.MaskURL(oriURL.String()))
 	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
 	req, reqErr := http.NewRequestWithContext(ctx.Request.Context(), "GET", oriURL.String(), nil)
 	if reqErr != nil {

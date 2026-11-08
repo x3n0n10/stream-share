@@ -73,8 +73,8 @@ func (c *Config) reverseProxy(ctx *gin.Context) {
 	q.Set("password", c.XtreamPassword.String())
 	rpURL.RawQuery = q.Encode()
 
-	utils.DebugLog("-> Upstream username: %s", c.XtreamUser.String())
-	utils.DebugLog("-> Final upstream URL: %s", rpURL.String())
+	utils.DebugLog("-> Upstream username: %s", utils.MaskString(c.XtreamUser.String()))
+	utils.DebugLog("-> Final upstream URL: %s", utils.MaskURL(rpURL.String()))
 
 	c.stream(ctx, rpURL)
 }
@@ -93,8 +93,8 @@ func (c *Config) m3u8ReverseProxy(ctx *gin.Context) {
 	q.Set("password", c.XtreamPassword.String())
 	rpURL.RawQuery = q.Encode()
 
-	utils.DebugLog("-> Upstream username: %s", c.XtreamUser.String())
-	utils.DebugLog("-> Final upstream URL: %s", rpURL.String())
+	utils.DebugLog("-> Upstream username: %s", utils.MaskString(c.XtreamUser.String()))
+	utils.DebugLog("-> Final upstream URL: %s", utils.MaskURL(rpURL.String()))
 
 	req, err := c.buildUpstreamRequest(ctx, rpURL)
 	if err != nil {
@@ -189,7 +189,7 @@ func writeUpstreamResponse(ctx *gin.Context, resp *http.Response, isVOD bool) {
 	for {
 		select {
 		case <-ctx.Request.Context().Done():
-			utils.DebugLog("Client cancelled stream for URL: %s", ctx.Request.URL)
+			utils.DebugLog("Client cancelled stream")
 			return
 		default:
 		}
@@ -216,8 +216,8 @@ func writeUpstreamResponse(ctx *gin.Context, resp *http.Response, isVOD bool) {
 // stream proxies the content from upstream to the client, preserving status
 // and most headers, while normalizing VOD header sets for stricter providers.
 func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
-	utils.DebugLog("-> Streaming request URL: %s", ctx.Request.URL)
-	utils.DebugLog("-> Proxying to upstream URL: %s", oriURL.String())
+	utils.DebugLog("-> Streaming request URL: %s", c.redactRequestURI(ctx.Request.URL, ctx.FullPath()))
+	utils.DebugLog("-> Proxying to upstream URL: %s", utils.MaskURL(oriURL.String()))
 
 	req, err := c.buildUpstreamRequest(ctx, oriURL)
 	if err != nil {

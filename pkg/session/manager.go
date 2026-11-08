@@ -795,7 +795,7 @@ func (sm *SessionManager) deliver(buffer *StreamBuffer, cl *streamClient, chunk 
 // streamToClients pumps the single upstream connection and fans each chunk out
 // to every attached client. It is the only reader of the upstream body.
 func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url.URL) {
-	utils.DebugLog("Starting stream from %s", upstreamURL.String())
+	utils.DebugLog("Starting stream from %s", utils.MaskURL(upstreamURL.String()))
 
 	// Create a context that cancels when the stream is stopped
 	ctx, cancel := context.WithCancel(context.Background())

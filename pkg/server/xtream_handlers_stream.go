@@ -78,8 +78,8 @@ func (c *Config) xtreamApiGet(ctx *gin.Context) {
 // viewer the multiplexed path applies full back-pressure and behaves like a
 // direct proxy; additional viewers reuse the same upstream connection.
 func (c *Config) xtreamStream(ctx *gin.Context, oriURL *url.URL) {
-	utils.DebugLog("-> Xtream streaming request: %s", ctx.Request.URL.Path)
-	utils.DebugLog("-> Proxying to Xtream upstream: %s", oriURL.String())
+	utils.DebugLog("-> Xtream streaming request: %s", c.redactRequestURI(ctx.Request.URL, ctx.FullPath()))
+	utils.DebugLog("-> Proxying to Xtream upstream: %s", utils.MaskURL(oriURL.String()))
 	c.multiplexedStream(ctx, oriURL)
 }
 
@@ -400,7 +400,7 @@ func (c *Config) streamVODWithCache(ctx *gin.Context, basePath, defaultExt strin
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
 		return
 	}
-	utils.DebugLog("VOD %s streaming request - proxying to upstream: %s", basePath, rpURL.String())
+	utils.DebugLog("VOD %s streaming request - proxying to upstream: %s", basePath, utils.MaskURL(rpURL.String()))
 	c.stream(ctx, rpURL)
 }
 

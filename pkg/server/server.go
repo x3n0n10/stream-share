@@ -485,7 +485,7 @@ func (c *Config) Serve() error {
 	// gin.New() rather than gin.Default(): the default access logger logs every
 	// request, which drowns the log in noise from the frequently-polled /healthz
 	// and internal API endpoints. Log only failures (>= 400) unless debug logging
-	// is on, in which case fall back to the full access log.
+	// is on, in which case successful requests are logged too, credentials redacted.
 	// Release mode unless debug logging is on: in debug mode gin prints every
 	// route at startup, and the Xtream stream routes embed the provider's
 	// username and password in their paths. An explicit GIN_MODE still wins.
@@ -496,11 +496,7 @@ func (c *Config) Serve() error {
 	if err := c.applyTrustedProxies(router); err != nil {
 		return fmt.Errorf("invalid trusted proxy list: %w", err)
 	}
-	if utils.IsDebugLogEnabled() {
-		router.Use(gin.Logger())
-	} else {
-		router.Use(c.quietRequestLogger())
-	}
+	router.Use(c.quietRequestLogger())
 	router.Use(gin.Recovery())
 	router.Use(cors.Default())
 	utils.InfoLog("Setting up routes and internal API...")
@@ -545,22 +541,25 @@ func (c *Config) Serve() error {
 	return router.Run(fmt.Sprintf(":%d", c.HostConfig.Port))
 }
 
-// quietRequestLogger logs only failed HTTP requests (status >= 400), keeping the
-// success flood — health checks, internal API polling — out of the log. Requests
-// it does log go through the project logger at a severity matching their status.
+// quietRequestLogger logs failed HTTP requests (status >= 400) at a severity
+// matching their status, and successful ones only in debug mode, keeping the
+// success flood — health checks, internal API polling — out of the normal log.
+// Unlike gin.Logger it redacts credentials from the logged URI.
 func (c *Config) quietRequestLogger() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		start := time.Now()
 		ctx.Next()
 
 		status := ctx.Writer.Status()
-		if status < 400 {
+		if status < 400 && !utils.IsDebugLogEnabled() {
 			return
 		}
 		msg := fmt.Sprintf("[HTTP] %d | %v | %s | %s %q",
 			status, time.Since(start), ctx.ClientIP(), ctx.Request.Method, c.redactRequestURI(ctx.Request.URL, ctx.FullPath()))
 		if status >= 500 {
 			utils.ErrorLog("%s", msg)
+		} else if status < 400 {
+			utils.DebugLog("%s", msg)
 		} else {
 			utils.WarnLog("%s", msg)
 		}

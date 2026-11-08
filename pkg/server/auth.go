@@ -144,7 +144,7 @@ func requireRecentAuth(ctx *gin.Context) {
 // authenticate validates form/query credentials using LDAP (if enabled) or
 // local credentials. Used for GET/POST endpoints.
 func (c *Config) authenticate(ctx *gin.Context) {
-	utils.DebugLog("-> Incoming URL: %s", ctx.Request.URL)
+	utils.DebugLog("-> Incoming URL: %s", c.redactRequestURI(ctx.Request.URL, ctx.FullPath()))
 	var authReq authRequest
 	if err := ctx.Bind(&authReq); err != nil {
 		utils.DebugLog("Bind error: %v", err)
@@ -181,7 +181,7 @@ func (c *Config) authenticate(ctx *gin.Context) {
 // appAuthenticate validates credentials for application/x-www-form-urlencoded
 // bodies (player_api POST). It replays the body to allow downstream reading.
 func (c *Config) appAuthenticate(ctx *gin.Context) {
-	utils.DebugLog("-> Incoming URL: %s", ctx.Request.URL)
+	utils.DebugLog("-> Incoming URL: %s", c.redactRequestURI(ctx.Request.URL, ctx.FullPath()))
 
 	contents, err := io.ReadAll(ctx.Request.Body)
 	if err != nil {

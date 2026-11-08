@@ -53,16 +53,16 @@ func (c *Config) xtreamHlsStream(ctx *gin.Context) {
 	}
 
 	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
-	target, reqErr := url.Parse(fmt.Sprintf("%s://%s/hls/%s/%s", redirURL.Scheme, redirURL.Host, ctx.Param("token"), ctx.Param("chunk")))
-	var req *http.Request
-	if reqErr == nil {
-		req, reqErr = c.buildUpstreamRequest(ctx, target)
+	target, parseErr := url.Parse(fmt.Sprintf("%s://%s/hls/%s/%s", redirURL.Scheme, redirURL.Host, ctx.Param("token"), ctx.Param("chunk")))
+	if parseErr != nil {
+		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(parseErr))
+		return
 	}
+	req, reqErr := c.buildUpstreamRequest(ctx, target)
 	if reqErr != nil {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(reqErr))
 		return
 	}
-
 
 	resp, doErr := client.Do(req)
 	if doErr != nil {

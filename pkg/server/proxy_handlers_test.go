@@ -185,12 +185,46 @@ func TestUpstreamRequestForwardsOnlyAllowlistedHeaders(t *testing.T) {
 	}
 }
 
+func TestVODUpstreamRequestUsesAllowlist(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	u, _ := url.Parse("http://provider.example/movie/u/p/1.mp4")
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = hostileClientRequest()
+	req, err := (&Config{}).buildUpstreamRequest(ctx, u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Header.Get("Range") != "bytes=100-" || req.Header.Get("If-Range") != `"e"` {
+		t.Fatalf("Range/If-Range not forwarded: %v", req.Header)
+	}
+	for _, h := range []string{"Cookie", "Authorization", "X-Forwarded-For"} {
+		if req.Header.Get(h) != "" {
+			t.Errorf("%s leaked upstream", h)
+		}
+	}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/x", nil)
+	req, _ = (&Config{}).buildUpstreamRequest(ctx, u)
+	if req.Header.Get("Accept") != "*/*" || req.Header.Get("Accept-Language") == "" || req.Header.Get("Range") != "" ||
+		req.Header.Get("Accept-Encoding") != "identity" || req.Header.Get("Connection") != "keep-alive" {
+		t.Fatalf("defaults wrong: %v", req.Header)
+	}
+}
+
 func TestHLSUpstreamUsesAllowlist(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	var got http.Header
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got = r.Header.Clone() }))
+	var got []http.Header
+	var up *httptest.Server
+	up = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Clone())
+		if len(got) == 1 {
+			http.Redirect(w, r, up.URL+"/chan1/index.m3u8", http.StatusFound)
+		}
+	}))
 	t.Cleanup(up.Close)
-	upURL, _ := url.Parse(up.URL)
+	upURL, perr := url.Parse(up.URL)
+	if perr != nil {
+		t.Fatal(perr)
+	}
 	hlsChannelsRedirectURLLock.Lock()
 	hlsChannelsRedirectURL["chan1.m3u8"] = *upURL
 	hlsChannelsRedirectURLLock.Unlock()
@@ -198,13 +232,15 @@ func TestHLSUpstreamUsesAllowlist(t *testing.T) {
 
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ctx.Request = hostileClientRequest()
-	ctx.Params = gin.Params{{Key: "token", Value: "tok"}, {Key: "chunk", Value: "chan1_1.ts"}}
+	ctx.Params = gin.Params{{Key: "token", Value: "tok"}, {Key: "chunk", Value: "chan1_1.ts"}, {Key: "id", Value: "chan1"}}
 	(&Config{}).xtreamHlsStream(ctx)
 
-	if got == nil {
-		t.Fatal("provider not reached")
+	if len(got) != 2 {
+		t.Fatalf("provider saw %d requests, want 2 (initial + post-302)", len(got))
 	}
-	if got.Get("Cookie") != "" || got.Get("Authorization") != "" || got.Get("X-Forwarded-For") != "" || got.Get("User-Agent") == "Player/1" {
-		t.Fatalf("client headers leaked: %v", got)
+	for i, h := range got {
+		if h.Get("Cookie") != "" || h.Get("Authorization") != "" || h.Get("X-Forwarded-For") != "" || h.Get("User-Agent") == "Player/1" || h.Get("User-Agent") == "" {
+			t.Fatalf("request %d leaked client headers: %v", i, h)
+		}
 	}
 }

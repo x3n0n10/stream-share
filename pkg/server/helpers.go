@@ -38,24 +38,15 @@ import (
 // prepareVODHeaders returns a clean set of headers for strict VOD providers.
 func prepareVODHeaders(ctx *gin.Context) http.Header {
 	clean := http.Header{}
-	// Accept
-	if v := ctx.Request.Header.Get("Accept"); v != "" {
-		clean.Set("Accept", v)
-	} else {
+	copyForwardedHeaders(clean, ctx.Request.Header)
+	if clean.Get("Accept") == "" {
 		clean.Set("Accept", "*/*")
 	}
-	// Accept-Language
-	if v := ctx.Request.Header.Get("Accept-Language"); v != "" {
-		clean.Set("Accept-Language", v)
-	} else {
+	if clean.Get("Accept-Language") == "" {
 		clean.Set("Accept-Language", utils.GetLanguageHeader())
 	}
-	// Range — only forward if the client actually sent it; do not inject bytes=0- because
-	// that forces a 206 response which may lack a Content-Range total, leaving the player
-	// unable to determine file size and triggering avformat errors.
-	if v := ctx.Request.Header.Get("Range"); v != "" {
-		clean.Set("Range", v)
-	}
+	// Range is forwarded only if the client sent it; never inject bytes=0- because
+	// that forces a 206 that may lack a Content-Range total and breaks avformat.
 	// Connection
 	clean.Set("Connection", "keep-alive")
 	// UA and encoding

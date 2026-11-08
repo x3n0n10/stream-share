@@ -34,14 +34,9 @@ import (
 func (c *Config) routes(r *gin.RouterGroup) {
 	r = r.Group(c.CustomEndpoint)
 
-	// No c.authenticate here: content reached via this route (image/manifest
-	// URLs already rewritten into player_api/xmltv/M3U responses) never
-	// carried proxy credentials to begin with -- players fetch it directly,
-	// with no way to attach username/password. requireRecentAuth is the
-	// next-best gate: it requires the calling IP to have authenticated
-	// successfully against another endpoint recently (see its doc comment
-	// for the IP-based trade-off), instead of accepting every request.
-	r.GET("/img", requireRecentAuth, c.assetProxy)
+	// No c.authenticate here: players fetch these links with no way to attach
+	// credentials. The HMAC signature in the link is the gate (see assetProxy).
+	r.GET("/img", c.assetProxy)
 
 	// Xtream service endpoints
 	if c.XtreamBaseURL != "" {

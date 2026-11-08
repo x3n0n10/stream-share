@@ -20,116 +20,29 @@ package server
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"net/url"
-	"os"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/jamesnetherton/m3u"
 	"github.com/lucasduport/stream-share/pkg/config"
 )
 
-// TestImgRouteRequiresRecentAuth exercises the actual registered route +
-// full middleware chain (via c.routes, the same call production uses), not
-// the handlers directly — the /img route's earlier requirement of
-// username/password credentials that generated URLs never carried went
-// undetected because every prior test called c.assetProxy(ctx) directly,
-// bypassing the middleware. This also verifies the current gate:
-// requireRecentAuth, which trusts a client IP only after it has
-// authenticated successfully against another endpoint.
-func TestImgRouteRequiresRecentAuth(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "image/png")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("fake-png-bytes"))
-	}))
-	defer upstream.Close()
-
-	m3uFile, err := os.CreateTemp(t.TempDir(), "playlist-*.m3u")
-	if err != nil {
-		t.Fatalf("CreateTemp: %v", err)
-	}
-	if _, err := m3uFile.WriteString("#EXTM3U\n"); err != nil {
-		t.Fatalf("WriteString: %v", err)
-	}
-	_ = m3uFile.Close()
-
+// TestImgRouteNeedsNoLogin exercises the registered route (via c.routes, as
+// production does): /img carries no credentials, so a signed link works for a
+// client that never authenticated, and an unsigned one does not.
+func TestImgRouteNeedsNoLogin(t *testing.T) {
+	up, _ := countingUpstream(t)
 	c := &Config{
-		ProxyConfig: &config.ProxyConfig{
-			User:           "testuser",
-			Password:       "testpass",
-			XtreamUser:     "testuser",
-			XtreamPassword: "testpass",
-			M3UFileName:    "playlist.m3u",
-		},
-		playlist: &m3u.Playlist{
-			Tracks: []m3u.Track{{Name: "Test Channel", URI: upstream.URL + "/stream.ts"}},
-		},
-		proxyfiedM3UPath:     m3uFile.Name(),
-		endpointAntiColision: "anticol",
+		ProxyConfig: &config.ProxyConfig{User: "u", Password: "p"},
+		playlist:    &m3u.Playlist{},
+		imageKey:    []byte("0123456789abcdef0123456789abcdef"),
 	}
+	router := newImgRouter(c)
 
-	router := gin.New()
-	c.routes(router.Group("/"))
-
-	imgURL := "/img?url=" + url.QueryEscape(upstream.URL+"/logo.png")
-
-	t.Run("rejects a client that never authenticated", func(t *testing.T) {
-		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, imgURL, nil)
-		req.RemoteAddr = "203.0.113.1:1234"
-		router.ServeHTTP(w, req)
-
-		if w.Code != http.StatusForbidden {
-			t.Fatalf("status = %d, want 403; body=%s", w.Code, w.Body.String())
-		}
-	})
-
-	t.Run("allows a client after it authenticates against another endpoint", func(t *testing.T) {
-		clientAddr := "203.0.113.2:1234"
-
-		authReq := httptest.NewRequest(http.MethodGet, "/playlist.m3u?username=testuser&password=testpass", nil)
-		authReq.RemoteAddr = clientAddr
-		authW := httptest.NewRecorder()
-		router.ServeHTTP(authW, authReq)
-		if authW.Code != http.StatusOK {
-			t.Fatalf("authenticating request: status = %d, want 200; body=%s", authW.Code, authW.Body.String())
-		}
-
-		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, imgURL, nil)
-		req.RemoteAddr = clientAddr
-		router.ServeHTTP(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
-		}
-		if w.Body.String() != "fake-png-bytes" {
-			t.Errorf("body = %q, want %q", w.Body.String(), "fake-png-bytes")
-		}
-	})
-
-	t.Run("allows a client after it hits a direct stream route with no auth middleware", func(t *testing.T) {
-		clientAddr := "203.0.113.3:1234"
-
-		streamReq := httptest.NewRequest(http.MethodGet, "/anticol/testuser/testpass/0/stream.ts", nil)
-		streamReq.RemoteAddr = clientAddr
-		streamW := httptest.NewRecorder()
-		router.ServeHTTP(streamW, streamReq)
-		if streamW.Code == http.StatusForbidden {
-			t.Fatalf("direct stream route: status = %d, want not-403; body=%s", streamW.Code, streamW.Body.String())
-		}
-
-		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, imgURL, nil)
-		req.RemoteAddr = clientAddr
-		router.ServeHTTP(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
-		}
-	})
+	if w := getImg(router, "/img?url="+url.QueryEscape(up.URL)); w.Code != http.StatusForbidden {
+		t.Errorf("unsigned: status = %d, want 403", w.Code)
+	}
+	if w := getImg(router, c.proxyImagePath(up.URL+"/logo.png")); w.Code != http.StatusOK || w.Body.String() != "fake-png-bytes" {
+		t.Errorf("signed: status = %d body = %q, want 200 and the upstream body", w.Code, w.Body.String())
+	}
 }

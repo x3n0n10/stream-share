@@ -82,6 +82,9 @@ type Config struct {
 	// startTime records process start, used to report uptime via the API
 	startTime time.Time
 
+	// imageKey signs /img links (see imageSignature)
+	imageKey []byte
+
 	// ready flips to 1 once startup completes and the server is about to listen,
 	// so /healthz can report container readiness for `depends_on:
 	// condition: service_healthy` ordering. Accessed atomically (0 = starting).
@@ -166,6 +169,7 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		discordBot:           nil,
 		startTime:            time.Now(),
 		catalogFilter:        catalogFilter,
+		imageKey:             loadImageSigningKey(utils.CacheRoot()),
 	}
 
 	// Provider health check: report-only. Reconnecting the VPN on a bad result is

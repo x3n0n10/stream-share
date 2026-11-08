@@ -19,7 +19,6 @@
 package server
 
 import (
-	"net/url"
 	"strings"
 	"testing"
 )
@@ -31,7 +30,7 @@ func TestRewriteXMLTVIcons(t *testing.T) {
 	t.Run("channel-level icon src rewritten", func(t *testing.T) {
 		in := `<tv><channel id="1"><icon src="http://upstream.example.com/ch1.png"/></channel></tv>`
 		out := string(c.rewriteXMLTVIcons(ctx, []byte(in)))
-		want := "http://proxy.example.com:8080/img?url=" + url.QueryEscape("http://upstream.example.com/ch1.png")
+		want := "http://proxy.example.com:8080" + strings.ReplaceAll(c.proxyImagePath("http://upstream.example.com/ch1.png"), "&", "&amp;")
 		if !strings.Contains(out, want) {
 			t.Errorf("output %q does not contain rewritten channel icon %q", out, want)
 		}
@@ -40,7 +39,7 @@ func TestRewriteXMLTVIcons(t *testing.T) {
 	t.Run("programme-level icon src rewritten", func(t *testing.T) {
 		in := `<tv><programme channel="1"><icon src="http://upstream.example.com/prog1.png"/></programme></tv>`
 		out := string(c.rewriteXMLTVIcons(ctx, []byte(in)))
-		want := "http://proxy.example.com:8080/img?url=" + url.QueryEscape("http://upstream.example.com/prog1.png")
+		want := "http://proxy.example.com:8080" + strings.ReplaceAll(c.proxyImagePath("http://upstream.example.com/prog1.png"), "&", "&amp;")
 		if !strings.Contains(out, want) {
 			t.Errorf("output %q does not contain rewritten programme icon %q", out, want)
 		}
@@ -49,7 +48,7 @@ func TestRewriteXMLTVIcons(t *testing.T) {
 	t.Run("entity-escaped query string survives", func(t *testing.T) {
 		in := `<tv><channel id="1"><icon src="http://upstream.example.com/a?b=1&amp;c=2"/></channel></tv>`
 		out := string(c.rewriteXMLTVIcons(ctx, []byte(in)))
-		want := "http://proxy.example.com:8080/img?url=" + url.QueryEscape("http://upstream.example.com/a?b=1&c=2")
+		want := "http://proxy.example.com:8080" + strings.ReplaceAll(c.proxyImagePath("http://upstream.example.com/a?b=1&c=2"), "&", "&amp;")
 		if !strings.Contains(out, want) {
 			t.Errorf("output %q does not contain the correctly round-tripped rewritten icon %q", out, want)
 		}

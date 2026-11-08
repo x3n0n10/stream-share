@@ -100,7 +100,7 @@ func TestM3U8ReverseProxyRewritesSegmentURIs(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
 	}
-	wantSegment := "http://proxy.example.com:8080/img?url=" + url.QueryEscape(upstream.URL+"/segment1.ts")
+	wantSegment := "http://proxy.example.com:8080" + c.proxyImagePath(upstream.URL+"/segment1.ts")
 	if !strings.Contains(w.Body.String(), wantSegment) {
 		t.Errorf("body %q does not contain rewritten segment URI %q", w.Body.String(), wantSegment)
 	}
@@ -143,7 +143,7 @@ func TestM3U8ReverseProxyRewritesAgainstPostRedirectURL(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
 	}
-	wantSegment := "http://proxy.example.com:8080/img?url=" + url.QueryEscape(finalServer.URL+"/segment1.ts")
+	wantSegment := "http://proxy.example.com:8080" + c.proxyImagePath(finalServer.URL+"/segment1.ts")
 	if !strings.Contains(w.Body.String(), wantSegment) {
 		t.Errorf("body %q does not contain segment URI resolved against the final URL %q", w.Body.String(), wantSegment)
 	}

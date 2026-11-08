@@ -145,7 +145,7 @@ func TestXtreamHlsStreamRewritesManifestHost(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
 	}
-	wantSegment := "http://proxy.example.com:8080/img?url=" + url.QueryEscape(segURL.Scheme+"://"+segURL.Host+"/hlsr/tok1/upstreamuser/upstreampass/chan1/hash1/seg1.ts")
+	wantSegment := "http://proxy.example.com:8080" + c.proxyImagePath(segURL.Scheme+"://"+segURL.Host+"/hlsr/tok1/upstreamuser/upstreampass/chan1/hash1/seg1.ts")
 	if !strings.Contains(w.Body.String(), wantSegment) {
 		t.Errorf("body %q does not contain rewritten segment URI %q", w.Body.String(), wantSegment)
 	}
@@ -195,7 +195,7 @@ func TestHlsXtreamStreamRewritesManifestHost(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
 	}
-	wantSegment := "http://proxy.example.com:8080/img?url=" + url.QueryEscape(segURL.Scheme+"://"+segURL.Host+"/segment1.ts")
+	wantSegment := "http://proxy.example.com:8080" + c.proxyImagePath(segURL.Scheme+"://"+segURL.Host+"/segment1.ts")
 	if !strings.Contains(w.Body.String(), wantSegment) {
 		t.Errorf("body %q does not contain rewritten segment URI %q", w.Body.String(), wantSegment)
 	}

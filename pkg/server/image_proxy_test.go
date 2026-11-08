@@ -23,10 +23,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jamesnetherton/m3u"
 	"github.com/lucasduport/stream-share/pkg/config"
 )
 
@@ -34,7 +38,7 @@ func testImageProxyConfig() *Config {
 	return &Config{ProxyConfig: &config.ProxyConfig{
 		HostConfig:     &config.HostConfiguration{Hostname: "proxy.example.com"},
 		AdvertisedPort: 8080,
-	}}
+	}, playlist: &m3u.Playlist{}, imageKey: []byte("0123456789abcdef0123456789abcdef")}
 }
 
 func testRequestContext() *gin.Context {
@@ -58,7 +62,7 @@ func TestProxyImageURL(t *testing.T) {
 		{
 			"absolute url gets wrapped and query-escaped",
 			"http://upstream.example.com/logo.png?x=1&y=2",
-			"http://proxy.example.com:8080/img?url=" + url.QueryEscape("http://upstream.example.com/logo.png?x=1&y=2"),
+			"http://proxy.example.com:8080" + c.proxyImagePath("http://upstream.example.com/logo.png?x=1&y=2"),
 		},
 	}
 	for _, tc := range cases {
@@ -82,7 +86,7 @@ func TestProxyImagePath(t *testing.T) {
 		{
 			"absolute url gets wrapped, no host or scheme",
 			"http://upstream.example.com/logo.png?x=1&y=2",
-			"/img?url=" + url.QueryEscape("http://upstream.example.com/logo.png?x=1&y=2"),
+			c.proxyImagePath("http://upstream.example.com/logo.png?x=1&y=2"),
 		},
 	}
 	for _, tc := range cases {
@@ -122,7 +126,7 @@ func TestRewriteImageFields(t *testing.T) {
 		t.Fatalf("rewriteImageFields did not return a map[string]interface{}")
 	}
 
-	wantMovieImage := "http://proxy.example.com:8080/img?url=" + url.QueryEscape("http://upstream.example.com/cover.jpg")
+	wantMovieImage := "http://proxy.example.com:8080" + c.proxyImagePath("http://upstream.example.com/cover.jpg")
 	if got["movie_image"] != wantMovieImage {
 		t.Errorf("movie_image = %v, want %v", got["movie_image"], wantMovieImage)
 	}
@@ -133,7 +137,7 @@ func TestRewriteImageFields(t *testing.T) {
 	if !ok || len(bd) != 2 {
 		t.Fatalf("backdrop_path missing or wrong shape: %v", got["backdrop_path"])
 	}
-	wantBd0 := "http://proxy.example.com:8080/img?url=" + url.QueryEscape("http://upstream.example.com/bd1.jpg")
+	wantBd0 := "http://proxy.example.com:8080" + c.proxyImagePath("http://upstream.example.com/bd1.jpg")
 	if bd[0] != wantBd0 {
 		t.Errorf("backdrop_path[0] = %v, want %v", bd[0], wantBd0)
 	}
@@ -157,7 +161,7 @@ func TestRewriteImageFields(t *testing.T) {
 	if !ok {
 		t.Fatalf("episode info wrong shape: %v", ep["info"])
 	}
-	wantEpImage := "http://proxy.example.com:8080/img?url=" + url.QueryEscape("http://upstream.example.com/ep101.jpg")
+	wantEpImage := "http://proxy.example.com:8080" + c.proxyImagePath("http://upstream.example.com/ep101.jpg")
 	if epInfo["movie_image"] != wantEpImage {
 		t.Errorf("nested episode movie_image = %v, want %v", epInfo["movie_image"], wantEpImage)
 	}
@@ -179,12 +183,12 @@ func TestRewriteM3U8(t *testing.T) {
 		{
 			name: "bare relative segment line resolved against base and proxied",
 			in:   "segment1.ts",
-			want: "http://proxy.example.com:8080/img?url=" + url.QueryEscape("http://upstream.example.com/live/channel1/segment1.ts"),
+			want: "http://proxy.example.com:8080" + c.proxyImagePath("http://upstream.example.com/live/channel1/segment1.ts"),
 		},
 		{
 			name: "bare absolute segment line proxied as-is",
 			in:   "http://cdn.example.com/seg2.ts",
-			want: "http://proxy.example.com:8080/img?url=" + url.QueryEscape("http://cdn.example.com/seg2.ts"),
+			want: "http://proxy.example.com:8080" + c.proxyImagePath("http://cdn.example.com/seg2.ts"),
 		},
 		{
 			name: "comment line with no URI attribute passes through unchanged",
@@ -204,7 +208,7 @@ func TestRewriteM3U8(t *testing.T) {
 	t.Run("EXT-X-KEY URI attribute rewritten in place, rest of tag untouched", func(t *testing.T) {
 		in := `#EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x00000000000000000000000000000001`
 		out := string(c.rewriteM3U8(ctx, base, []byte(in)))
-		wantURI := "http://proxy.example.com:8080/img?url=" + url.QueryEscape("http://upstream.example.com/live/channel1/key.bin")
+		wantURI := "http://proxy.example.com:8080" + c.proxyImagePath("http://upstream.example.com/live/channel1/key.bin")
 		if !strings.Contains(out, wantURI) {
 			t.Errorf("output %q does not contain rewritten key URI %q", out, wantURI)
 		}
@@ -224,7 +228,7 @@ func TestAssetProxy(t *testing.T) {
 		c := testImageProxyConfig()
 		w := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(w)
-		ctx.Request = httptest.NewRequest(http.MethodGet, "/img?url="+url.QueryEscape("file:///etc/passwd"), nil)
+		ctx.Request = httptest.NewRequest(http.MethodGet, c.proxyImagePath("file:///etc/passwd"), nil)
 		ctx.Request.Host = "proxy.example.com:8080"
 
 		c.assetProxy(ctx)
@@ -245,7 +249,7 @@ func TestAssetProxy(t *testing.T) {
 		c := testImageProxyConfig()
 		w := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(w)
-		ctx.Request = httptest.NewRequest(http.MethodGet, "/img?url="+url.QueryEscape(upstream.URL+"/logo.png"), nil)
+		ctx.Request = httptest.NewRequest(http.MethodGet, c.proxyImagePath(upstream.URL+"/logo.png"), nil)
 		ctx.Request.Host = "proxy.example.com:8080"
 
 		c.assetProxy(ctx)
@@ -270,7 +274,7 @@ func TestAssetProxy(t *testing.T) {
 		w := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(w)
 		targetURL := upstream.URL + "/hls/channel1/index.m3u8"
-		ctx.Request = httptest.NewRequest(http.MethodGet, "/img?url="+url.QueryEscape(targetURL), nil)
+		ctx.Request = httptest.NewRequest(http.MethodGet, c.proxyImagePath(targetURL), nil)
 		ctx.Request.Host = "proxy.example.com:8080"
 
 		c.assetProxy(ctx)
@@ -278,7 +282,7 @@ func TestAssetProxy(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
 		}
-		wantSegment := "http://proxy.example.com:8080/img?url=" + url.QueryEscape(upstream.URL+"/hls/channel1/segment1.ts")
+		wantSegment := "http://proxy.example.com:8080" + c.proxyImagePath(upstream.URL+"/hls/channel1/segment1.ts")
 		if !strings.Contains(w.Body.String(), wantSegment) {
 			t.Errorf("body %q does not contain rewritten segment URI %q", w.Body.String(), wantSegment)
 		}
@@ -304,7 +308,7 @@ func TestAssetProxy(t *testing.T) {
 		w := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(w)
 		targetURL := redirectServer.URL + "/live/channel1.m3u8"
-		ctx.Request = httptest.NewRequest(http.MethodGet, "/img?url="+url.QueryEscape(targetURL), nil)
+		ctx.Request = httptest.NewRequest(http.MethodGet, c.proxyImagePath(targetURL), nil)
 		ctx.Request.Host = "proxy.example.com:8080"
 
 		c.assetProxy(ctx)
@@ -312,7 +316,7 @@ func TestAssetProxy(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
 		}
-		wantSegment := "http://proxy.example.com:8080/img?url=" + url.QueryEscape(finalServer.URL+"/hls/channel1/segment1.ts")
+		wantSegment := "http://proxy.example.com:8080" + c.proxyImagePath(finalServer.URL+"/hls/channel1/segment1.ts")
 		if !strings.Contains(w.Body.String(), wantSegment) {
 			t.Errorf("body %q does not contain segment URI resolved against the final URL %q", w.Body.String(), wantSegment)
 		}
@@ -429,7 +433,7 @@ func TestRewritePlaylistHosts(t *testing.T) {
 		in := `#EXTINF:-1 tvg-logo="http://provider.example.com/l.png", Ch` + "\n" +
 			"http://provider.example.com:8080/live/localuser/localpass/12345.ts\n"
 		out := rewriteHostsString(t, c, ctx, in)
-		if !strings.Contains(out, `tvg-logo="http://proxy.example.com:8080/img?url=http%3A%2F%2Fprovider.example.com%2Fl.png"`) {
+		if !strings.Contains(out, `tvg-logo="http://proxy.example.com:8080`+c.proxyImagePath("http://provider.example.com/l.png")+`"`) {
 			t.Errorf("logo not proxied: %q", out)
 		}
 		if !strings.Contains(out, "\nhttp://proxy.example.com:8080/live/localuser/localpass/12345.ts") {
@@ -525,4 +529,122 @@ func rewriteHostsString(t *testing.T, c *Config, ctx *gin.Context, in string) st
 		t.Fatal(err)
 	}
 	return buf.String()
+}
+
+func newImgRouter(c *Config) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	c.routes(router.Group("/"))
+	return router
+}
+
+func countingUpstream(t *testing.T) (*httptest.Server, *int32) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("fake-png-bytes"))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+func getImg(router *gin.Engine, target string) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, target, nil))
+	return w
+}
+
+func TestAssetProxyRejectsUnsignedURL(t *testing.T) {
+	up, hits := countingUpstream(t)
+	w := getImg(newImgRouter(testImageProxyConfig()), "/img?url="+url.QueryEscape(up.URL))
+	if w.Code != http.StatusForbidden || atomic.LoadInt32(hits) != 0 {
+		t.Fatalf("status = %d, upstream hits = %d; want 403 and 0", w.Code, *hits)
+	}
+}
+
+func TestAssetProxyRejectsSignatureOfAnotherURL(t *testing.T) {
+	up, hits := countingUpstream(t)
+	c := testImageProxyConfig()
+	w := getImg(newImgRouter(c), "/img?url="+url.QueryEscape(up.URL)+"&sig="+c.imageSignature("http://a.example/x.png"))
+	if w.Code != http.StatusForbidden || atomic.LoadInt32(hits) != 0 {
+		t.Fatalf("status = %d, upstream hits = %d; want 403 and 0", w.Code, *hits)
+	}
+}
+
+func TestAssetProxyServesSignedURL(t *testing.T) {
+	up, _ := countingUpstream(t)
+	c := testImageProxyConfig()
+	w := getImg(newImgRouter(c), c.proxyImagePath(up.URL+"/logo.png?a=1&b=%20é"))
+	if w.Code != http.StatusOK || w.Body.String() != "fake-png-bytes" {
+		t.Fatalf("status = %d, body = %q; want 200 and the upstream body", w.Code, w.Body.String())
+	}
+}
+
+func TestProxyImagePathSignsWithCustomEndpoint(t *testing.T) {
+	up, _ := countingUpstream(t)
+	c := testImageProxyConfig()
+	c.CustomEndpoint = "providerA"
+	path := c.proxyImagePath(up.URL + "/logo.png")
+	if !strings.HasPrefix(path, "/providerA/img?url=") {
+		t.Fatalf("path = %q, want /providerA/img?url= prefix", path)
+	}
+	if w := getImg(newImgRouter(c), path); w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestRewriteM3U8SignsChildURLs(t *testing.T) {
+	c := testImageProxyConfig()
+	base, _ := url.Parse("http://upstream.example.com/hls/index.m3u8")
+	out := string(c.rewriteM3U8(testRequestContext(), base, []byte("#EXTM3U\nseg1.ts\nsub/list.m3u8\n")))
+	n := 0
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "/img?url=") {
+			continue
+		}
+		n++
+		u, err := url.Parse(line)
+		if err != nil || u.Query().Get("sig") != c.imageSignature(u.Query().Get("url")) {
+			t.Errorf("line %q has no valid signature", line)
+		}
+	}
+	if n != 2 {
+		t.Fatalf("found %d /img lines in %q, want 2", n, out)
+	}
+}
+
+func TestLoadImageSigningKey(t *testing.T) {
+	dir := t.TempDir()
+	key := loadImageSigningKey(dir)
+	path := filepath.Join(dir, imageSigningKeyFile)
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 || fi.Size() != imageSigningKeySize || len(key) != imageSigningKeySize {
+		t.Fatalf("stat = %v, %v; want a 0600 file of %d bytes", fi, err, imageSigningKeySize)
+	}
+	if !bytes.Equal(loadImageSigningKey(dir), key) {
+		t.Error("second load returned a different key")
+	}
+	if err := os.WriteFile(path, []byte("short"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if k := loadImageSigningKey(dir); len(k) != imageSigningKeySize {
+		t.Errorf("short key file not replaced: got %d bytes", len(k))
+	}
+	if b, _ := os.ReadFile(path); len(b) != imageSigningKeySize {
+		t.Errorf("file holds %d bytes, want %d", len(b), imageSigningKeySize)
+	}
+
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	ro := t.TempDir()
+	if err := os.Chmod(ro, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if k := loadImageSigningKey(ro); len(k) != imageSigningKeySize {
+		t.Errorf("read-only dir: got %d bytes, want %d", len(k), imageSigningKeySize)
+	}
+	if _, err := os.Stat(filepath.Join(ro, imageSigningKeyFile)); err == nil {
+		t.Error("key file written into a read-only dir")
+	}
 }

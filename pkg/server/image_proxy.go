@@ -20,17 +20,68 @@ package server
 
 import (
 	"bufio"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
+
+const (
+	imageSigningKeyFile = "image-signing.key"
+	imageSigningKeySize = 32
+)
+
+// loadImageSigningKey returns the HMAC key that signs /img links, creating
+// and persisting it on first use so links already handed to players survive
+// a restart. Never returns nil: when the key cannot be stored it stays in
+// memory only.
+func loadImageSigningKey(dir string) []byte {
+	path := filepath.Join(dir, imageSigningKeyFile)
+	if key, err := os.ReadFile(path); err == nil && len(key) == imageSigningKeySize {
+		return key
+	}
+	key := make([]byte, imageSigningKeySize)
+	if _, err := rand.Read(key); err != nil {
+		panic(err) // crypto/rand failing is unrecoverable
+	}
+	_ = os.MkdirAll(dir, 0o755)                              // the cache root may not exist yet; a failure surfaces below
+	tmp, err := os.CreateTemp(dir, imageSigningKeyFile+".*") // CreateTemp makes it 0600
+	if err == nil {
+		_, err = tmp.Write(key)
+		if cerr := tmp.Close(); err == nil {
+			err = cerr
+		}
+		if err == nil {
+			err = os.Rename(tmp.Name(), path)
+		}
+		if err != nil {
+			_ = os.Remove(tmp.Name())
+		}
+	}
+	if err != nil {
+		utils.WarnLog("Image links: cannot store the signing key in %s (%v); links change on the next restart", dir, err)
+	}
+	return key
+}
+
+// imageSignature authenticates raw so /img only fetches URLs this server
+// handed out (the route is otherwise an open fetch-any-URL proxy).
+func (c *Config) imageSignature(raw string) string {
+	m := hmac.New(sha256.New, c.imageKey)
+	m.Write([]byte(raw))
+	return base64.RawURLEncoding.EncodeToString(m.Sum(nil)[:16])
+}
 
 // proxyImagePath returns the relative /img?url= path for raw, with no
 // scheme or host — for callers with no live request (see marshallInto).
@@ -43,7 +94,7 @@ func (c *Config) proxyImagePath(raw string) string {
 	if customEnd != "" {
 		customEnd = "/" + customEnd
 	}
-	return fmt.Sprintf("%s/img?url=%s", customEnd, url.QueryEscape(raw))
+	return customEnd + "/img?url=" + url.QueryEscape(raw) + "&sig=" + c.imageSignature(raw)
 }
 
 // proxyImageURL rewrites an absolute image/asset URL to point at this
@@ -157,16 +208,10 @@ func rewriteQuotedURI(line, key string, rewrite func(string) string) string {
 	return line[:start+1] + rewrite(value) + line[end:]
 }
 
-// assetProxy fetches an arbitrary http(s) URL and streams it back, so
-// upstream image/manifest URLs never reach the client directly. There is
-// deliberately no host allowlist and no per-request credentials: content
-// reached via this route (rewritten into player_api/xmltv/M3U responses)
-// never carried proxy credentials to begin with, since players fetch it
-// directly with no way to attach a username/password. The route is
-// instead guarded by requireRecentAuth (see routes.go), which requires
-// the calling IP to have authenticated successfully elsewhere recently.
-// The known cost: within that window, anyone sharing the IP can make
-// this server fetch arbitrary http(s) URLs.
+// assetProxy fetches an http(s) URL this server signed (see imageSignature)
+// and streams it back, so upstream image/manifest URLs never reach the client
+// directly. Players fetch these links with no way to attach credentials, so
+// the signature in the link is the only gate; anything unsigned is a 403.
 //
 // A response whose Content-Type or requested path indicates an HLS
 // manifest is buffered and run through rewriteM3U8 instead of streamed
@@ -174,6 +219,10 @@ func rewriteQuotedURI(line, key string, rewrite func(string) string) string {
 // same route — recursively, since a rewritten sub-playlist is fetched
 // through /img again and re-enters this same check.
 func (c *Config) assetProxy(ctx *gin.Context) {
+	if !hmac.Equal([]byte(ctx.Query("sig")), []byte(c.imageSignature(ctx.Query("url")))) {
+		ctx.AbortWithStatus(http.StatusForbidden)
+		return
+	}
 	target, err := url.Parse(ctx.Query("url"))
 	if err != nil || (target.Scheme != "http" && target.Scheme != "https") {
 		ctx.AbortWithStatus(http.StatusBadRequest)

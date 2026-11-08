@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,8 +57,12 @@ func RegisterSecrets(secrets ...string) {
 			}
 		}
 	}
-	pairs := make([]string, 0, 2*len(secretList))
-	for _, s := range secretList {
+	// NewReplacer matches in argument order, so longest first keeps a short
+	// secret that prefixes a longer one from leaving the longer one's tail.
+	sorted := append([]string(nil), secretList...)
+	sort.Slice(sorted, func(i, j int) bool { return len(sorted[i]) > len(sorted[j]) })
+	pairs := make([]string, 0, 2*len(sorted))
+	for _, s := range sorted {
 		pairs = append(pairs, s, "***")
 	}
 	redactor.Store(strings.NewReplacer(pairs...))

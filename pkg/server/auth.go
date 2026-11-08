@@ -179,7 +179,12 @@ func (c *Config) credentialsValid(user, pass string) bool {
 	}
 	userMatch := subtle.ConstantTimeCompare([]byte(c.User.String()), []byte(user))
 	passMatch := subtle.ConstantTimeCompare([]byte(c.Password.String()), []byte(pass))
-	return userMatch&passMatch == 1
+	// An empty configured user never matches, so empty credentials cannot log in.
+	configured := 0
+	if c.User.String() != "" {
+		configured = 1
+	}
+	return userMatch&passMatch&configured == 1
 }
 
 // appAuthenticate validates credentials for application/x-www-form-urlencoded

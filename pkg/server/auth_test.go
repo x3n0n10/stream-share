@@ -94,6 +94,11 @@ func TestCredentialsValidLocal(t *testing.T) {
 			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
 		}
 	}
+	// An operator who configures empty local credentials must not accept empty requests.
+	empty := &Config{ProxyConfig: &config.ProxyConfig{}}
+	if empty.credentialsValid("", "") {
+		t.Error("empty configured credentials accepted an empty request")
+	}
 }
 
 func TestSweepRecentAuth(t *testing.T) {

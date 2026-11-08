@@ -23,7 +23,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -502,10 +501,10 @@ func (c *Config) Serve() error {
 	// request, which drowns the log in noise from the frequently-polled /healthz
 	// and internal API endpoints. Log only failures (>= 400) unless debug logging
 	// is on, in which case successful requests are logged too, credentials redacted.
-	// Release mode unless debug logging is on: in debug mode gin prints every
-	// route at startup, and the Xtream stream routes embed the provider's
-	// username and password in their paths. An explicit GIN_MODE still wins.
-	if os.Getenv(gin.EnvGinMode) == "" && !utils.IsDebugLogEnabled() {
+	// Release mode always (unless GIN_MODE is set): in debug mode gin prints
+	// every route at startup straight to stdout, bypassing log redaction, and
+	// the Xtream stream routes embed the provider's username and password.
+	if os.Getenv(gin.EnvGinMode) == "" {
 		gin.SetMode(gin.ReleaseMode)
 	}
 	router := gin.New()
@@ -994,7 +993,7 @@ func (c *Config) marshallInto(into *os.File, xtream bool) error {
 		uri, err := c.replacePath(track.URI, i-ret, xtream)
 		if err != nil {
 			ret++
-			log.Printf("ERROR: track: %s: %s", track.Name, err)
+			utils.ErrorLog("track: %s: %s", track.Name, err)
 			continue
 		}
 

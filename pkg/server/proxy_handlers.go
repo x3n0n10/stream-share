@@ -155,14 +155,11 @@ func (c *Config) buildUpstreamRequest(ctx *gin.Context, oriURL *url.URL) (*http.
 	} else {
 		copyForwardedHeaders(req.Header, ctx.Request.Header)
 		req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
-		req.Header.Del("Accept-Encoding")
 		req.Header.Set("Accept-Encoding", "identity")
 		if req.Header.Get("Accept") == "" {
 			req.Header.Set("Accept", "*/*")
 		}
-		if req.Header.Get("Connection") == "" {
-			req.Header.Set("Connection", "keep-alive")
-		}
+		req.Header.Set("Connection", "keep-alive")
 	}
 	return req, nil
 }

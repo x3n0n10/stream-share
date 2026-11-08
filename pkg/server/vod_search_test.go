@@ -17,7 +17,12 @@
 package server
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"testing"
+
+	"github.com/lucasduport/stream-share/pkg/config"
 )
 
 func TestParseQueryTokens(t *testing.T) {
@@ -83,5 +88,22 @@ func TestToInt(t *testing.T) {
 		if got := toInt(tc.in); got != tc.want {
 			t.Errorf("toInt(%v) = %d, want %d", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestRefreshVODM3UEscapesCredentials(t *testing.T) {
+	t.Setenv("CACHE_FOLDER", t.TempDir())
+	var got string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query().Get("password")
+		_, _ = w.Write([]byte("#EXTM3U\n"))
+	}))
+	defer up.Close()
+	c := &Config{ProxyConfig: &config.ProxyConfig{XtreamBaseURL: up.URL, XtreamUser: "u", XtreamPassword: "a&b#c+d"}}
+	if err := c.refreshVODM3U(filepath.Join(t.TempDir(), "vod.m3u")); err != nil {
+		t.Fatal(err)
+	}
+	if got != "a&b#c+d" {
+		t.Errorf("provider received password %q", got)
 	}
 }

@@ -450,8 +450,10 @@ func (c *Config) refreshVODM3U(cacheFile string) error {
 	if err := os.MkdirAll(filepath.Dir(cacheFile), 0o755); err != nil {
 		return err
 	}
-	getURL := fmt.Sprintf("%s/get.php?username=%s&password=%s&type=m3u_plus&output=m3u8",
-		c.XtreamBaseURL, c.XtreamUser.String(), c.XtreamPassword.String())
+	getURL := c.XtreamBaseURL + "/get.php?" + url.Values{
+		"username": {c.XtreamUser.String()}, "password": {c.XtreamPassword.String()},
+		"type": {"m3u_plus"}, "output": {"m3u8"},
+	}.Encode()
 	utils.InfoLog("Refreshing VOD M3U from Xtream: %s", utils.MaskURL(getURL))
 	start := time.Now()
 

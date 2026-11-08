@@ -55,8 +55,8 @@ func loadImageSigningKey(dir string) []byte {
 		return existing
 	}
 	key := make([]byte, imageSigningKeySize)
-	if _, err := rand.Read(key); err != nil {
-		panic(err) // crypto/rand failing is unrecoverable
+	if _, readErr := rand.Read(key); readErr != nil {
+		panic(readErr) // crypto/rand failing is unrecoverable
 	}
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		// unreadable but present: keep the file, use an in-memory key

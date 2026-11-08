@@ -154,3 +154,57 @@ func TestM3U8ReverseProxyRewritesAgainstPostRedirectURL(t *testing.T) {
 		t.Errorf("body %q resolved the segment against the pre-redirect URL instead of the final one", w.Body.String())
 	}
 }
+
+func hostileClientRequest() *http.Request {
+	r := httptest.NewRequest(http.MethodGet, "/x", nil)
+	for k, v := range map[string]string{"Cookie": "a=b", "Authorization": "Basic x", "X-Forwarded-For": "1.2.3.4", "Range": "bytes=100-", "If-Range": `"e"`, "User-Agent": "Player/1"} {
+		r.Header.Set(k, v)
+	}
+	return r
+}
+
+func TestUpstreamRequestForwardsOnlyAllowlistedHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = hostileClientRequest()
+	u, _ := url.Parse("http://provider.example/live/u/p/1.m3u8")
+	req, err := (&Config{}).buildUpstreamRequest(ctx, u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Header.Get("Range") != "bytes=100-" || req.Header.Get("If-Range") != `"e"` {
+		t.Fatalf("Range/If-Range not forwarded: %v", req.Header)
+	}
+	if req.Header.Get("User-Agent") == "Player/1" || req.Header.Get("User-Agent") == "" {
+		t.Fatalf("User-Agent = %q, want IPTV UA", req.Header.Get("User-Agent"))
+	}
+	for _, h := range []string{"Cookie", "Authorization", "X-Forwarded-For"} {
+		if req.Header.Get(h) != "" {
+			t.Errorf("%s leaked upstream", h)
+		}
+	}
+}
+
+func TestHLSUpstreamUsesAllowlist(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var got http.Header
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got = r.Header.Clone() }))
+	t.Cleanup(up.Close)
+	upURL, _ := url.Parse(up.URL)
+	hlsChannelsRedirectURLLock.Lock()
+	hlsChannelsRedirectURL["chan1.m3u8"] = *upURL
+	hlsChannelsRedirectURLLock.Unlock()
+	t.Cleanup(resetHlsRedirectCache)
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = hostileClientRequest()
+	ctx.Params = gin.Params{{Key: "token", Value: "tok"}, {Key: "chunk", Value: "chan1_1.ts"}}
+	(&Config{}).xtreamHlsStream(ctx)
+
+	if got == nil {
+		t.Fatal("provider not reached")
+	}
+	if got.Get("Cookie") != "" || got.Get("Authorization") != "" || got.Get("X-Forwarded-For") != "" || got.Get("User-Agent") == "Player/1" {
+		t.Fatalf("client headers leaked: %v", got)
+	}
+}

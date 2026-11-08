@@ -53,13 +53,16 @@ func (c *Config) xtreamHlsStream(ctx *gin.Context) {
 	}
 
 	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
-	req, reqErr := http.NewRequestWithContext(ctx.Request.Context(), "GET", fmt.Sprintf("%s://%s/hls/%s/%s", redirURL.Scheme, redirURL.Host, ctx.Param("token"), ctx.Param("chunk")), nil)
+	target, reqErr := url.Parse(fmt.Sprintf("%s://%s/hls/%s/%s", redirURL.Scheme, redirURL.Host, ctx.Param("token"), ctx.Param("chunk")))
+	var req *http.Request
+	if reqErr == nil {
+		req, reqErr = c.buildUpstreamRequest(ctx, target)
+	}
 	if reqErr != nil {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(reqErr))
 		return
 	}
 
-	mergeHttpHeader(req.Header, ctx.Request.Header)
 
 	resp, doErr := client.Do(req)
 	if doErr != nil {
@@ -79,12 +82,11 @@ func (c *Config) xtreamHlsStream(ctx *gin.Context) {
 			hlsChannelsRedirectURLLock.Lock()
 			hlsChannelsRedirectURL[id] = *loc
 			hlsChannelsRedirectURLLock.Unlock()
-			hlsReq, hlsReqErr := http.NewRequestWithContext(ctx.Request.Context(), "GET", loc.String(), nil)
+			hlsReq, hlsReqErr := c.buildUpstreamRequest(ctx, loc)
 			if hlsReqErr != nil {
 				_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(hlsReqErr))
 				return
 			}
-			mergeHttpHeader(hlsReq.Header, ctx.Request.Header)
 			hlsResp, hlsDoErr := client.Do(hlsReq)
 			if hlsDoErr != nil {
 				_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(hlsDoErr))
@@ -116,12 +118,11 @@ func (c *Config) xtreamHlsStream(ctx *gin.Context) {
 func (c *Config) hlsXtreamStream(ctx *gin.Context, oriURL *url.URL) {
 	utils.DebugLog("HLS stream request with URL: %s", utils.MaskURL(oriURL.String()))
 	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
-	req, reqErr := http.NewRequestWithContext(ctx.Request.Context(), "GET", oriURL.String(), nil)
+	req, reqErr := c.buildUpstreamRequest(ctx, oriURL)
 	if reqErr != nil {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(reqErr))
 		return
 	}
-	mergeHttpHeader(req.Header, ctx.Request.Header)
 	resp, doErr := client.Do(req)
 	if doErr != nil {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(doErr))
@@ -140,12 +141,11 @@ func (c *Config) hlsXtreamStream(ctx *gin.Context, oriURL *url.URL) {
 			hlsChannelsRedirectURLLock.Lock()
 			hlsChannelsRedirectURL[id] = *loc
 			hlsChannelsRedirectURLLock.Unlock()
-			hlsReq, hlsReqErr := http.NewRequestWithContext(ctx.Request.Context(), "GET", loc.String(), nil)
+			hlsReq, hlsReqErr := c.buildUpstreamRequest(ctx, loc)
 			if hlsReqErr != nil {
 				_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(hlsReqErr))
 				return
 			}
-			mergeHttpHeader(hlsReq.Header, ctx.Request.Header)
 			hlsResp, hlsDoErr := client.Do(hlsReq)
 			if hlsDoErr != nil {
 				_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(hlsDoErr))

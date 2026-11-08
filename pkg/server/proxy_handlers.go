@@ -130,6 +130,18 @@ func (c *Config) m3u8ReverseProxy(ctx *gin.Context) {
 	ctx.Data(resp.StatusCode, contentType, body)
 }
 
+// forwardedClientHeaders are the only client headers sent to the provider;
+// cookies, Authorization and X-Forwarded-For must never leave this proxy.
+var forwardedClientHeaders = []string{"Range", "If-Range", "Accept", "Accept-Language"}
+
+func copyForwardedHeaders(dst, src http.Header) {
+	for _, k := range forwardedClientHeaders {
+		if v := src.Values(k); len(v) > 0 {
+			dst[http.CanonicalHeaderKey(k)] = append([]string(nil), v...)
+		}
+	}
+}
+
 // buildUpstreamRequest constructs the outbound request to oriURL, using the
 // strict VOD header whitelist for VOD-shaped paths and a minimal
 // passthrough header set otherwise.
@@ -141,7 +153,7 @@ func (c *Config) buildUpstreamRequest(ctx *gin.Context, oriURL *url.URL) (*http.
 	if isVODPath(oriURL.Path) {
 		req.Header = prepareVODHeaders(ctx)
 	} else {
-		mergeHttpHeader(req.Header, ctx.Request.Header)
+		copyForwardedHeaders(req.Header, ctx.Request.Header)
 		req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
 		req.Header.Del("Accept-Encoding")
 		req.Header.Set("Accept-Encoding", "identity")

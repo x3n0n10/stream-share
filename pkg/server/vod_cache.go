@@ -788,7 +788,7 @@ func (c *Config) resolveVODCacheURL(basePath, defaultExt, id string) (upstream, 
 		resolvedExt = defaultExt
 	}
 	finalID := idRaw + resolvedExt
-	upstream = fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
+	upstream = c.providerStreamURL(basePath, finalID)
 	cacheDir := utils.VODCacheDir()
 	_ = os.MkdirAll(cacheDir, 0o755)
 	dest = filepath.Join(cacheDir, idRaw+resolvedExt)

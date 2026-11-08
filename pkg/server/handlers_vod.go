@@ -195,7 +195,7 @@ func (c *Config) enrichVODPage(ctx *gin.Context) {
 						finalID += ".mp4"
 					}
 				}
-				vodURL := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
+				vodURL := c.providerStreamURL(basePath, finalID)
 				// Range GET
 				reqHTTP, reqErr := http.NewRequest("GET", vodURL, nil)
 				if reqErr != nil {
@@ -311,7 +311,7 @@ func (c *Config) createVODDownload(ctx *gin.Context) {
 			finalID += ".mkv"
 		}
 	}
-	vodURL := fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
+	vodURL := c.providerStreamURL(basePath, finalID)
 	utils.DebugLog("API: VOD URL created: %s", utils.MaskURL(vodURL))
 
 	// Generate a temporary download token
@@ -509,7 +509,7 @@ func (c *Config) resolveVODCacheTarget(basePath, streamID string) (upstream, des
 			}
 		}
 	}
-	upstream = fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, finalID)
+	upstream = c.providerStreamURL(basePath, finalID)
 	idOnly := strings.TrimSuffix(streamID, path.Ext(streamID))
 	dest = filepath.Join(utils.VODCacheDir(), idOnly+path.Ext(finalID))
 	return upstream, dest

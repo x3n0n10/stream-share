@@ -518,8 +518,8 @@ func (c *Config) handleShareStream(ctx *gin.Context) {
 // stream under either form is reused; otherwise the bare form is used.
 func (c *Config) shareUpstream(streamID string) (*url.URL, bool) {
 	id := normalizeStreamID(streamID)
-	bare := fmt.Sprintf("%s/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id)
-	ts := fmt.Sprintf("%s/live/%s/%s/%s.ts", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id)
+	bare := c.providerStreamURL("", id)
+	ts := c.providerStreamURL("live", id+".ts")
 	if c.sessionManager != nil {
 		for _, raw := range []string{bare, ts} {
 			u, err := url.Parse(raw)

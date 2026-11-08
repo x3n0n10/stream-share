@@ -20,7 +20,6 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -52,7 +51,7 @@ func (c *Config) pickVODExtension(ctx *gin.Context, basePath, streamID string) s
 	}
 	client := &http.Client{Timeout: 3 * time.Second}
 	for _, ext := range order {
-		probeURL := fmt.Sprintf("%s/%s/%s/%s/%s%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, streamID, ext)
+		probeURL := c.providerStreamURL(basePath, streamID+ext)
 		req, reqErr := http.NewRequestWithContext(context.Background(), "HEAD", probeURL, nil)
 		if reqErr != nil {
 			utils.DebugLog("VOD probe: failed to build HEAD request for %s: %v", utils.MaskURL(probeURL), reqErr)

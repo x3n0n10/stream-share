@@ -89,3 +89,19 @@ func TestRedactRequestURICoversCredentialRoutes(t *testing.T) {
 		})
 	}
 }
+
+func TestStreamDebugLogMasksProviderPassword(t *testing.T) {
+	buf := captureDebugLog(t)
+	utils.RegisterSecrets("provpass1")
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("x")) }))
+	defer up.Close()
+	c := &Config{ProxyConfig: &config.ProxyConfig{XtreamUser: "provuser", XtreamPassword: "provpass1"}}
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/live/provuser/provpass1/42.ts", nil)
+	u, _ := url.Parse(up.URL + "/prefix/provuser/provpass1/42.ts")
+	c.stream(ctx, u)
+	if !strings.Contains(buf.String(), "Proxying to upstream URL") || strings.Contains(buf.String(), "provpass1") {
+		t.Fatalf("log missing line or leaks password: %q", buf.String())
+	}
+}

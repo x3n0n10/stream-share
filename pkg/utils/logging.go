@@ -22,12 +22,46 @@ package utils
 import (
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
+
+var (
+	secretsMu  sync.Mutex
+	secretList []string
+	redactor   atomic.Pointer[strings.Replacer]
+)
+
+// RegisterSecrets makes every log line replace these values (and their
+// path/query-escaped forms) with ***. Redacting by value, not by URL position,
+// also covers provider URLs with a path prefix and http.Client error text.
+// shortcut: secrets shorter than 4 characters are not redacted (they would mangle unrelated log text); upgrade if short credentials must be supported
+func RegisterSecrets(secrets ...string) {
+	secretsMu.Lock()
+	defer secretsMu.Unlock()
+	for _, s := range secrets {
+		if len(s) < 4 {
+			continue
+		}
+		secretList = append(secretList, s)
+		for _, e := range []string{url.PathEscape(s), url.QueryEscape(s)} {
+			if e != s {
+				secretList = append(secretList, e)
+			}
+		}
+	}
+	pairs := make([]string, 0, 2*len(secretList))
+	for _, s := range secretList {
+		pairs = append(pairs, s, "***")
+	}
+	redactor.Store(strings.NewReplacer(pairs...))
+}
 
 // LogConfig defines logging configuration
 var Config = struct {
@@ -153,6 +187,9 @@ func logWithCaller(level LogLevel, format string, v ...interface{}) {
 
 	// Format the final message
 	message := fmt.Sprintf(format, v...)
+	if r := redactor.Load(); r != nil {
+		message = r.Replace(message)
+	}
 	logMessage := fmt.Sprintf("%s [%s] (%s) %s",
 		timestamp, levelStr, caller, message)
 

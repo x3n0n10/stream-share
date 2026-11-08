@@ -117,6 +117,7 @@ type Config struct {
 
 // NewServer initializes a new server configuration with all necessary components.
 func NewServer(config *config.ProxyConfig) (*Config, error) {
+	utils.RegisterSecrets(config.XtreamUser.String(), config.XtreamPassword.String(), config.User.String(), config.Password.String())
 	config.CatalogStorage = parseCatalogStorage(config.CatalogStorage)
 	applyCatalogMemoryLimit(config.CatalogStorage)
 	var p m3u.Playlist

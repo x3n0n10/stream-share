@@ -24,8 +24,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -48,12 +50,18 @@ const (
 // memory only.
 func loadImageSigningKey(dir string) []byte {
 	path := filepath.Join(dir, imageSigningKeyFile)
-	if key, err := os.ReadFile(path); err == nil && len(key) == imageSigningKeySize {
-		return key
+	existing, err := os.ReadFile(path)
+	if err == nil && len(existing) == imageSigningKeySize {
+		return existing
 	}
 	key := make([]byte, imageSigningKeySize)
 	if _, err := rand.Read(key); err != nil {
 		panic(err) // crypto/rand failing is unrecoverable
+	}
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		// unreadable but present: keep the file, use an in-memory key
+		utils.WarnLog("Image links: cannot read the signing key in %s (%v); links change on the next restart", dir, err)
+		return key
 	}
 	_ = os.MkdirAll(dir, 0o755)                              // the cache root may not exist yet; a failure surfaces below
 	tmp, err := os.CreateTemp(dir, imageSigningKeyFile+".*") // CreateTemp makes it 0600
@@ -78,6 +86,9 @@ func loadImageSigningKey(dir string) []byte {
 // imageSignature authenticates raw so /img only fetches URLs this server
 // handed out (the route is otherwise an open fetch-any-URL proxy).
 func (c *Config) imageSignature(raw string) string {
+	if len(c.imageKey) == 0 {
+		panic("image signing key not set") // never sign with a key anyone can compute
+	}
 	m := hmac.New(sha256.New, c.imageKey)
 	m.Write([]byte(raw))
 	return base64.RawURLEncoding.EncodeToString(m.Sum(nil)[:16])

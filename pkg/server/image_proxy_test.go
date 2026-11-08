@@ -34,11 +34,13 @@ import (
 	"github.com/lucasduport/stream-share/pkg/config"
 )
 
+var testImageKey = []byte("0123456789abcdef0123456789abcdef")
+
 func testImageProxyConfig() *Config {
 	return &Config{ProxyConfig: &config.ProxyConfig{
 		HostConfig:     &config.HostConfiguration{Hostname: "proxy.example.com"},
 		AdvertisedPort: 8080,
-	}, playlist: &m3u.Playlist{}, imageKey: []byte("0123456789abcdef0123456789abcdef")}
+	}, playlist: &m3u.Playlist{}, imageKey: testImageKey}
 }
 
 func testRequestContext() *gin.Context {
@@ -637,6 +639,22 @@ func TestLoadImageSigningKey(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions")
 	}
+	unreadable := t.TempDir()
+	kp := filepath.Join(unreadable, imageSigningKeyFile)
+	good := bytes.Repeat([]byte("k"), imageSigningKeySize)
+	if err := os.WriteFile(kp, good, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if k := loadImageSigningKey(unreadable); len(k) != imageSigningKeySize || bytes.Equal(k, good) {
+		t.Errorf("unreadable key file: want a fresh 32-byte in-memory key")
+	}
+	if err := os.Chmod(kp, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(kp); !bytes.Equal(b, good) {
+		t.Error("unreadable key file was overwritten")
+	}
+
 	ro := t.TempDir()
 	if err := os.Chmod(ro, 0o500); err != nil {
 		t.Fatal(err)

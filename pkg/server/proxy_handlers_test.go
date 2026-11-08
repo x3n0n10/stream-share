@@ -86,7 +86,8 @@ func TestM3U8ReverseProxyRewritesSegmentURIs(t *testing.T) {
 			XtreamUser:     "upstreamuser",
 			XtreamPassword: "upstreampass",
 		},
-		track: track,
+		track:    track,
+		imageKey: testImageKey,
 	}
 
 	w := httptest.NewRecorder()
@@ -129,7 +130,8 @@ func TestM3U8ReverseProxyRewritesAgainstPostRedirectURL(t *testing.T) {
 			XtreamUser:     "upstreamuser",
 			XtreamPassword: "upstreampass",
 		},
-		track: track,
+		track:    track,
+		imageKey: testImageKey,
 	}
 
 	w := httptest.NewRecorder()

@@ -30,6 +30,7 @@ import (
 func TestMarshallIntoRewritesTvgLogo(t *testing.T) {
 	c := &Config{
 		ProxyConfig: &config.ProxyConfig{},
+		imageKey:    testImageKey,
 		playlist: &m3u.Playlist{
 			Tracks: []m3u.Track{
 				{

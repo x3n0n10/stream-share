@@ -84,8 +84,8 @@ func (c *Config) xtreamRoutes(r *gin.RouterGroup) {
 	// the auth check (a request that doesn't have the right credentials in
 	// its path never reaches the handler at all). Some clients call these
 	// straight away without ever hitting player_api.php first, so
-	// recordRecentAuth needs to run here too -- otherwise /img stays locked
-	// for them even though they've proven valid credentials.
+	// recordRecentAuth runs here so these clients count as recently
+	// authenticated for the routes guarded by requireRecentAuth.
 	r.GET(fmt.Sprintf("/%s/%s/:id", c.XtreamUser.String(), c.XtreamPassword.String()), recordRecentAuth, c.xtreamStreamHandler)
 	r.GET(fmt.Sprintf("/live/%s/%s/:id", c.XtreamUser.String(), c.XtreamPassword.String()), recordRecentAuth, c.xtreamStreamLive)
 	r.GET(fmt.Sprintf("/timeshift/%s/%s/:duration/:start/:id", c.XtreamUser.String(), c.XtreamPassword.String()), recordRecentAuth, c.xtreamStreamTimeshift)
@@ -122,7 +122,7 @@ func (c *Config) trackProxy(ctx *gin.Context) {
 	}
 	track := &c.playlist.Tracks[i]
 	file := strings.TrimPrefix(ctx.Param("file"), "/")
-	trackConfig := &Config{ProxyConfig: c.ProxyConfig, track: track}
+	trackConfig := &Config{ProxyConfig: c.ProxyConfig, track: track, imageKey: c.imageKey}
 	if strings.HasSuffix(track.URI, ".m3u8") {
 		if file == "" || strings.Contains(file, "/") {
 			ctx.AbortWithStatus(http.StatusNotFound)

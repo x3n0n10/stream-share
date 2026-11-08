@@ -102,7 +102,7 @@ func shareTestServer(t *testing.T, capacity int, rules *filter.Config) *shareEnv
 	up := httptest.NewServer(p)
 	t.Cleanup(up.Close)
 
-	c := &Config{ProxyConfig: &config.ProxyConfig{XtreamBaseURL: up.URL, XtreamUser: "prov", XtreamPassword: "secret"}}
+	c := &Config{ProxyConfig: &config.ProxyConfig{XtreamBaseURL: up.URL, XtreamUser: "prov", XtreamPassword: "secret"}, imageKey: testImageKey}
 	c.PublicBaseURL = "https://tv.example"
 	if rules != nil {
 		set, err := filter.NewSet(*rules)

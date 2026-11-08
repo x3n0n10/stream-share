@@ -132,7 +132,7 @@ func TestXtreamHlsStreamRewritesManifestHost(t *testing.T) {
 		XtreamPassword: "upstreampass",
 		User:           "localuser",
 		Password:       "localpass",
-	}}
+	}, imageKey: testImageKey}
 
 	w := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(w)
@@ -182,7 +182,7 @@ func TestHlsXtreamStreamRewritesManifestHost(t *testing.T) {
 	c := &Config{ProxyConfig: &config.ProxyConfig{
 		HostConfig:     &config.HostConfiguration{Hostname: "proxy.example.com"},
 		AdvertisedPort: 8080,
-	}}
+	}, imageKey: testImageKey}
 
 	w := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(w)

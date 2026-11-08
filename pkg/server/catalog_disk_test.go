@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -287,10 +288,37 @@ func TestDiskCatalogRemoveDeletesFiles(t *testing.T) {
 	c := diskTestConfig(t, false, false)
 	d, _ := writeDiskCatalog(t, diskTestBody)
 	serveTest(t, false, func(ctx *gin.Context) error { return d.serveWhole(ctx, c, "get_vod_streams") })
-	d.remove()
+	removeCatalogFiles(d.raw)
 	if entries, _ := os.ReadDir(filepath.Dir(d.raw)); len(entries) != 0 {
 		t.Fatalf("remove left files: %v", entries)
 	}
+}
+
+// The pending grace deletion must not keep the replaced catalogue (and its
+// span index) in memory: only its file path may outlive the cache entry.
+func TestDiskModeGraceDoesNotPinOldCatalogue(t *testing.T) {
+	invalidateCatalogCache()
+	saved := catalogFileGrace
+	catalogFileGrace = time.Hour
+	t.Cleanup(func() { catalogFileGrace = saved })
+	c := diskModeConfig(newFakeCatalogProvider(t).srv.URL)
+	key := c.catalogKey("get_vod_streams")
+
+	decodeList(t, callPlayerAPI(t, c, "action=get_vod_streams"))
+	collected := make(chan struct{})
+	runtime.SetFinalizer(peekCatalogEntry(key).data.(*diskCatalog), func(*diskCatalog) { close(collected) })
+	if _, _, err := fetchCatalogEntry(key, true, c.catalogFetcher("get_vod_streams", nil)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20; i++ {
+		runtime.GC()
+		select {
+		case <-collected:
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	t.Fatal("replaced disk catalogue still reachable during the grace period")
 }
 
 func diskModeConfig(baseURL string) *Config {

@@ -259,9 +259,9 @@ func (d *diskCatalog) serveSlice(ctx *gin.Context, c *Config, action, categoryID
 	return w.Close()
 }
 
-// remove deletes the catalogue's files.
-func (d *diskCatalog) remove() {
-	for _, p := range []string{d.raw, d.raw + ".render", d.raw + ".render.gz"} {
+// removeCatalogFiles deletes a disk catalogue's files, given its raw path.
+func removeCatalogFiles(raw string) {
+	for _, p := range []string{raw, raw + ".render", raw + ".render.gz"} {
 		_ = os.Remove(p)
 	}
 }
@@ -306,7 +306,8 @@ func (c *Config) fetchCatalogToDisk(client *xtreamapi.Client, action string, q u
 	if e := peekCatalogEntry(key); e != nil {
 		if old, ok := e.data.(*diskCatalog); ok {
 			// shortcut: old files are kept for a fixed 10 min grace, not refcounted; switch to refcounting if a reader can hold an entry longer
-			time.AfterFunc(catalogFileGrace, old.remove)
+			raw := old.raw // only the path: holding old would keep its span index in memory for the whole grace
+			time.AfterFunc(catalogFileGrace, func() { removeCatalogFiles(raw) })
 		}
 	}
 	return data, nil

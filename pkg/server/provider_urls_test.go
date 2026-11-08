@@ -114,3 +114,28 @@ func TestLiveStreamReachesProviderWithEscapedPassword(t *testing.T) {
 		t.Fatalf("provider saw %q (status %d), want %q", seen, resp.StatusCode, want)
 	}
 }
+
+func TestHlsrUpstreamCarriesEscapedPassword(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var seen string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.URL.EscapedPath()
+	}))
+	t.Cleanup(up.Close)
+	upURL, _ := url.Parse(up.URL)
+	hlsChannelsRedirectURLLock.Lock()
+	hlsChannelsRedirectURL["chan1.m3u8"] = *upURL
+	hlsChannelsRedirectURLLock.Unlock()
+	t.Cleanup(resetHlsRedirectCache)
+
+	c := &Config{ProxyConfig: &config.ProxyConfig{XtreamUser: "user", XtreamPassword: "a#b"}}
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/hlsr/tok/user/a%23b/chan1/h/seg.ts", nil)
+	ctx.Params = gin.Params{{Key: "token", Value: "tok"}, {Key: "channel", Value: "chan1"}, {Key: "hash", Value: "h"}, {Key: "chunk", Value: "seg.ts"}}
+	c.xtreamHlsrStream(ctx)
+
+	if want := "/hlsr/tok/user/a%23b/chan1/h/seg.ts"; seen != want {
+		t.Fatalf("provider saw %q, want %q", seen, want)
+	}
+}

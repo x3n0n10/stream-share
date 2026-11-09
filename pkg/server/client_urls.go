@@ -24,13 +24,11 @@ import (
 	"strings"
 )
 
-// isFetchableURL reports whether s is, as a whole, an absolute http(s) URL
-// (so prose that merely contains a link is left alone).
+// isFetchableURL reports whether s, trimmed of surrounding blanks, is as a
+// whole an absolute http(s) URL (so prose that merely contains a link is left
+// alone). A space inside the path still makes a link a player would fetch.
 func isFetchableURL(s string) bool {
-	if strings.ContainsAny(s, " \t\r\n") {
-		return false
-	}
-	u, err := url.Parse(s)
+	u, err := url.Parse(strings.TrimSpace(s))
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
@@ -41,31 +39,39 @@ func isFetchableURL(s string) bool {
 // string, not a field list, covers fields nobody listed. The input is never
 // mutated (cached catalogue data is shared between requests).
 func (c *Config) clientSafeValue(base string, v interface{}) interface{} {
-	switch val := v.(type) {
-	case map[string]interface{}:
-		out := make(map[string]interface{}, len(val))
-		for k, item := range val {
-			if k != "direct_source" {
-				out[k] = c.clientSafeValue(base, item)
-			}
-		}
-		return out
-	case []interface{}:
-		out := make([]interface{}, len(val))
-		for i, item := range val {
-			out[i] = c.clientSafeValue(base, item)
-		}
-		return out
-	case string:
-		if !isFetchableURL(val) {
-			return val
-		}
-		path := c.proxyImagePath(val)
-		if strings.HasPrefix(val, base+path[:strings.Index(path, "?")+1]) {
-			return val // already one of our own /img links
-		}
-		return base + path
-	default:
-		return v
+	customEnd := strings.Trim(c.CustomEndpoint, "/")
+	if customEnd != "" {
+		customEnd = "/" + customEnd
 	}
+	own := base + customEnd + "/img?url="
+	var walk func(v interface{}) interface{}
+	walk = func(v interface{}) interface{} {
+		switch val := v.(type) {
+		case map[string]interface{}:
+			out := make(map[string]interface{}, len(val))
+			for k, item := range val {
+				if k != "direct_source" {
+					out[k] = walk(item)
+				}
+			}
+			return out
+		case []interface{}:
+			out := make([]interface{}, len(val))
+			for i, item := range val {
+				out[i] = walk(item)
+			}
+			return out
+		case string:
+			if !isFetchableURL(val) {
+				return val
+			}
+			if raw := strings.TrimSpace(val); !strings.HasPrefix(raw, own) {
+				return base + c.proxyImagePath(raw)
+			}
+			return val // already one of our own /img links
+		default:
+			return v
+		}
+	}
+	return walk(v)
 }

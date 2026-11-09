@@ -441,7 +441,7 @@ func (c *Config) servePlayerAPICatalog(ctx *gin.Context, action, key string, q u
 		}
 		// Nothing cached and the provider sent nothing usable: pass on what
 		// it sent (empty list, emergency categories), as before caching.
-		ctx.JSON(http.StatusOK, xtreamapi.ProcessResponse(re.data))
+		ctx.JSON(http.StatusOK, c.clientSafeValue(c.requestBaseURL(ctx), xtreamapi.ProcessResponse(re.data)))
 		return
 	}
 	if stale {

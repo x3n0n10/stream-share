@@ -259,10 +259,13 @@ icons and M3U logos already go through `/img`, but player_api does not:
 
 **Design.**
 - **One rule, no field list.** Every string value anywhere in a player_api
-  JSON answer that is, in its entirety, an absolute `http`/`https` URL
-  (parses with `url.Parse`, scheme http or https, non-empty host, no
-  whitespace) becomes `base + proxyImagePath(value)` (a signed `/img` link,
-  A1). Strings that merely contain a URL (e.g. a `plot`) are unchanged.
+  JSON answer that is, in its entirety once trimmed of surrounding blanks,
+  an absolute `http`/`https` URL (the trimmed value parses with `url.Parse`,
+  scheme http or https, non-empty host; a space inside the path, as in
+  `http://prov/logos/Sky Sports.png`, still counts) becomes
+  `base + proxyImagePath(trimmed value)` (a signed `/img` link, A1). Strings
+  that merely contain a URL (e.g. a `plot`, `See https://x.com`) are
+  unchanged.
   Every `direct_source` key is removed, at any depth. The rewrite never
   mutates its input (catalogue data is shared by concurrent requests); it
   returns copies of the maps and slices it changes.

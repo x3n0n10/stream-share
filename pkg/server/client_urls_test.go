@@ -84,8 +84,9 @@ func TestClientSafeValueDoesNotMutateInput(t *testing.T) {
 func TestIsFetchableURL(t *testing.T) {
 	for s, want := range map[string]bool{
 		"http://a.b/c.png": true, "https://a.b:8080/x?y=1": true,
-		"http://": false, "https:// broken": false, "ftp://x/y": false,
-		"http://a b/c": false, "/relative.png": false, "": false,
+		"http://prov/logos/Sky Sports.png": true, " http://a.b/c.png ": true,
+		"See https://x.com": false, "http://": false, "https:// broken": false,
+		"ftp://x/y": false, "http://a b/c": false, "/relative.png": false, "": false,
 	} {
 		if got := isFetchableURL(s); got != want {
 			t.Errorf("isFetchableURL(%q) = %v, want %v", s, got, want)
@@ -169,5 +170,19 @@ func TestClientSafeValueKeepsKnownShapes(t *testing.T) {
 	wantEpImage := "http://proxy.example.com:8080" + c.proxyImagePath("http://upstream.example.com/ep101.jpg")
 	if epInfo["movie_image"] != wantEpImage {
 		t.Errorf("nested episode movie_image = %v, want %v", epInfo["movie_image"], wantEpImage)
+	}
+}
+
+// A URL with a space in its path is still a link a player would fetch from
+// the provider, so it is rewritten too (trimmed of surrounding blanks).
+func TestClientSafeValueRewritesURLsWithSpaces(t *testing.T) {
+	c := testImageProxyConfig()
+	for in, raw := range map[string]string{
+		"http://prov/logos/Sky Sports.png": "http://prov/logos/Sky Sports.png",
+		"http://prov/l.png ":               "http://prov/l.png",
+	} {
+		if got, want := c.clientSafeValue("https://ss.example", in), "https://ss.example"+c.proxyImagePath(raw); got != want {
+			t.Errorf("clientSafeValue(%q) = %v, want %v", in, got, want)
+		}
 	}
 }

@@ -28,6 +28,9 @@ import (
 // whole an absolute http(s) URL (so prose that merely contains a link is left
 // alone). A space inside the path still makes a link a player would fetch.
 func isFetchableURL(s string) bool {
+	if !strings.Contains(s, "://") {
+		return false // cheap exit for the common non-URL value; a host needs "//"
+	}
 	u, err := url.Parse(strings.TrimSpace(s))
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }

@@ -377,6 +377,44 @@ func TestRewritePlaylistHosts(t *testing.T) {
 		}
 	})
 
+	t.Run("url-tvg and x-tvg-url point at our guide with the viewer's credentials", func(t *testing.T) {
+		in := `#EXTM3U url-tvg="http://provider.example.com/xmltv.php?username=PUSER&password=PPASS" x-tvg-url="http://provider.example.com/epg.xml" tvg-shift="0"` + "\n"
+		vctx := testRequestContext()
+		vctx.Request.URL.RawQuery = "username=viewer&password=s%26cret"
+		c := testImageProxyConfig()
+		c.XtreamBaseURL = "http://provider.example.com"
+		guide := `"http://proxy.example.com:8080/xmltv.php?password=s%26cret&username=viewer"`
+		want := `#EXTM3U url-tvg=` + guide + ` x-tvg-url=` + guide + ` tvg-shift="0"` + "\n"
+		if out := rewriteHostsString(t, c, vctx, in); out != want {
+			t.Errorf("header = %q, want %q", out, want)
+		}
+		// No viewer credentials (or no guide served): the attributes go.
+		if out := rewriteHostsString(t, c, ctx, in); out != `#EXTM3U tvg-shift="0"`+"\n" {
+			t.Errorf("header without credentials = %q", out)
+		}
+	})
+
+	t.Run("every URL attribute on #EXTINF goes through /img", func(t *testing.T) {
+		in := `#EXTINF:-1 tvg-id="ch" tvg-url="http://provider.example.com/epg/ch" catchup-source="http://provider.example.com/ts/{start}.ts" tvg-logo="http://provider.example.com/l.png",Ch` + "\r\n"
+		img := func(raw string) string { return `"http://proxy.example.com:8080` + c.proxyImagePath(raw) + `"` }
+		want := `#EXTINF:-1 tvg-id="ch" tvg-url=` + img("http://provider.example.com/epg/ch") +
+			` catchup-source=` + img("http://provider.example.com/ts/{start}.ts") +
+			` tvg-logo=` + img("http://provider.example.com/l.png") + ",Ch\r\n"
+		if out := rewriteHostsString(t, c, ctx, in); out != want {
+			t.Errorf("EXTINF = %q, want %q", out, want)
+		}
+	})
+
+	t.Run("URLs in other directives go through /img", func(t *testing.T) {
+		in := "#EXTVLCOPT:http-referrer=http://provider.example.com/\n#KODIPROP:inputstream.adaptive.license_key=https://lic.example/k?x=1\n#EXTGRP:News\n"
+		want := "#EXTVLCOPT:http-referrer=http://proxy.example.com:8080" + c.proxyImagePath("http://provider.example.com/") +
+			"\n#KODIPROP:inputstream.adaptive.license_key=http://proxy.example.com:8080" + c.proxyImagePath("https://lic.example/k?x=1") +
+			"\n#EXTGRP:News\n"
+		if out := rewriteHostsString(t, c, ctx, in); out != want {
+			t.Errorf("directives = %q, want %q", out, want)
+		}
+	})
+
 	t.Run("a non-# line not starting with / is left alone", func(t *testing.T) {
 		in := "not-a-path-or-comment"
 		out := rewriteHostsString(t, c, ctx, in)
@@ -387,7 +425,11 @@ func TestRewritePlaylistHosts(t *testing.T) {
 }
 
 // legacyRewritePlaylistHosts is the pre-streaming implementation, kept as the
-// golden oracle for rewritePlaylistHostsTo.
+// golden oracle for how rewritePlaylistHostsTo splits and joins lines (CR/LF,
+// a missing final newline, very long lines). Its inputs carry tvg-logo as
+// their only URL attribute; headers, other attributes and directives are
+// covered by TestRewritePlaylistHosts. It keeps a rewritten line's CR, as the
+// streamed form now does for every # line.
 func (c *Config) legacyRewritePlaylistHosts(ctx *gin.Context, body []byte) []byte {
 	base := c.requestBaseURL(ctx)
 	customEnd := strings.Trim(c.CustomEndpoint, "/")
@@ -407,7 +449,7 @@ func (c *Config) legacyRewritePlaylistHosts(ctx *gin.Context, body []byte) []byt
 					return base + c.proxyImagePath(raw)
 				}
 				return raw
-			})
+			}) + line[len(trimmed):]
 		case strings.HasPrefix(trimmed, "#"):
 		case strings.HasPrefix(trimmed, "/"):
 			lines[i] = base + trimmed

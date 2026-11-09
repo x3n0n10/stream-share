@@ -272,13 +272,15 @@ func (c *Config) requestBaseURL(ctx *gin.Context) string {
 	return fmt.Sprintf("%s://%s", protocol, host)
 }
 
-// rewritePlaylistHostsTo makes an M3U body client-ready by turning every track
-// URI and tvg-logo into an absolute URL on the current request's base URL.
-// marshallInto only emits relative values, so a value starting with "/" is
-// ours to prefix as is. The streamed get.php rewrite (m3u_stream_rewrite.go)
-// leaves the provider's absolute URLs in place, so those are mapped here the
-// way replacePath / proxyImagePath would have: a track keeps just its path
-// under the custom endpoint, a logo goes through /img.
+// rewritePlaylistHostsTo makes an M3U body client-ready: every URL in it ends
+// up on the current request's base URL. marshallInto only emits relative
+// values, so a track or tvg-logo starting with "/" is ours to prefix as is.
+// The streamed get.php rewrite (m3u_stream_rewrite.go) leaves the provider's
+// absolute URLs in place, so those are mapped here: a track keeps just its
+// path under the custom endpoint; url-tvg / x-tvg-url (whose provider value
+// carries the provider's credentials) become this server's own guide for the
+// viewer's credentials, or go when there are none; any other http(s) URL in an
+// attribute or directive goes through /img.
 // It works line by line, so a large playlist is never held in memory;
 // ReadString has no line-length limit.
 func (c *Config) rewritePlaylistHostsTo(ctx *gin.Context, r io.Reader, w io.Writer) error {
@@ -286,6 +288,22 @@ func (c *Config) rewritePlaylistHostsTo(ctx *gin.Context, r io.Reader, w io.Writ
 	customEnd := strings.Trim(c.CustomEndpoint, "/")
 	if customEnd != "" {
 		customEnd = "/" + customEnd
+	}
+	var guide string
+	if user := ctx.Request.FormValue("username"); user != "" && c.XtreamBaseURL != "" { // only Xtream mode serves /xmltv.php
+		guide = base + customEnd + "/xmltv.php?" + url.Values{"username": {user}, "password": {ctx.Request.FormValue("password")}}.Encode()
+	}
+	proxied := func(raw string) string { return base + c.proxyImagePath(strings.TrimSpace(raw)) }
+	attr := func(key, value string) (string, bool) {
+		switch {
+		case key == "url-tvg" || key == "x-tvg-url":
+			return guide, guide != ""
+		case key == "tvg-logo" && strings.HasPrefix(value, "/"):
+			return base + value, true
+		case isFetchableURL(value):
+			return proxied(value), true
+		}
+		return value, true
 	}
 	br := bufio.NewReader(r)
 	bw := bufio.NewWriter(w)
@@ -295,17 +313,10 @@ func (c *Config) rewritePlaylistHostsTo(ctx *gin.Context, r io.Reader, w io.Writ
 		line = strings.TrimSuffix(line, "\n")
 		trimmed := strings.TrimRight(line, "\r")
 		switch {
-		case strings.HasPrefix(trimmed, "#EXTINF") && strings.Contains(trimmed, "tvg-logo="):
-			line = rewriteQuotedURI(trimmed, "tvg-logo=", func(raw string) string {
-				if strings.HasPrefix(raw, "/") {
-					return base + raw
-				}
-				if isHTTPURL(raw) {
-					return base + c.proxyImagePath(raw)
-				}
-				return raw
-			})
+		case strings.HasPrefix(trimmed, "#EXTM3U") || strings.HasPrefix(trimmed, "#EXTINF"):
+			line = rewriteM3UAttrs(trimmed, attr) + line[len(trimmed):]
 		case strings.HasPrefix(trimmed, "#"):
+			line = rewriteEmbeddedURLs(trimmed, proxied) + line[len(trimmed):]
 		case strings.HasPrefix(trimmed, "/"):
 			line = base + trimmed
 		case isHTTPURL(trimmed):
@@ -344,6 +355,62 @@ func (c *Config) streamPlaylist(ctx *gin.Context, path string) {
 		utils.WarnLog("playlist stream aborted: %v", err) // headers are already sent
 	}
 	_ = w.Close()
+}
+
+// rewriteM3UAttrs passes every key="value" attribute of an #EXTM3U/#EXTINF
+// line through fn, which returns the new value, or false to drop the attribute.
+func rewriteM3UAttrs(line string, fn func(key, value string) (string, bool)) string {
+	var b strings.Builder
+	for {
+		eq := strings.Index(line, `="`)
+		if eq < 0 {
+			break
+		}
+		end := strings.IndexByte(line[eq+2:], '"')
+		if end < 0 {
+			break
+		}
+		end += eq + 2
+		k := strings.LastIndexAny(line[:eq], " \t") + 1
+		if value, keep := fn(line[k:eq], line[eq+2:end]); keep {
+			b.WriteString(line[:eq+2])
+			b.WriteString(value)
+			b.WriteByte('"')
+		} else {
+			b.WriteString(strings.TrimRight(line[:k], " \t"))
+		}
+		line = line[end+1:]
+	}
+	b.WriteString(line)
+	return b.String()
+}
+
+// rewriteEmbeddedURLs replaces each http(s) URL in line (up to the next blank
+// or quote) that isFetchableURL accepts with fn(url).
+func rewriteEmbeddedURLs(line string, fn func(string) string) string {
+	var b strings.Builder
+	for {
+		i := strings.Index(line, "http://")
+		if j := strings.Index(line, "https://"); j >= 0 && (i < 0 || j < i) {
+			i = j
+		}
+		if i < 0 {
+			break
+		}
+		n := strings.IndexAny(line[i:], " \t\"'")
+		if n < 0 {
+			n = len(line) - i
+		}
+		u := line[i : i+n]
+		b.WriteString(line[:i])
+		if isFetchableURL(u) {
+			u = fn(u)
+		}
+		b.WriteString(u)
+		line = line[i+n:]
+	}
+	b.WriteString(line)
+	return b.String()
 }
 
 func isHTTPURL(s string) bool {

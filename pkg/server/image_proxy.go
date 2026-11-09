@@ -120,47 +120,6 @@ func (c *Config) proxyImageURL(ctx *gin.Context, raw string) string {
 	return c.requestBaseURL(ctx) + path
 }
 
-// rewriteImageFields walks a JSON-decoded player_api response (nested
-// map[string]interface{} / []interface{}) and rewrites every known
-// upstream-image field through proxyImageURL, in place, at any nesting
-// depth. direct_source is deleted rather than rewritten: a player that
-// uses it bypasses c.sessionManager's multiplexing entirely, and hiding
-// the URL wouldn't restore that, so it's dropped to force a fall back to
-// the session-managed stream_id play URL instead.
-func (c *Config) rewriteImageFields(ctx *gin.Context, v interface{}) interface{} {
-	switch val := v.(type) {
-	case map[string]interface{}:
-		for key, fieldVal := range val {
-			switch key {
-			case "stream_icon", "cover", "movie_image":
-				if s, ok := fieldVal.(string); ok {
-					val[key] = c.proxyImageURL(ctx, s)
-				}
-			case "backdrop_path":
-				if arr, ok := fieldVal.([]interface{}); ok {
-					for i, item := range arr {
-						if s, ok := item.(string); ok {
-							arr[i] = c.proxyImageURL(ctx, s)
-						}
-					}
-				}
-			case "direct_source":
-				delete(val, key)
-			default:
-				val[key] = c.rewriteImageFields(ctx, fieldVal)
-			}
-		}
-		return val
-	case []interface{}:
-		for i, item := range val {
-			val[i] = c.rewriteImageFields(ctx, item)
-		}
-		return val
-	default:
-		return v
-	}
-}
-
 // rewriteM3U8 rewrites every segment, key, and sub-playlist URI in an HLS
 // manifest body to point through this proxy instead of the upstream
 // provider. Each URI is resolved against base (the manifest's own fetch

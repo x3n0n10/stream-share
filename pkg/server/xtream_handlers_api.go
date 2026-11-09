@@ -316,7 +316,7 @@ func (c *Config) xtreamPlayerAPI(ctx *gin.Context, q url.Values) {
 		processedResp = c.seriesEpisodeDedup(processedResp)
 	}
 
-	processedResp = c.rewriteImageFields(ctx, processedResp)
+	processedResp = c.clientSafeValue(c.requestBaseURL(ctx), processedResp)
 
 	if config.CacheFolder != "" && utils.IsDebugLogEnabled() {
 		readableJSON, _ := json.Marshal(processedResp)

@@ -240,6 +240,57 @@ setting:
   → `ClientIP()` is `192.0.2.10`; flag on, same header from `10.0.0.5` →
   `1.2.3.4`; flag on, header from a public peer → the peer.
 
+### A10. Every URL a client receives points at StreamShare (owner, 2026-11-09)
+
+**Owner requirement:** every call a client makes goes through StreamShare.
+Players must never receive an address of the provider or any third party.
+
+**Problem (measured on the owner's instance with the PR A build).** EPG
+icons and M3U logos already go through `/img`, but player_api does not:
+- the catalogue lists served from the catalogue cache (`get_live_streams`,
+  `get_vod_streams`, `get_series`) are never rewritten: 121,613
+  `stream_icon` (VOD), 29,351 `cover` + 27,472 `backdrop_path` (series) and
+  21,419 `stream_icon` (live) point at the provider, image.tmdb.org,
+  Amazon and dozens of other hosts; `direct_source` is not stripped;
+- the uncached actions are rewritten by `rewriteImageFields`
+  (`pkg/server/image_proxy.go:130`) from a fixed field list that misses
+  fields such as `info.cover_big`, `info.kinopoisk_url` (`get_vod_info`) and
+  `seasons[].cover_big` (`get_series_info`).
+
+**Design.**
+- **One rule, no field list.** Every string value anywhere in a player_api
+  JSON answer that is, in its entirety, an absolute `http`/`https` URL
+  (parses with `url.Parse`, scheme http or https, non-empty host, no
+  whitespace) becomes `base + proxyImagePath(value)` (a signed `/img` link,
+  A1). Strings that merely contain a URL (e.g. a `plot`) are unchanged.
+  Every `direct_source` key is removed, at any depth. The rewrite never
+  mutates its input (catalogue data is shared by concurrent requests); it
+  returns copies of the maps and slices it changes.
+- **Everywhere.** The uncached player_api path uses the new rule instead of
+  `rewriteImageFields` (which is deleted). The catalogue render
+  (`renderCatalog` and the disk render) applies it per item, in both storage
+  modes, for whole lists and category slices.
+- **Per base URL.** The rewritten link contains the client-facing base URL
+  (`requestBaseURL`: `PUBLIC_BASE_URL`, else forwarded/Host headers). Each
+  catalogue entry keeps its rendered output per base URL, at most 4; adding
+  a fifth drops the oldest (disk mode deletes its files). Memory mode and
+  disk mode stay byte-identical for the same base URL.
+- **README:** recommend setting `PUBLIC_BASE_URL` behind a reverse proxy
+  (one render per catalogue, and clients cannot vary the base through
+  `Host`/`X-Forwarded-Host`).
+- **Cost (accepted):** each rewritten URL grows by ~120 bytes; at the owner's
+  size ~25 MB more rendered output per base URL (on disk in disk mode, in
+  RAM in memory mode). Signing ~230k URLs per refresh takes well under a
+  second.
+- Tests: each field from the measurement (`stream_icon`, `cover`,
+  `backdrop_path` entries, `cover_big`, `kinopoisk_url`, a nested
+  `seasons[].cover_big`) is rewritten; a `plot` containing a URL is not;
+  `direct_source` is gone at any depth; the input value is unchanged after
+  the rewrite; two different `Host` headers get two renders with their own
+  base; a fifth base evicts the oldest (disk files removed); memory and disk
+  mode give identical bytes per base; disk-mode RSS does not regress
+  (`tools/memprobe`).
+
 ## PR B — readability and cleanup
 
 Branch `refactor/readability`, created from PR A's head so the two never

@@ -85,11 +85,23 @@ func TestRewriteXMLTVIcons(t *testing.T) {
 		}
 	})
 
-	t.Run("url element left untouched", func(t *testing.T) {
-		in := `<tv><channel id="1"><url>http://upstream.example.com/info</url></channel></tv>`
+	t.Run("element text that is a URL, src and href attributes go through /img", func(t *testing.T) {
+		in := `<tv><programme channel="1"><title>See https://x.example</title>` +
+			`<url>https://www.tvguide.example/p/1</url><image> https://img.example/p.jpg </image><url>not a link</url>` +
+			`<review type="url" href="http://rev.example/r">http://rev.example/full</review></programme></tv>`
 		out := string(c.rewriteXMLTVIcons(ctx, []byte(in)))
-		if !strings.Contains(out, "http://upstream.example.com/info") {
-			t.Errorf("output %q should still contain the untouched <url> content", out)
+		img := func(raw string) string {
+			return "http://proxy.example.com:8080" + strings.ReplaceAll(c.proxyImagePath(raw), "&", "&amp;")
+		}
+		for _, want := range []string{
+			"<url>" + img("https://www.tvguide.example/p/1") + "</url>",
+			"<image>" + img("https://img.example/p.jpg") + "</image>",
+			`href="` + img("http://rev.example/r") + `">` + img("http://rev.example/full") + "</review>",
+			"<title>See https://x.example</title>", "<url>not a link</url>",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output %q does not contain %q", out, want)
+			}
 		}
 	})
 

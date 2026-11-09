@@ -273,11 +273,28 @@ icons and M3U logos already go through `/img`, but player_api does not:
   `rewriteImageFields` (which is deleted). The catalogue render
   (`renderCatalog` and the disk render) applies it per item, in both storage
   modes, for whole lists and category slices.
+- **M3U (get.php, apiget, the M3U route).** `url-tvg` and `x-tvg-url` (on
+  `#EXTM3U` or `#EXTINF`; the provider's value carries the provider's
+  credentials) become this server's own guide,
+  `base + customEnd + "/xmltv.php?username=…&password=…"` with the requesting
+  viewer's credentials, and are dropped when the request has none or the
+  server is not in Xtream mode (no `/xmltv.php`). Every other quoted
+  attribute on `#EXTM3U`/`#EXTINF` that is a URL by the rule above
+  (`catchup-source`, `tvg-url`, `tvg-logo`, …) and every http(s) URL inside
+  other directive lines (`#EXTVLCOPT:http-referrer=…`, `#KODIPROP:…`) becomes
+  a signed `/img` link. Track lines keep their own mapping.
+- **XMLTV (xmltv.php).** A `src` or `href` attribute on any element, and
+  element text that is wholly a URL by the rule above (`<url>`, `<image>`,
+  `<review type="url">`), becomes a signed `/img` link; text that merely
+  contains a link is unchanged.
 - **Per base URL.** The rewritten link contains the client-facing base URL
   (`requestBaseURL`: `PUBLIC_BASE_URL`, else forwarded/Host headers). Each
   catalogue entry keeps its rendered output per base URL, at most 4; adding
   a fifth drops the oldest (disk mode deletes its files). Memory mode and
-  disk mode stay byte-identical for the same base URL.
+  disk mode stay byte-identical for the same base URL. One render runs at a
+  time per catalogue; a base already rendered is served without waiting for
+  it, and only the first render feeds the channel index and upstream
+  catchup map.
 - **README:** recommend setting `PUBLIC_BASE_URL` behind a reverse proxy
   (one render per catalogue, and clients cannot vary the base through
   `Host`/`X-Forwarded-Host`).

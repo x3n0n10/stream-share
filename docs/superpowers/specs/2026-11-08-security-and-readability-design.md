@@ -282,7 +282,15 @@ icons and M3U logos already go through `/img`, but player_api does not:
   attribute on `#EXTM3U`/`#EXTINF` that is a URL by the rule above
   (`catchup-source`, `tvg-url`, `tvg-logo`, …) and every http(s) URL inside
   other directive lines (`#EXTVLCOPT:http-referrer=…`, `#KODIPROP:…`) becomes
-  a signed `/img` link. Track lines keep their own mapping.
+  a signed `/img` link, except a URL on the Xtream provider's host: it
+  becomes `base + customEnd + <rest after the host, verbatim>` with the
+  provider's credentials swapped for the local ones, so catchup templates
+  keep their `{start}`/`${start}` placeholders and reach our own
+  `/timeshift` route (a provider-host `tvg-logo` keeps `/img` unless it
+  carries credentials). A directive URL ends at a blank, quote or `|`.
+  Track lines keep their own mapping. In player_api, a provider-host URL
+  carrying the provider's credentials is mapped the same way instead of
+  going into an `/img` link.
 - **XMLTV (xmltv.php).** A `src` or `href` attribute on any element, and
   element text that is wholly a URL by the rule above (`<url>`, `<image>`,
   `<review type="url">`), becomes a signed `/img` link; text that merely

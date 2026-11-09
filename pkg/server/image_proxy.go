@@ -293,13 +293,28 @@ func (c *Config) rewritePlaylistHostsTo(ctx *gin.Context, r io.Reader, w io.Writ
 	if user := ctx.Request.FormValue("username"); user != "" && c.XtreamBaseURL != "" { // only Xtream mode serves /xmltv.php
 		guide = base + customEnd + "/xmltv.php?" + url.Values{"username": {user}, "password": {ctx.Request.FormValue("password")}}.Encode()
 	}
-	proxied := func(raw string) string { return base + c.proxyImagePath(strings.TrimSpace(raw)) }
+	// A provider URL goes to our own routes (catchup templates keep their
+	// placeholders, credentials become the local ones); anything else via /img.
+	proxied := func(raw string) string {
+		raw = strings.TrimSpace(raw)
+		if local, _, ok := c.localizeProviderURL(base, raw); ok {
+			return local
+		}
+		return base + c.proxyImagePath(raw)
+	}
 	attr := func(key, value string) (string, bool) {
 		switch {
 		case key == "url-tvg" || key == "x-tvg-url":
 			return guide, guide != ""
 		case key == "tvg-logo" && strings.HasPrefix(value, "/"):
 			return base + value, true
+		case key == "tvg-logo" && isFetchableURL(value):
+			// We have no route for a provider's images: /img, unless it carries credentials.
+			raw := strings.TrimSpace(value)
+			if local, creds, _ := c.localizeProviderURL(base, raw); creds {
+				return local, true
+			}
+			return base + c.proxyImagePath(raw), true
 		case isFetchableURL(value):
 			return proxied(value), true
 		}
@@ -385,8 +400,8 @@ func rewriteM3UAttrs(line string, fn func(key, value string) (string, bool)) str
 	return b.String()
 }
 
-// rewriteEmbeddedURLs replaces each http(s) URL in line (up to the next blank
-// or quote) that isFetchableURL accepts with fn(url).
+// rewriteEmbeddedURLs replaces each http(s) URL in line (up to the next blank,
+// quote or |) that isFetchableURL accepts with fn(url).
 func rewriteEmbeddedURLs(line string, fn func(string) string) string {
 	var b strings.Builder
 	for {
@@ -397,7 +412,7 @@ func rewriteEmbeddedURLs(line string, fn func(string) string) string {
 		if i < 0 {
 			break
 		}
-		n := strings.IndexAny(line[i:], " \t\"'")
+		n := strings.IndexAny(line[i:], " \t\"'|") // a | starts Kodi's header suffix
 		if n < 0 {
 			n = len(line) - i
 		}

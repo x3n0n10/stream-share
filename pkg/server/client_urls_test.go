@@ -21,7 +21,9 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -184,5 +186,25 @@ func TestClientSafeValueRewritesURLsWithSpaces(t *testing.T) {
 		if got, want := c.clientSafeValue("https://ss.example", in), "https://ss.example"+c.proxyImagePath(raw); got != want {
 			t.Errorf("clientSafeValue(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+// A provider URL carrying the provider's credentials maps onto this server's
+// own route with the local ones, never into an /img link; a provider logo
+// without credentials still goes through /img.
+func TestClientSafeValueLocalizesProviderCredentialURLs(t *testing.T) {
+	c := providerHostConfig()
+	got := c.clientSafeValue("https://ss.example", map[string]interface{}{
+		"stream_url": "http://prov:8080/movie/PU/PP/77.mkv",
+		"icon":       "http://prov:8080/images/l.png",
+	}).(map[string]interface{})
+	if want := "https://ss.example/anti/movie/localuser/localpass/77.mkv"; got["stream_url"] != want {
+		t.Errorf("stream_url = %v, want %v", got["stream_url"], want)
+	}
+	if want := "https://ss.example" + c.proxyImagePath("http://prov:8080/images/l.png"); got["icon"] != want {
+		t.Errorf("icon = %v, want %v", got["icon"], want)
+	}
+	if strings.Contains(fmt.Sprint(got), "PP") {
+		t.Errorf("provider credentials leaked: %v", got)
 	}
 }

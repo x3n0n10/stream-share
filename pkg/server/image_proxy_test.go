@@ -43,6 +43,15 @@ func testImageProxyConfig() *Config {
 	}, playlist: &m3u.Playlist{}, imageKey: testImageKey}
 }
 
+// providerHostConfig is an Xtream setup whose provider is prov:8080 with
+// credentials PU/PP, served locally as localuser/localpass under /anti.
+func providerHostConfig() *Config {
+	c := testImageProxyConfig()
+	c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword = "http://prov:8080", "PU", "PP"
+	c.User, c.Password, c.CustomEndpoint = "localuser", "localpass", "/anti"
+	return c
+}
+
 func testRequestContext() *gin.Context {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -394,21 +403,45 @@ func TestRewritePlaylistHosts(t *testing.T) {
 		}
 	})
 
-	t.Run("every URL attribute on #EXTINF goes through /img", func(t *testing.T) {
-		in := `#EXTINF:-1 tvg-id="ch" tvg-url="http://provider.example.com/epg/ch" catchup-source="http://provider.example.com/ts/{start}.ts" tvg-logo="http://provider.example.com/l.png",Ch` + "\r\n"
+	t.Run("third-party URL attributes on #EXTINF go through /img", func(t *testing.T) {
+		in := `#EXTINF:-1 tvg-id="ch" tvg-url="http://other.example/epg/ch" catchup-source="http://other.example/x/{start}" tvg-logo="http://provider.example.com/l.png",Ch` + "\r\n"
 		img := func(raw string) string { return `"http://proxy.example.com:8080` + c.proxyImagePath(raw) + `"` }
-		want := `#EXTINF:-1 tvg-id="ch" tvg-url=` + img("http://provider.example.com/epg/ch") +
-			` catchup-source=` + img("http://provider.example.com/ts/{start}.ts") +
+		want := `#EXTINF:-1 tvg-id="ch" tvg-url=` + img("http://other.example/epg/ch") +
+			` catchup-source=` + img("http://other.example/x/{start}") +
 			` tvg-logo=` + img("http://provider.example.com/l.png") + ",Ch\r\n"
 		if out := rewriteHostsString(t, c, ctx, in); out != want {
 			t.Errorf("EXTINF = %q, want %q", out, want)
 		}
 	})
 
-	t.Run("URLs in other directives go through /img", func(t *testing.T) {
-		in := "#EXTVLCOPT:http-referrer=http://provider.example.com/\n#KODIPROP:inputstream.adaptive.license_key=https://lic.example/k?x=1\n#EXTGRP:News\n"
+	t.Run("provider catchup templates map onto our routes with local credentials, placeholders verbatim", func(t *testing.T) {
+		pc := providerHostConfig()
+		local := "http://proxy.example.com:8080/anti"
+		for in, want := range map[string]string{
+			"http://prov:8080/timeshift/PU/PP/{duration}/{start}/123.ts":                              local + "/timeshift/localuser/localpass/{duration}/{start}/123.ts",
+			"https://prov:8080/timeshift/PU/PP/${duration}/${start}/123.ts":                           local + "/timeshift/localuser/localpass/${duration}/${start}/123.ts",
+			"http://prov:8080/streaming/timeshift.php?username=PU&password=PP&stream=123&start={utc}": local + "/streaming/timeshift.php?username=localuser&password=localpass&stream=123&start={utc}",
+		} {
+			line := `#EXTINF:-1 catchup="default" catchup-source="` + in + `",Ch`
+			out := rewriteHostsString(t, pc, ctx, line)
+			if out != `#EXTINF:-1 catchup="default" catchup-source="`+want+`",Ch` {
+				t.Errorf("catchup-source %q -> %q, want %q", in, out, want)
+			}
+			if strings.Contains(out, "PP") || strings.Contains(out, "prov:8080") {
+				t.Errorf("provider host or credentials leaked: %q", out)
+			}
+		}
+		// A provider logo has no route of ours, so it still goes through /img.
+		logo := `#EXTINF:-1 tvg-logo="http://prov:8080/images/l.png",Ch`
+		if out, want := rewriteHostsString(t, pc, ctx, logo), `#EXTINF:-1 tvg-logo="http://proxy.example.com:8080`+pc.proxyImagePath("http://prov:8080/images/l.png")+`",Ch`; out != want {
+			t.Errorf("provider logo = %q, want %q", out, want)
+		}
+	})
+
+	t.Run("URLs in other directives go through /img, a URL ends at |", func(t *testing.T) {
+		in := "#EXTVLCOPT:http-referrer=http://provider.example.com/\n#KODIPROP:inputstream.adaptive.license_key=https://lic.example/k|Content-Type=x|R{SSM}|\n#EXTGRP:News\n"
 		want := "#EXTVLCOPT:http-referrer=http://proxy.example.com:8080" + c.proxyImagePath("http://provider.example.com/") +
-			"\n#KODIPROP:inputstream.adaptive.license_key=http://proxy.example.com:8080" + c.proxyImagePath("https://lic.example/k?x=1") +
+			"\n#KODIPROP:inputstream.adaptive.license_key=http://proxy.example.com:8080" + c.proxyImagePath("https://lic.example/k") + "|Content-Type=x|R{SSM}|" +
 			"\n#EXTGRP:News\n"
 		if out := rewriteHostsString(t, c, ctx, in); out != want {
 			t.Errorf("directives = %q, want %q", out, want)

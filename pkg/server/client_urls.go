@@ -68,13 +68,76 @@ func (c *Config) clientSafeValue(base string, v interface{}) interface{} {
 			if !isFetchableURL(val) {
 				return val
 			}
-			if raw := strings.TrimSpace(val); !strings.HasPrefix(raw, own) {
-				return base + c.proxyImagePath(raw)
+			raw := strings.TrimSpace(val)
+			if strings.HasPrefix(raw, own) {
+				return val // already one of our own /img links
 			}
-			return val // already one of our own /img links
+			if local, creds, _ := c.localizeProviderURL(base, raw); creds {
+				return local // never put the provider's credentials into an /img link
+			}
+			return base + c.proxyImagePath(raw)
 		default:
 			return v
 		}
 	}
 	return walk(v)
+}
+
+// localizeProviderURL maps an http(s) URL on the Xtream provider's host (either
+// scheme) onto this server: base + custom endpoint + everything after the host,
+// verbatim so {start}/${start} placeholders survive, with the provider's
+// credentials (path segments or username/password query values) swapped for
+// the local ones, so the request lands on our own routes and session manager.
+// ok is false for any other host; creds reports whether credentials were swapped.
+func (c *Config) localizeProviderURL(base, s string) (local string, creds, ok bool) {
+	prov, err := url.Parse(c.XtreamBaseURL)
+	if err != nil || prov.Host == "" {
+		return "", false, false
+	}
+	i := strings.Index(s, "://")
+	if i < 0 {
+		return "", false, false
+	}
+	scheme, rest := strings.ToLower(s[:i]), s[i+3:]
+	host := rest
+	if j := strings.IndexAny(rest, "/?#"); j >= 0 {
+		host, rest = rest[:j], rest[j:]
+	} else {
+		rest = ""
+	}
+	if (scheme != "http" && scheme != "https") || !strings.EqualFold(host, prov.Host) {
+		return "", false, false
+	}
+	xu, xp := c.XtreamUser.String(), c.XtreamPassword.String()
+	lu, lp := c.User.String(), c.Password.String()
+	path, query, hasQuery := strings.Cut(rest, "?")
+	newPath := path
+	// As rewriteM3UURLLine: each credential as its own path segment.
+	for _, cred := range [][2]string{{xu, lu}, {xp, lp}} {
+		if cred[0] == "" {
+			continue
+		}
+		for _, from := range []string{cred[0], url.PathEscape(cred[0])} {
+			newPath = strings.ReplaceAll(newPath, "/"+from+"/", "/"+url.PathEscape(cred[1])+"/")
+		}
+	}
+	creds = newPath != path
+	if hasQuery {
+		// Edited pair by pair, not re-encoded, so placeholders stay as they are.
+		pairs := strings.Split(query, "&")
+		for k, pair := range pairs {
+			for _, cred := range [][3]string{{"username", xu, lu}, {"password", xp, lp}} {
+				if cred[1] != "" && (pair == cred[0]+"="+cred[1] || pair == cred[0]+"="+url.QueryEscape(cred[1])) {
+					pairs[k] = cred[0] + "=" + url.QueryEscape(cred[2])
+					creds = true
+				}
+			}
+		}
+		newPath += "?" + strings.Join(pairs, "&")
+	}
+	customEnd := strings.Trim(c.CustomEndpoint, "/")
+	if customEnd != "" {
+		customEnd = "/" + customEnd
+	}
+	return base + customEnd + newPath, creds, true
 }

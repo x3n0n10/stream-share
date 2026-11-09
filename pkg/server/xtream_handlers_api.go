@@ -416,7 +416,7 @@ func usableCatalog(resp interface{}) bool {
 // servePlayerAPICatalog answers a catalogue list action from the catalog
 // cache: fresh when possible, otherwise the provider's last good answer while a
 // background refresh runs. The JSON sent to players is encoded once per cached
-// catalogue, not per request.
+// catalogue and base URL, not per request.
 func (c *Config) servePlayerAPICatalog(ctx *gin.Context, action, key string, q url.Values) {
 	utils.InfoLog("Action\t%s requested by %s", action, ctx.ClientIP())
 	categoryID := strings.TrimSpace(q.Get("category_id"))
@@ -459,13 +459,15 @@ func (c *Config) servePlayerAPICatalog(ctx *gin.Context, action, key string, q u
 	}
 }
 
-// renderCatalog is the JSON a player receives for a catalogue list. whole is
-// false for a category slice: the channel-name index and the upstream-catchup
-// map are rebuilt from whatever list they are given, so they must only ever
-// see the whole one. Every URL in it points at base (see clientSafeValue).
-func (c *Config) renderCatalog(action string, data interface{}, whole bool, base string) ([]byte, error) {
+// renderCatalog is the JSON a player receives for a catalogue list. harvest
+// is set only for the first render of a whole list: the channel-name index and
+// the upstream-catchup map are rebuilt from whatever list they are given, so
+// they must only see the whole one, and once is enough (a slice or a further
+// base URL leaves them alone). Every URL in it points at base (see
+// clientSafeValue).
+func (c *Config) renderCatalog(action string, data interface{}, harvest bool, base string) ([]byte, error) {
 	processed := xtreamapi.ProcessResponse(data)
-	if whole && action == "get_live_streams" {
+	if harvest && action == "get_live_streams" {
 		// Names come from the full list: /status and logs must still name
 		// a channel the catalogue filter hides from players.
 		c.harvestChannelNames(processed)
@@ -474,9 +476,26 @@ func (c *Config) renderCatalog(action string, data interface{}, whole bool, base
 		processed = c.filterPlayerAPICatalog(action, processed)
 	}
 	if action == "get_live_streams" && c.catchupManager != nil && c.catchupManager.IsEnabled() {
-		processed = c.injectCatchupFlags(processed, whole)
+		processed = c.injectCatchupFlags(processed, harvest)
 	}
-	return json.Marshal(c.clientSafeValue(base, processed))
+	items, isList := processed.([]interface{})
+	if !isList || items == nil {
+		return json.Marshal(c.clientSafeValue(base, processed))
+	}
+	// Item by item, as writeRender does, so the client-safe copy never holds
+	// the whole list at once; json.Marshal of a list is the same bytes.
+	buf := []byte{'['}
+	for i, item := range items {
+		b, err := json.Marshal(c.clientSafeValue(base, item))
+		if err != nil {
+			return nil, err
+		}
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		buf = append(buf, b...)
+	}
+	return append(buf, ']'), nil
 }
 
 // categorySlice returns the entries of s in categoryID, like the

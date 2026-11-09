@@ -448,3 +448,68 @@ func TestLiveChannelNumberFromDiskCatalogue(t *testing.T) {
 		}
 	}
 }
+
+// Rendering a further base reuses the first render's channel harvest and
+// upstream-catchup map instead of rebuilding them.
+func TestCatalogSecondBaseDoesNotReharvest(t *testing.T) {
+	c := diskTestConfig(t, false, true)
+	d, m := writeDiskCatalog(t, diskTestBody)
+	for _, s := range []catalogStore{m, d} {
+		serve := func(host string) {
+			serveTestHost(t, host, false, func(ctx *gin.Context) error { return s.serveWhole(ctx, c, "get_live_streams") })
+		}
+		serve("a.example")
+		marker := newChannelHarvest()
+		marker.add(map[string]interface{}{"stream_id": "1", "name": "marker"})
+		c.applyChannelHarvest(marker)
+		c.catchupManager.SetUpstreamCatchup(map[string]bool{"marker": true})
+		serve("b.example")
+		if name, _ := lookupAPIChannelName(normalizeStreamID("1")); name != "marker" {
+			t.Fatalf("%T: second base re-harvested names (%q)", s, name)
+		}
+		if !c.catchupManager.HasUpstreamCatchup("marker") {
+			t.Fatalf("%T: second base reset the upstream catchup map", s)
+		}
+	}
+}
+
+// A base already rendered is served while another base's render holds the
+// render lock, and a new base waits for that render instead of running
+// alongside it.
+func TestCatalogRenderedBaseNotBlockedByRender(t *testing.T) {
+	c := diskTestConfig(t, false, false)
+	d, m := writeDiskCatalog(t, diskTestBody)
+	for _, tc := range []struct {
+		s  catalogStore
+		mu *sync.Mutex
+	}{{m, &m.renderMu}, {d, &d.renderMu}} {
+		serve := func(host string) chan struct{} {
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+				ctx.Request = httptest.NewRequest(http.MethodGet, "/player_api.php", nil)
+				ctx.Request.Host = host
+				if err := tc.s.serveWhole(ctx, c, "get_vod_streams"); err != nil {
+					t.Error(err)
+				}
+			}()
+			return done
+		}
+		<-serve("a.example")
+		tc.mu.Lock() // stands for a render of another base in progress
+		select {
+		case <-serve("a.example"):
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%T: rendered base waited for another base's render", tc.s)
+		}
+		waiting := serve("b.example")
+		select {
+		case <-waiting:
+			t.Fatalf("%T: a second render ran alongside the first", tc.s)
+		case <-time.After(50 * time.Millisecond):
+		}
+		tc.mu.Unlock()
+		<-waiting
+	}
+}

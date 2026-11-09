@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -57,9 +58,13 @@ const maxCatalogRenders = 4
 type memoryCatalog struct {
 	data interface{}
 
-	mu        sync.Mutex
-	harvested bool            // the whole list has gone through renderCatalog's harvest
-	renders   []*memoryRender // oldest first, at most maxCatalogRenders
+	mu      sync.Mutex
+	renders []*memoryRender // oldest first, at most maxCatalogRenders
+
+	// renderMu runs one render at a time, so N Host values never mean N
+	// whole lists encoded at once; a base already rendered never takes it.
+	renderMu  sync.Mutex
+	harvested bool // guarded by renderMu: the list has gone through renderCatalog's harvest
 }
 
 // memoryRender is the whole list rendered for one base URL.
@@ -87,18 +92,18 @@ func (m *memoryCatalog) renderFor(c *Config, action, base string) *memoryRender 
 	if r == nil {
 		r = &memoryRender{base: base}
 		if len(m.renders) == maxCatalogRenders {
-			m.renders = m.renders[1:]
+			m.renders = slices.Delete(m.renders, 0, 1) // zeroes the freed slot, so the evicted body can be collected
 		}
 		m.renders = append(m.renders, r)
 	}
 	m.mu.Unlock()
 	r.once.Do(func() {
+		m.renderMu.Lock()
+		defer m.renderMu.Unlock()
 		// Harvest and upstream catchup depend only on the list: do them once.
-		m.mu.Lock()
-		whole := !m.harvested
+		harvest := !m.harvested
 		m.harvested = true
-		m.mu.Unlock()
-		r.body, r.err = c.renderCatalog(action, m.data, whole, base)
+		r.body, r.err = c.renderCatalog(action, m.data, harvest, base)
 	})
 	return r
 }

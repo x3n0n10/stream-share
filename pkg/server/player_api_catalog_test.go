@@ -456,7 +456,8 @@ func TestCatalogListsRewriteURLs(t *testing.T) {
 
 // testRenderPath is where a disk catalogue renders its list for base.
 func testRenderPath(raw, base string) string {
-	return fmt.Sprintf("%s.render-%x", raw, sha256.Sum256([]byte(base)))[:len(raw)+len(".render-")+8]
+	sum := sha256.Sum256([]byte(base))
+	return fmt.Sprintf("%s.render-%x", raw, sum[:4])
 }
 
 func TestCatalogRenderPerBaseURL(t *testing.T) {

@@ -462,8 +462,8 @@ func (c *Config) servePlayerAPICatalog(ctx *gin.Context, action, key string, q u
 // renderCatalog is the JSON a player receives for a catalogue list. whole is
 // false for a category slice: the channel-name index and the upstream-catchup
 // map are rebuilt from whatever list they are given, so they must only ever
-// see the whole one.
-func (c *Config) renderCatalog(action string, data interface{}, whole bool) ([]byte, error) {
+// see the whole one. Every URL in it points at base (see clientSafeValue).
+func (c *Config) renderCatalog(action string, data interface{}, whole bool, base string) ([]byte, error) {
 	processed := xtreamapi.ProcessResponse(data)
 	if whole && action == "get_live_streams" {
 		// Names come from the full list: /status and logs must still name
@@ -476,7 +476,7 @@ func (c *Config) renderCatalog(action string, data interface{}, whole bool) ([]b
 	if action == "get_live_streams" && c.catchupManager != nil && c.catchupManager.IsEnabled() {
 		processed = c.injectCatchupFlags(processed, whole)
 	}
-	return json.Marshal(processed)
+	return json.Marshal(c.clientSafeValue(base, processed))
 }
 
 // categorySlice returns the entries of s in categoryID, like the

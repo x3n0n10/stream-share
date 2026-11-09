@@ -53,6 +53,7 @@ Fork of [lucasduport/stream-share](https://github.com/lucasduport/stream-share),
   - Docker-ready with comprehensive environment variables
   - Reverse proxy compatibility with HTTPS support
     - With `REVERSE_PROXY_ENABLED=true`, `X-Forwarded-For` is trusted only from loopback/private peers (a proxy on the same host or Docker network); when off it is ignored and the client IP is the TCP peer. `X-Forwarded-Host`/`-Proto` (used for the links generated for the requester) are honoured from any peer. Your proxy must append to or overwrite `X-Forwarded-For` (nginx `$proxy_add_x_forwarded_for`; Caddy and Traefik do by default): one that passes the client's header through unchanged makes the client IP spoofable. Clients on a private network can set any `X-Forwarded-For` value, because their own hop is trusted.
+    - Behind a reverse proxy, also set `PUBLIC_BASE_URL` (e.g. `https://my.domain.com`): every client then gets the same links, and each catalogue list is rendered once instead of once per hostname clients use (up to 4 are kept).
 
 ### Upcoming Features
 - **Improve priorization between live streaming and download requests**

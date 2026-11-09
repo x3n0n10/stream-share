@@ -44,30 +44,73 @@ type catalogStore interface {
 	serveSlice(ctx *gin.Context, c *Config, action, categoryID string) error
 }
 
+// maxCatalogRenders is how many client-facing base URLs a catalogue keeps a
+// rendered list for; a further base drops the oldest. One base is the normal
+// case (PUBLIC_BASE_URL, or one hostname); a few cover LAN and remote names.
+const maxCatalogRenders = 4
+
 // memoryCatalog is a decoded answer held in memory. Anything that is not a
 // list has no items. The JSON a player receives, and its gzip form, are
-// encoded once per catalogue so cache hits don't re-encode tens of MB on every
-// request; a catalogue is never mutated after it is stored (a refresh stores a
-// new one), so the memo stays valid for its whole life.
+// encoded once per catalogue and base URL so cache hits don't re-encode tens
+// of MB on every request; a catalogue is never mutated after it is stored (a
+// refresh stores a new one), so the memo stays valid for its whole life.
 type memoryCatalog struct {
 	data interface{}
 
-	renderOnce sync.Once
-	rendered   []byte
-	renderErr  error
-	gzOnce     sync.Once
-	gz         []byte
-	gzErr      error
+	mu        sync.Mutex
+	harvested bool            // the whole list has gone through renderCatalog's harvest
+	renders   []*memoryRender // oldest first, at most maxCatalogRenders
+}
+
+// memoryRender is the whole list rendered for one base URL.
+type memoryRender struct {
+	base   string
+	once   sync.Once
+	body   []byte
+	err    error
+	gzOnce sync.Once
+	gz     []byte
+	gzErr  error
+}
+
+// renderFor returns the render for base, creating it (and dropping the
+// oldest beyond maxCatalogRenders) on first use.
+func (m *memoryCatalog) renderFor(c *Config, action, base string) *memoryRender {
+	m.mu.Lock()
+	var r *memoryRender
+	for _, x := range m.renders {
+		if x.base == base {
+			r = x
+			break
+		}
+	}
+	if r == nil {
+		r = &memoryRender{base: base}
+		if len(m.renders) == maxCatalogRenders {
+			m.renders = m.renders[1:]
+		}
+		m.renders = append(m.renders, r)
+	}
+	m.mu.Unlock()
+	r.once.Do(func() {
+		// Harvest and upstream catchup depend only on the list: do them once.
+		m.mu.Lock()
+		whole := !m.harvested
+		m.harvested = true
+		m.mu.Unlock()
+		r.body, r.err = c.renderCatalog(action, m.data, whole, base)
+	})
+	return r
 }
 
 func (m *memoryCatalog) serveWhole(ctx *gin.Context, c *Config, action string) error {
-	m.renderOnce.Do(func() { m.rendered, m.renderErr = c.renderCatalog(action, m.data, true) })
-	if m.renderErr != nil {
-		return m.renderErr
+	r := m.renderFor(c, action, c.requestBaseURL(ctx))
+	if r.err != nil {
+		return r.err
 	}
-	sendCatalogJSON(ctx, action, m.rendered, func() ([]byte, error) {
-		m.gzOnce.Do(func() { m.gz, m.gzErr = gzipBytes(m.rendered) })
-		return m.gz, m.gzErr
+	sendCatalogJSON(ctx, action, r.body, func() ([]byte, error) {
+		r.gzOnce.Do(func() { r.gz, r.gzErr = gzipBytes(r.body) })
+		return r.gz, r.gzErr
 	})
 	return nil
 }
@@ -79,7 +122,7 @@ func (m *memoryCatalog) serveSlice(ctx *gin.Context, c *Config, action, category
 	if err != nil {
 		return err
 	}
-	body, err := c.renderCatalog(action, slice, false)
+	body, err := c.renderCatalog(action, slice, false, c.requestBaseURL(ctx))
 	if err != nil {
 		return err
 	}

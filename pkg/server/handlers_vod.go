@@ -624,11 +624,7 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 		// requests serve from local disk and this one opens no second provider
 		// connection. This realizes the "always cache" policy.
 		if c.VODCacheEnabled {
-			defaultExt := ".mp4"
-			if basePath == "series" {
-				defaultExt = ".mkv"
-			}
-			upstream, dest, _ := c.resolveVODTarget(basePath, defaultExt, tempLink.StreamID, false)
+			upstream, dest, _ := c.resolveVODTarget(basePath, "", tempLink.StreamID, false)
 			expires := time.Now().Add(7 * 24 * time.Hour)
 			dl := c.startBackgroundDownload(upstream, dest, idRaw, basePath, expires, nil)
 			c.serveVODDownload(ctx, dl, vodCachedLabel(idRaw), sanitiseFilename(tempLink.Title)+path.Ext(dest), true)

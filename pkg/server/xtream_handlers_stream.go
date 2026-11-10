@@ -459,7 +459,7 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	}
 
 	utils.DebugLog("Multiplexed stream request: user=%s, id=%s, type=%s, title=%s, upstream=%s",
-		username, streamID, streamType, streamTitle, targetURL.String())
+		username, streamID, streamType, streamTitle, utils.MaskURL(targetURL.String()))
 
 	if c.serveCachedVOD(ctx, username, streamIDRaw, streamType, streamTitle) {
 		return

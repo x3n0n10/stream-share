@@ -228,18 +228,19 @@ func resolveEndpointID(config *config.ProxyConfig) string {
 // Reconnecting the VPN on a bad result is left to an external watchdog (see
 // docker-compose.yml), so nothing here knows about gluetun or any VPN.
 func (c *Config) setupHealthCheck() {
-	if c.HealthCheckEnabled {
-		if c.HealthCheckTimeoutSeconds <= 0 {
-			c.HealthCheckTimeoutSeconds = 15
-		}
-		if c.HealthCheckMinIntervalSeconds <= 0 {
-			c.HealthCheckMinIntervalSeconds = 60
-		}
-		if strings.TrimSpace(c.HealthCheckStreamID) == "" {
-			utils.WarnLog("Health check enabled but HEALTHCHECK_STREAM_ID is empty; probes will report 'error'")
-		}
-		c.health = &healthState{}
+	if !c.HealthCheckEnabled {
+		return
 	}
+	if c.HealthCheckTimeoutSeconds <= 0 {
+		c.HealthCheckTimeoutSeconds = 15
+	}
+	if c.HealthCheckMinIntervalSeconds <= 0 {
+		c.HealthCheckMinIntervalSeconds = 60
+	}
+	if strings.TrimSpace(c.HealthCheckStreamID) == "" {
+		utils.WarnLog("Health check enabled but HEALTHCHECK_STREAM_ID is empty; probes will report 'error'")
+	}
+	c.health = &healthState{}
 }
 
 // setupDatabaseAndSessions connects PostgreSQL and builds the session manager
@@ -260,12 +261,6 @@ func (c *Config) setupDatabaseAndSessions() error {
 	// Seed in-memory name indices from DB so names are available before the first API call.
 	c.warmChannelIndexFromDB()
 
-	// After session manager init
-	if c.sessionManager == nil {
-		utils.ErrorLog("Bootstrap: sessionManager is NIL - multiplexing will NOT be used")
-	} else {
-		utils.InfoLog("Bootstrap: sessionManager initialized OK")
-	}
 	return nil
 }
 
@@ -290,9 +285,7 @@ func (c *Config) setupCatchup() {
 	} else {
 		utils.InfoLog("Bootstrap: local catchup buffering DISABLED (set CATCHUP_ENABLED=true to enable)")
 	}
-	if c.sessionManager != nil {
-		c.sessionManager.SetCatchupManager(c.catchupManager)
-	}
+	c.sessionManager.SetCatchupManager(c.catchupManager)
 
 	// Pause grace: how long a catchup-enabled live stream stays alive (upstream
 	// connection open, disk recording continuing) after its last viewer
@@ -303,11 +296,9 @@ func (c *Config) setupCatchup() {
 	if c.CatchupPauseGraceMinutes >= 0 {
 		catchupPauseGrace = c.CatchupPauseGraceMinutes
 	}
-	if c.sessionManager != nil {
-		c.sessionManager.SetPauseGrace(time.Duration(catchupPauseGrace) * time.Minute)
-		if catchupEnabled && catchupPauseGrace > 0 {
-			utils.InfoLog("Bootstrap: catchup pause grace set to %d minute(s) — paused live streams keep recording for seamless resume", catchupPauseGrace)
-		}
+	c.sessionManager.SetPauseGrace(time.Duration(catchupPauseGrace) * time.Minute)
+	if catchupEnabled && catchupPauseGrace > 0 {
+		utils.InfoLog("Bootstrap: catchup pause grace set to %d minute(s) — paused live streams keep recording for seamless resume", catchupPauseGrace)
 	}
 }
 
@@ -317,25 +308,23 @@ func (c *Config) setupCatchup() {
 // manager silently keeps the previous drop behavior, so older images are
 // unaffected by the default being on.
 func (c *Config) setupErrorSlate() {
-	if c.sessionManager != nil {
-		slateRetry := 10
-		if c.ErrorSlateRetryMaxMinutes > 0 {
-			slateRetry = c.ErrorSlateRetryMaxMinutes
-		}
-		c.sessionManager.SetErrorCatalog(session.LoadCatalog(c.ErrorSlateMessagesFile))
+	slateRetry := 10
+	if c.ErrorSlateRetryMaxMinutes > 0 {
+		slateRetry = c.ErrorSlateRetryMaxMinutes
+	}
+	c.sessionManager.SetErrorCatalog(session.LoadCatalog(c.ErrorSlateMessagesFile))
 
-		if c.ErrorSlateEnabled {
-			gen := slate.New(utils.SlateCacheDir())
-			c.sessionManager.SetSlateProvider(gen)
-			c.sessionManager.SetSlateRetryMax(time.Duration(slateRetry) * time.Minute)
-			if gen.Available() {
-				utils.InfoLog("Bootstrap: error slates ENABLED (retry up to %d minute(s) before giving up)", slateRetry)
-			} else {
-				utils.WarnLog("Bootstrap: error slates requested but ffmpeg is unavailable; streams will drop on upstream failure as before")
-			}
+	if c.ErrorSlateEnabled {
+		gen := slate.New(utils.SlateCacheDir())
+		c.sessionManager.SetSlateProvider(gen)
+		c.sessionManager.SetSlateRetryMax(time.Duration(slateRetry) * time.Minute)
+		if gen.Available() {
+			utils.InfoLog("Bootstrap: error slates ENABLED (retry up to %d minute(s) before giving up)", slateRetry)
 		} else {
-			utils.InfoLog("Bootstrap: error slates DISABLED (set ERROR_SLATE_ENABLED=true to show upstream errors on screen)")
+			utils.WarnLog("Bootstrap: error slates requested but ffmpeg is unavailable; streams will drop on upstream failure as before")
 		}
+	} else {
+		utils.InfoLog("Bootstrap: error slates DISABLED (set ERROR_SLATE_ENABLED=true to show upstream errors on screen)")
 	}
 }
 
@@ -343,12 +332,13 @@ func (c *Config) setupErrorSlate() {
 // revocation latency for a large drop in directory traffic, so make the active
 // window visible at startup rather than leaving an operator to infer it.
 func (c *Config) logLDAPAuthCache() {
-	if c.LDAPEnabled {
-		if mins := c.LDAPAuthCacheMinutes; mins > 0 {
-			utils.InfoLog("Bootstrap: LDAP auth cache ENABLED (successful logins trusted for %d minute(s); disabled accounts keep working until their entry expires)", mins)
-		} else {
-			utils.InfoLog("Bootstrap: LDAP auth cache DISABLED — every request re-checks the directory")
-		}
+	if !c.LDAPEnabled {
+		return
+	}
+	if mins := c.LDAPAuthCacheMinutes; mins > 0 {
+		utils.InfoLog("Bootstrap: LDAP auth cache ENABLED (successful logins trusted for %d minute(s); disabled accounts keep working until their entry expires)", mins)
+	} else {
+		utils.InfoLog("Bootstrap: LDAP auth cache DISABLED — every request re-checks the directory")
 	}
 }
 
@@ -356,69 +346,67 @@ func (c *Config) logLDAPAuthCache() {
 // setter is only applied when the value is > 0, leaving the manager defaults
 // otherwise.
 func (c *Config) applySessionTimeouts() {
-	if c.sessionManager != nil {
-		if mins := c.SessionTimeoutMinutes; mins > 0 {
-			c.sessionManager.SetSessionTimeout(time.Duration(mins) * time.Minute)
-			utils.InfoLog("Session timeout set to %d minutes", mins)
+	if mins := c.SessionTimeoutMinutes; mins > 0 {
+		c.sessionManager.SetSessionTimeout(time.Duration(mins) * time.Minute)
+		utils.InfoLog("Session timeout set to %d minutes", mins)
+	}
+	if mins := c.StreamTimeoutMinutes; mins > 0 {
+		c.sessionManager.SetStreamTimeout(time.Duration(mins) * time.Minute)
+		utils.InfoLog("Stream timeout set to %d minutes", mins)
+	}
+	if hours := c.TempLinkHours; hours > 0 {
+		c.sessionManager.SetTempLinkTimeout(time.Duration(hours) * time.Hour)
+		utils.InfoLog("Temporary link timeout set to %d hours", hours)
+	}
+	if hours := c.VODCacheStaleHours; hours > 0 {
+		c.sessionManager.SetVODCacheStaleAge(time.Duration(hours) * time.Hour)
+		utils.InfoLog("VOD cache stale age set to %d hours", hours)
+	}
+	// Prune the on-disk slate clip cache too (clips are regenerated on demand).
+	// This runs regardless of ErrorSlateEnabled so leftover clips are cleaned up
+	// even after the feature is turned off. 0 = default 7 days; negative disables.
+	if hours := c.SlateCacheStaleHours; hours >= 0 {
+		if hours == 0 {
+			hours = 168
 		}
-		if mins := c.StreamTimeoutMinutes; mins > 0 {
-			c.sessionManager.SetStreamTimeout(time.Duration(mins) * time.Minute)
-			utils.InfoLog("Stream timeout set to %d minutes", mins)
-		}
-		if hours := c.TempLinkHours; hours > 0 {
-			c.sessionManager.SetTempLinkTimeout(time.Duration(hours) * time.Hour)
-			utils.InfoLog("Temporary link timeout set to %d hours", hours)
-		}
-		if hours := c.VODCacheStaleHours; hours > 0 {
-			c.sessionManager.SetVODCacheStaleAge(time.Duration(hours) * time.Hour)
-			utils.InfoLog("VOD cache stale age set to %d hours", hours)
-		}
-		// Prune the on-disk slate clip cache too (clips are regenerated on demand).
-		// This runs regardless of ErrorSlateEnabled so leftover clips are cleaned up
-		// even after the feature is turned off. 0 = default 7 days; negative disables.
-		if hours := c.SlateCacheStaleHours; hours >= 0 {
-			if hours == 0 {
-				hours = 168
-			}
-			c.sessionManager.SetSlateCache(utils.SlateCacheDir(), time.Duration(hours)*time.Hour)
-			utils.InfoLog("Slate cache stale age set to %d hours", hours)
-		}
-		if secs := c.MultiplexStallTimeoutSeconds; secs > 0 {
-			c.sessionManager.SetClientStallTimeout(time.Duration(secs) * time.Second)
-			utils.InfoLog("Multiplex client stall timeout set to %d seconds", secs)
-		}
+		c.sessionManager.SetSlateCache(utils.SlateCacheDir(), time.Duration(hours)*time.Hour)
+		utils.InfoLog("Slate cache stale age set to %d hours", hours)
+	}
+	if secs := c.MultiplexStallTimeoutSeconds; secs > 0 {
+		c.sessionManager.SetClientStallTimeout(time.Duration(secs) * time.Second)
+		utils.InfoLog("Multiplex client stall timeout set to %d seconds", secs)
 	}
 }
 
 // setupDiscordBot initializes the Discord bot if a token is provided.
 func (c *Config) setupDiscordBot() error {
 	discordToken := c.DiscordBotToken
-	if discordToken != "" {
-		utils.InfoLog("Initializing Discord bot")
-		discordAdminRole := c.DiscordAdminRoleID
-
-		// Get API URL from config, defaulting to host/port, but honor reverse proxy
-		apiURL := c.DiscordAPIURL
-		if apiURL == "" {
-			// The bot runs in this same process and calls the local API, which only
-			// serves plain HTTP on the listening port. Default to loopback so it
-			// works regardless of the public scheme/host: a TLS-terminating proxy
-			// in front would make a public HTTPS URL unreachable from here. Set
-			// DISCORD_API_URL to override (e.g. when the bot runs elsewhere).
-			apiURL = fmt.Sprintf("http://127.0.0.1:%d", c.HostConfig.Port)
-		}
-		utils.InfoLog("Discord API URL used by bot: %s", apiURL)
-		utils.InfoLog("Reminder: Ensure 'MESSAGE CONTENT INTENT' is enabled in Discord Developer Portal for this bot.")
-
-		bot, err := discord.NewBot(discordToken, discordAdminRole, apiURL, GetAPIKey())
-		if err != nil {
-			return fmt.Errorf("failed to initialize Discord bot: %w", err)
-		}
-
-		c.discordBot = bot
-	} else {
+	if discordToken == "" {
 		utils.InfoLog("Bootstrap: DISCORD_BOT_TOKEN not set - Discord bot is DISABLED")
+		return nil
 	}
+	utils.InfoLog("Initializing Discord bot")
+	discordAdminRole := c.DiscordAdminRoleID
+
+	// Get API URL from config, defaulting to host/port, but honor reverse proxy
+	apiURL := c.DiscordAPIURL
+	if apiURL == "" {
+		// The bot runs in this same process and calls the local API, which only
+		// serves plain HTTP on the listening port. Default to loopback so it
+		// works regardless of the public scheme/host: a TLS-terminating proxy
+		// in front would make a public HTTPS URL unreachable from here. Set
+		// DISCORD_API_URL to override (e.g. when the bot runs elsewhere).
+		apiURL = fmt.Sprintf("http://127.0.0.1:%d", c.HostConfig.Port)
+	}
+	utils.InfoLog("Discord API URL used by bot: %s", apiURL)
+	utils.InfoLog("Reminder: Ensure 'MESSAGE CONTENT INTENT' is enabled in Discord Developer Portal for this bot.")
+
+	bot, err := discord.NewBot(discordToken, discordAdminRole, apiURL, GetAPIKey())
+	if err != nil {
+		return fmt.Errorf("failed to initialize Discord bot: %w", err)
+	}
+
+	c.discordBot = bot
 	return nil
 }
 
@@ -454,10 +442,6 @@ func (c *Config) Serve() error {
 		utils.WarnLog("Bootstrap: Database manager present but not initialized")
 	default:
 		utils.WarnLog("Bootstrap: Database is DISABLED (no persistence)")
-	}
-
-	if c.sessionManager == nil {
-		utils.ErrorLog("Bootstrap: sessionManager is NIL inside Serve()")
 	}
 
 	if err := c.playlistInitialization(); err != nil {

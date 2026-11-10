@@ -268,10 +268,8 @@ func (c *Config) fetchToFile(ctx context.Context, dl *vodDownload, upstream, des
 				continue
 			}
 			if !tailFetched && downloaded > 0 {
-				if total < vodTailMinFile {
-					tailFetched = true
-				} else {
-					tailFetched = true
+				tailFetched = true
+				if total >= vodTailMinFile {
 					if !c.fetchTail(ctx, dl, f, upstream, total, lease) {
 						tailFetched = false // preempted: fetched once the download resumes
 						parked = true
@@ -458,15 +456,7 @@ func responseTotal(resp *http.Response) int64 {
 		}
 		return v
 	}
-	cl := resp.Header.Get("Content-Length")
-	if cl == "" {
-		return 0
-	}
-	v, err := strconv.ParseInt(cl, 10, 64)
-	if err != nil {
-		return 0
-	}
-	return v
+	return max(resp.ContentLength, 0) // -1 when unknown
 }
 
 // newVODRequest builds the request for one download attempt. The first

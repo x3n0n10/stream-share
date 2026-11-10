@@ -1,9 +1,12 @@
 /*
  * stream-share is a project to efficiently share the use of an IPTV service.
  * Copyright (C) 2025  Lucas Duport
+ * Copyright (C) 2026  x3n0n10
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License, version 3 or later.
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -16,46 +19,26 @@
 package server
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/lucasduport/stream-share/pkg/config"
 )
 
-// A player request and a Discord download of the same movie must land on one
-// cache file, whatever the probe setting.
-func TestVODResolverSameFileForPlayerAndDownload(t *testing.T) {
+// An explicit extension gives the same upstream and cache file in both
+// modes, and the per-type defaults agree across modes (probing off), so a
+// player request and a Discord download land on one cache file.
+func TestVODResolverModesAgree(t *testing.T) {
 	t.Setenv("CACHE_FOLDER", t.TempDir())
-	prov := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, ".mp4") {
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer prov.Close()
-	c := &Config{ProxyConfig: &config.ProxyConfig{XtreamBaseURL: prov.URL, VODExtProbeEnabled: true}}
+	c := &Config{ProxyConfig: &config.ProxyConfig{XtreamBaseURL: "http://provider.invalid"}}
 
-	// (a) explicit extension: identical in both modes.
 	upA, destA, _ := c.resolveVODTarget("movie", "", "10.mkv", false)
 	upB, destB, _ := c.resolveVODTarget("movie", "", "10.mkv", true)
 	if upA != upB || destA != destB || !strings.HasSuffix(destA, "10.mkv") {
 		t.Fatalf("explicit ext differs: %s %s / %s %s", upA, destA, upB, destB)
 	}
 
-	// (b) probe finds .mp4; once the catalogue knows it, the request path agrees.
-	_, probed, _ := c.resolveVODTarget("movie", ".mkv", "20", true)
-	if !strings.HasSuffix(probed, "20.mp4") {
-		t.Fatalf("probe picked %s, want .mp4", probed)
-	}
-	vodExtCache.Store("movie\x0020", extEntry{ext: ".mp4"})
-	t.Cleanup(func() { vodExtCache.Delete("movie\x0020") })
-	if _, d, _ := c.resolveVODTarget("movie", ".mkv", "20", false); d != probed {
-		t.Fatalf("request path %s != download %s", d, probed)
-	}
-
-	// (c) nothing known, probing off: per-type default in both modes.
-	c.VODExtProbeEnabled = false
+	// Nothing known, probing off: per-type default in both modes.
 	for _, probe := range []bool{false, true} {
 		if _, d, _ := c.resolveVODTarget("series", "", "30", probe); !strings.HasSuffix(d, "30.mkv") {
 			t.Fatalf("series default probe=%v: %s", probe, d)

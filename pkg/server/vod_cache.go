@@ -72,15 +72,6 @@ type connPacer struct {
 	dialer    net.Dialer
 }
 
-// setSpacing changes the spacing and returns the previous one.
-func (p *connPacer) setSpacing(d time.Duration) time.Duration {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	prev := p.spacing
-	p.spacing = d
-	return prev
-}
-
 func (p *connPacer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	for {
 		p.mu.Lock()

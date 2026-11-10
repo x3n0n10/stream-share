@@ -80,12 +80,3 @@ func NewDBManager(_ string) (*DBManager, error) {
 func (m *DBManager) IsInitialized() bool {
 	return m != nil && m.initialized && m.db != nil
 }
-
-// Close closes the database connection
-func (m *DBManager) Close() error {
-	if m == nil || m.db == nil {
-		return nil
-	}
-	utils.InfoLog("Closing database connection")
-	return m.db.Close()
-}

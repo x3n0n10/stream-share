@@ -163,6 +163,16 @@ func laggyTestServer(t *testing.T, p *laggyProvider) (*Config, *httptest.Server)
 	return c, front
 }
 
+// setVODSpacing sets vodConnPacer's spacing and returns the previous one. The
+// pacer's lock is taken because DialContext reads spacing under it.
+func setVODSpacing(d time.Duration) time.Duration {
+	vodConnPacer.mu.Lock()
+	defer vodConnPacer.mu.Unlock()
+	prev := vodConnPacer.spacing
+	vodConnPacer.spacing = d
+	return prev
+}
+
 // The production access pattern of a player opening a file whose index is at
 // the end: header, index near EOF, back to the header area, index again,
 // header area again, all within about two seconds. Against a provider that
@@ -231,8 +241,8 @@ func TestProgressiveMidFileSeekSpacesNewConnections(t *testing.T) {
 		{"spaced", 600 * time.Millisecond, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			prev := vodConnPacer.setSpacing(tc.spacing)
-			t.Cleanup(func() { vodConnPacer.setSpacing(prev) })
+			prev := setVODSpacing(tc.spacing)
+			t.Cleanup(func() { setVODSpacing(prev) })
 
 			data := randomBytes(t, 32<<20)
 			// ~4 MB/s: the whole file takes ~8 s.

@@ -81,14 +81,3 @@ func (c *Config) rewriteXMLTVIconsTo(ctx *gin.Context, r io.Reader, w io.Writer)
 	}
 	return enc.Flush()
 }
-
-// rewriteXMLTVIcons is the in-memory form of rewriteXMLTVIconsTo. It falls back
-// to the original bytes unchanged if the document fails to decode, so a
-// non-XML upstream error body doesn't error the whole EPG response.
-func (c *Config) rewriteXMLTVIcons(ctx *gin.Context, body []byte) []byte {
-	var out bytes.Buffer
-	if err := c.rewriteXMLTVIconsTo(ctx, bytes.NewReader(body), &out); err != nil {
-		return body
-	}
-	return out.Bytes()
-}

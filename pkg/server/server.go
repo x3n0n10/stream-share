@@ -406,10 +406,6 @@ func (c *Config) Serve() error {
 
 	if c.sessionManager == nil {
 		utils.ErrorLog("Bootstrap: sessionManager is NIL inside Serve()")
-	} else {
-		utils.InfoLog("Bootstrap: sessionManager ready (timeouts: session=%v, stream=%v, tempLink=%v)",
-			// not exported; we just acknowledge presence
-			time.Minute, time.Minute, time.Hour)
 	}
 
 	if err := c.playlistInitialization(); err != nil {

@@ -222,6 +222,7 @@ func progressiveTestServer(t *testing.T, provider http.Handler, cacheEnabled boo
 		ProxyConfig: &config.ProxyConfig{XtreamBaseURL: up.URL, XtreamUser: "user", XtreamPassword: "pass", VODCacheEnabled: cacheEnabled},
 		db:          &database.DBManager{},
 	}
+	t.Cleanup(func() { waitDownloadsIdle(c) })
 	r := gin.New()
 	h := func(ctx *gin.Context) { c.streamVODWithCache(ctx, "series", ".mkv") }
 	r.GET("/series/:id", h)
@@ -244,6 +245,21 @@ func getRange(t *testing.T, url, rng string) (*http.Response, []byte, error) {
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	return resp, body, err
+}
+
+// waitDownloadsIdle gives running downloads (up to 10 s) time to finish. Run
+// before the provider closes, it stops a leaked download from retrying into
+// the next test's globals (vodCacheRetryBackoff).
+func waitDownloadsIdle(c *Config) {
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		busy := false
+		c.inProgressDownloads.Range(func(_, _ interface{}) bool { busy = true; return false })
+		if !busy {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // waitDownloadDone waits for the item's download to leave the registry.

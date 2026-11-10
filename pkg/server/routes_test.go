@@ -19,8 +19,6 @@
 package server
 
 import (
-	"github.com/gin-gonic/gin"
-	"github.com/lucasduport/stream-share/pkg/config"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -30,7 +28,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/jamesnetherton/m3u"
+	"github.com/lucasduport/stream-share/pkg/config"
 	"github.com/lucasduport/stream-share/pkg/session"
 )
 
@@ -189,6 +189,12 @@ func TestQueryStyleTimeshift(t *testing.T) {
 		}
 		if s := getStatus(t, front+prefix+strings.Replace(q, "&start=2026-01-01:10-00", "", 1)); s != 400 {
 			t.Fatalf("missing start: status %d, want 400", s)
+		}
+		if s := getStatus(t, front+prefix+strings.Replace(q, "start=2026-01-01:10-00", "start=..", 1)); s != 400 {
+			t.Fatalf("start=..: status %d, want 400", s)
+		}
+		if s := getStatus(t, front+prefix+"/timeshift/me/pw/1..2/2026-01-01:10-00/42.ts"); s != 400 {
+			t.Fatalf("path duration with ..: status %d, want 400", s)
 		}
 		if len(seen()) != 1 {
 			t.Fatalf("rejected requests reached the provider: %v", seen())

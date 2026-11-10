@@ -90,6 +90,11 @@ func TestCachedVODEntry(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	t.Cleanup(func() {
+		for _, id := range []string{"c1-ok", "c1-gone", "c1-dir"} {
+			_ = c.db.DeleteVODCacheEntry(id)
+		}
+	})
 	put("c1-ok", file)
 	put("c1-gone", filepath.Join(dir, "gone.mp4"))
 	put("c1-dir", dir)
@@ -133,6 +138,7 @@ func TestTemporaryLinkFallsBackWhenCachedFileMissing(t *testing.T) {
 	t.Cleanup(up.Close)
 
 	db := vodTestDB(t)
+	t.Cleanup(func() { _ = db.DeleteVODCacheEntry("c1-link") })
 	e := &types.VODCacheEntry{StreamID: "c1-link", Type: "movie", FilePath: filepath.Join(t.TempDir(), "gone.mp4"), Status: "ready", ExpiresAt: time.Now().Add(time.Hour)}
 	if err := db.UpsertVODCache(e); err != nil {
 		t.Fatal(err)
@@ -156,9 +162,10 @@ func startCacheFor(t *testing.T, db *database.DBManager, streamID string) (*Conf
 	t.Helper()
 	t.Setenv("CACHE_FOLDER", t.TempDir())
 	gin.SetMode(gin.TestMode)
-	up := httptest.NewServer(&fakeVODProvider{data: randomBytes(t, 1<<20), chunk: 4 << 10, delay: 20 * time.Millisecond})
+	up := httptest.NewServer(&fakeVODProvider{data: randomBytes(t, 256<<10), chunk: 4 << 10, delay: 20 * time.Millisecond})
 	t.Cleanup(up.Close)
 	c := &Config{ProxyConfig: &config.ProxyConfig{XtreamBaseURL: up.URL, XtreamUser: "u", XtreamPassword: "p"}, db: db}
+	t.Cleanup(func() { waitDownloadsIdle(c) }) // runs before up.Close
 	r := gin.New()
 	r.POST("/cache/start", c.startCache)
 	w := httptest.NewRecorder()

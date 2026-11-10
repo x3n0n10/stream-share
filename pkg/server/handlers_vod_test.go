@@ -205,3 +205,25 @@ func TestStartCacheStoresRowUnderBareID(t *testing.T) {
 		t.Error("row also stored under the extension-bearing id")
 	}
 }
+
+// The Discord bot looks a download up by the id it started it with
+// ("123.mkv"); the row is keyed by the bare id.
+func TestCacheLookupsAcceptExtensionedID(t *testing.T) {
+	db := vodTestDB(t)
+	t.Cleanup(func() { _ = db.DeleteVODCacheEntry("c2-lookup") })
+	if err := db.UpsertVODCache(&types.VODCacheEntry{StreamID: "c2-lookup", Type: "movie", Status: "downloading", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	gin.SetMode(gin.TestMode)
+	c := &Config{ProxyConfig: &config.ProxyConfig{}, db: db}
+	r := gin.New()
+	r.GET("/cache/by-stream/:streamid", c.getCacheByStream)
+	r.GET("/cache/progress/:streamid", c.getCacheProgress)
+	for _, u := range []string{"/cache/by-stream/c2-lookup.mkv", "/cache/progress/c2-lookup.mkv"} {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest("GET", u, nil))
+		if w.Code != http.StatusOK {
+			t.Errorf("%s: status %d body %q", u, w.Code, w.Body.String())
+		}
+	}
+}

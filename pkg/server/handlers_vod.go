@@ -401,7 +401,7 @@ func (c *Config) startCache(ctx *gin.Context) {
 			c.touchVODCache(idOnly)
 			ctx.JSON(http.StatusOK, types.APIResponse{Success: true, Data: map[string]interface{}{
 				"cached":     true,
-				"stream_id":  entry.StreamID,
+				"stream_id":  req.StreamID,
 				"status":     entry.Status,
 				"expires_at": entry.ExpiresAt,
 			}})
@@ -444,7 +444,7 @@ func (c *Config) startCache(ctx *gin.Context) {
 		// Off the request path, so a cold catalogue is worth waiting for: it
 		// gives the real extension instead of a guessed default.
 		if _, err := c.waitVODM3UCache(); err != nil {
-			utils.DebugLog("Cache: VOD M3U unavailable for %s, using defaults: %v", req.StreamID, err)
+			utils.DebugLog("Cache: VOD M3U unavailable for %s, using defaults: %v", idOnly, err)
 		}
 		upstream, filename, _ := c.resolveVODTarget(basePath, "", req.StreamID, true)
 		if c.db != nil {
@@ -488,7 +488,9 @@ func vodFallbackTitle(t, title, seriesTitle string, season, episode int) string 
 
 // getCacheByStream returns cache info for a stream id
 func (c *Config) getCacheByStream(ctx *gin.Context) {
+	// Callers pass the id they sent to /cache/start, extension included.
 	id := ctx.Param("streamid")
+	id = strings.TrimSuffix(id, path.Ext(id))
 	if id == "" || c.db == nil {
 		ctx.JSON(http.StatusNotFound, types.APIResponse{Success: false, Error: "not found"})
 		return
@@ -516,7 +518,9 @@ func (c *Config) getCacheByStream(ctx *gin.Context) {
 
 // getCacheProgress returns minimal progress info for a given stream id
 func (c *Config) getCacheProgress(ctx *gin.Context) {
+	// Callers pass the id they sent to /cache/start, extension included.
 	id := ctx.Param("streamid")
+	id = strings.TrimSuffix(id, path.Ext(id))
 	if id == "" || c.db == nil {
 		ctx.JSON(http.StatusNotFound, types.APIResponse{Success: false, Error: "not found"})
 		return

@@ -19,10 +19,12 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -145,5 +147,61 @@ func TestTemporaryLinkFallsBackWhenCachedFileMissing(t *testing.T) {
 	r.ServeHTTP(w, httptest.NewRequest("GET", "/download/"+token, nil))
 	if w.Code != http.StatusOK || hits.Load() == 0 {
 		t.Fatalf("status=%d provider hits=%d body=%q; want fallback to provider", w.Code, hits.Load(), w.Body.String())
+	}
+}
+
+// startCacheFor posts a Discord-style cache request and returns the server
+// config, with a provider slow enough that the download is still running.
+func startCacheFor(t *testing.T, db *database.DBManager, streamID string) (*Config, map[string]interface{}) {
+	t.Helper()
+	t.Setenv("CACHE_FOLDER", t.TempDir())
+	gin.SetMode(gin.TestMode)
+	up := httptest.NewServer(&fakeVODProvider{data: randomBytes(t, 1<<20), chunk: 4 << 10, delay: 20 * time.Millisecond})
+	t.Cleanup(up.Close)
+	c := &Config{ProxyConfig: &config.ProxyConfig{XtreamBaseURL: up.URL, XtreamUser: "u", XtreamPassword: "p"}, db: db}
+	r := gin.New()
+	r.POST("/cache/start", c.startCache)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/cache/start", strings.NewReader(`{"stream_id":"`+streamID+`","type":"series","days":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	var resp struct{ Data map[string]interface{} }
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q err=%v", w.Code, w.Body.String(), err)
+	}
+	return c, resp.Data
+}
+
+// A download started with an extension must register under the bare id a
+// player request uses, or the two download the item twice. No database needed.
+func TestStartCacheKeysDownloadByBareID(t *testing.T) {
+	c, data := startCacheFor(t, nil, "123.mkv")
+	if data["stream_id"] != "123.mkv" {
+		t.Errorf("response stream_id = %v, want as requested", data["stream_id"])
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, ok := c.inProgressDownloads.Load("123"); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no in-progress download under the bare id")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, ok := c.inProgressDownloads.Load("123.mkv"); ok {
+		t.Error("download also registered under the extension-bearing id")
+	}
+}
+
+func TestStartCacheStoresRowUnderBareID(t *testing.T) {
+	db := vodTestDB(t)
+	t.Cleanup(func() { _ = db.DeleteVODCacheEntry("c2-777"); _ = db.DeleteVODCacheEntry("c2-777.mkv") })
+	startCacheFor(t, db, "c2-777.mkv")
+	if e, err := db.GetVODCache("c2-777"); err != nil || e == nil {
+		t.Fatalf("no row under the bare id: %v", err)
+	}
+	if e, err := db.GetVODCache("c2-777.mkv"); err == nil && e != nil {
+		t.Error("row also stored under the extension-bearing id")
 	}
 }

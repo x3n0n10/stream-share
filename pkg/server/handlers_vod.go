@@ -391,10 +391,14 @@ func (c *Config) startCache(ctx *gin.Context) {
 		t = "movie"
 	}
 
+	// Keyed by the bare id players use, so a Discord download ("123.mkv") and
+	// a player request ("123") share one cache row and one download.
+	idOnly := strings.TrimSuffix(req.StreamID, path.Ext(req.StreamID))
+
 	// If already cached and valid, return it
 	if c.db != nil {
-		if entry := c.cachedVODEntry(req.StreamID); entry != nil {
-			c.touchVODCache(req.StreamID)
+		if entry := c.cachedVODEntry(idOnly); entry != nil {
+			c.touchVODCache(idOnly)
 			ctx.JSON(http.StatusOK, types.APIResponse{Success: true, Data: map[string]interface{}{
 				"cached":     true,
 				"stream_id":  entry.StreamID,
@@ -423,7 +427,6 @@ func (c *Config) startCache(ctx *gin.Context) {
 	if ext == "" {
 		ext = defaultVODExt(basePath)
 	}
-	idOnly := strings.TrimSuffix(req.StreamID, path.Ext(req.StreamID))
 	filename := filepath.Join(baseDir, idOnly+ext)
 
 	// Best-effort title from what the caller already knows; the M3U lookup
@@ -433,7 +436,7 @@ func (c *Config) startCache(ctx *gin.Context) {
 	// Persist a pending entry
 	expires := time.Now().Add(time.Duration(req.Days) * 24 * time.Hour)
 	if c.db != nil {
-		_ = c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: req.StreamID, Type: t, Title: safeTitle, SeriesTitle: req.SeriesTitle, Season: req.Season, Episode: req.Episode, FilePath: filename, RequestedBy: req.Username, Status: "downloading", CreatedAt: time.Now(), ExpiresAt: expires})
+		_ = c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: idOnly, Type: t, Title: safeTitle, SeriesTitle: req.SeriesTitle, Season: req.Season, Episode: req.Episode, FilePath: filename, RequestedBy: req.Username, Status: "downloading", CreatedAt: time.Now(), ExpiresAt: expires})
 	}
 
 	// Spawn background download — explicit request, runs until completion regardless of viewer.
@@ -445,13 +448,13 @@ func (c *Config) startCache(ctx *gin.Context) {
 		}
 		upstream, filename, _ := c.resolveVODTarget(basePath, "", req.StreamID, true)
 		if c.db != nil {
-			_ = c.db.SetVODCachePath(req.StreamID, filename)
-			if tt := c.findVODTitleInCache(basePath, req.StreamID); strings.TrimSpace(tt) != "" {
-				_ = c.db.SetVODCacheTitle(req.StreamID, strings.TrimSpace(tt))
+			_ = c.db.SetVODCachePath(idOnly, filename)
+			if tt := c.findVODTitleInCache(basePath, idOnly); strings.TrimSpace(tt) != "" {
+				_ = c.db.SetVODCacheTitle(idOnly, strings.TrimSpace(tt))
 			}
 		}
 		// Shared with any playback of the same item already downloading it.
-		c.startBackgroundDownload(upstream, filename, req.StreamID, basePath, expires, nil)
+		c.startBackgroundDownload(upstream, filename, idOnly, basePath, expires, nil)
 	}()
 
 	ctx.JSON(http.StatusOK, types.APIResponse{Success: true, Data: map[string]interface{}{

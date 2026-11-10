@@ -32,6 +32,8 @@
 
 ### Task 1: One VOD cache-hit rule (C1)
 
+> Note: the implementation used `cachedVODEntry` (returns the cache entry), by ruling.
+
 **Files:**
 - Modify: `pkg/server/xtream_handlers_stream.go` (`streamVODWithCache`, `serveCachedVOD`), `pkg/server/handlers_vod.go` (`handleTemporaryLink`, `startCache`), a helper next to `touchVODCache` in `pkg/server/vod_cache.go`
 - Test: `pkg/server/handlers_vod_test.go` (or the existing VOD test file)
@@ -115,6 +117,8 @@
 ---
 
 ### Task 6: `vod_cache.go` split by job (C6)
+
+> Note: the implementation used `vod_window.go` (a `_windows.go` suffix is a GOOS build constraint), by ruling.
 
 **Files:**
 - Create: `pkg/server/vod_pacer.go`, `pkg/server/vod_windows.go`

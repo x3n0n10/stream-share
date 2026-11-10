@@ -427,7 +427,7 @@ exists on disk as a regular file. A download writes to a temporary file and
 renames on completion, so the final path existing means the file is complete;
 the status column is not needed for this decision. A row whose file is
 missing logs one warning and falls back (provider, or a new download). One
-small helper returns the cached file path for an id; all four places use it.
+small helper returns the cache entry (`cachedVODEntry`) for an id; all four places use it.
 
 ### C2. Download key matches the player key
 
@@ -484,7 +484,8 @@ paths do; keep the requested extension for the file name only.
   `vodCacheClient`) → `vod_pacer.go`;
 - tail and window fetching (`fetchTail`, `fetchTailPiece`, `fetchWindows`,
   `fetchWindow`, `errRangeIgnored`, the head/tail size helpers) →
-  `vod_windows.go`;
+  `vod_window.go` (not `vod_windows.go`: a `_windows.go` suffix is a GOOS build
+  constraint);
 - `vod_cache.go` keeps the download loop, resolver/validation and the
   background-download registry.
 

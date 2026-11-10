@@ -22,20 +22,26 @@ import (
 	"bytes"
 	"encoding/xml"
 	"io"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
 
-// rewriteXMLTVIconsTo copies an XMLTV document from r to w, rewriting the src
-// attribute of every <icon> element — legal on both <channel> and <programme>
-// per the XMLTV DTD, so no distinction is made between them — to point through
-// this proxy instead of the upstream provider. Implemented as a token-stream
+var utf8BOM = []byte("\xef\xbb\xbf")
+
+// rewriteXMLTVIconsTo copies an XMLTV document from r to w so that every URL
+// in it points through this proxy (A10): a src or href attribute on any
+// element (<icon src>, legal on <channel> and <programme>), and element text
+// that is wholly an http(s) URL (<url>, <image>, <review type="url">). Text
+// that merely contains a link is left alone. Implemented as a token-stream
 // copy, so memory stays at one element whatever the guide's size, and entity-
-// escaped characters and untouched document structure round-trip correctly;
-// <url> elements are a separate tag and are left untouched.
+// escaped characters and untouched document structure round-trip correctly.
+
 func (c *Config) rewriteXMLTVIconsTo(ctx *gin.Context, r io.Reader, w io.Writer) error {
+	base := c.requestBaseURL(ctx)
 	dec := xml.NewDecoder(r)
 	enc := xml.NewEncoder(w)
+	started := false
 	for {
 		tok, err := dec.Token()
 		if err == io.EOF {
@@ -44,10 +50,27 @@ func (c *Config) rewriteXMLTVIconsTo(ctx *gin.Context, r io.Reader, w io.Writer)
 		if err != nil {
 			return err
 		}
-		if se, ok := tok.(xml.StartElement); ok && se.Name.Local == "icon" {
+		// The encoder accepts an XML declaration only as the very first token:
+		// drop a BOM or blank lines before it, and any later declaration (from
+		// concatenated guides), instead of aborting the whole guide.
+		switch t := tok.(type) {
+		case xml.CharData:
+			if !started && len(bytes.TrimSpace(bytes.TrimPrefix(t, utf8BOM))) == 0 {
+				continue
+			}
+			if isFetchableURL(string(t)) {
+				tok = xml.CharData(base + c.proxyImagePath(strings.TrimSpace(string(t))))
+			}
+		case xml.ProcInst:
+			if t.Target == "xml" && started {
+				continue
+			}
+		}
+		started = true
+		if se, ok := tok.(xml.StartElement); ok {
 			for i, attr := range se.Attr {
-				if attr.Name.Local == "src" {
-					se.Attr[i].Value = c.proxyImageURL(ctx, attr.Value)
+				if (attr.Name.Local == "src" || attr.Name.Local == "href") && isFetchableURL(attr.Value) {
+					se.Attr[i].Value = base + c.proxyImagePath(strings.TrimSpace(attr.Value))
 				}
 			}
 			tok = se

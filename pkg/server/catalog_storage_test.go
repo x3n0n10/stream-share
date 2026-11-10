@@ -54,7 +54,7 @@ func TestMemoryCatalogRendersOnce(t *testing.T) {
 	}
 	first := serve()
 	// The memo is what the second call must serve, not a fresh render.
-	store.rendered = []byte("memo")
+	store.renders[0].body = []byte("memo")
 	if second := serve(); second != "memo" || first == second {
 		t.Fatalf("second serve re-rendered: first %q, second %q", first, second)
 	}

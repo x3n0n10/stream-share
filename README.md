@@ -52,6 +52,8 @@ Fork of [lucasduport/stream-share](https://github.com/lucasduport/stream-share),
 - **Deployment**
   - Docker-ready with comprehensive environment variables
   - Reverse proxy compatibility with HTTPS support
+    - With `REVERSE_PROXY_ENABLED=true`, `X-Forwarded-For` is trusted only from loopback/private peers (a proxy on the same host or Docker network); when off it is ignored and the client IP is the TCP peer. `X-Forwarded-Host`/`-Proto` (used for the links generated for the requester) are honoured from any peer. Your proxy must append to or overwrite `X-Forwarded-For` (nginx `$proxy_add_x_forwarded_for`; Caddy and Traefik do by default): one that passes the client's header through unchanged makes the client IP spoofable. Clients on a private network can set any `X-Forwarded-For` value, because their own hop is trusted.
+    - Behind a reverse proxy, also set `PUBLIC_BASE_URL` (e.g. `https://my.domain.com`): every client then gets the same links, and each catalogue list is rendered once instead of once per hostname clients use (up to 4 are kept).
 
 ### Upcoming Features
 - **Improve priorization between live streaming and download requests**
@@ -516,7 +518,7 @@ Cache movies or episodes to disk for faster start times and to reduce upstream u
 - Cached items automatically serve for both downloads and VOD/series streaming endpoints when available.
 
 Configuration:
-- `CACHE_FOLDER` — Absolute path to the root cache directory. stream-share creates purpose-specific subfolders underneath it: `<CACHE_FOLDER>/vod` for cached VOD media, `<CACHE_FOLDER>/catchup` for live catchup buffers and `<CACHE_FOLDER>/epg` for the cached XMLTV guide (`xmltv.php` is downloaded once from the provider at startup, served from disk to every player, refreshed in the background after `M3U_CACHE_EXPIRATION_HOURS`, and the last good guide keeps being served if the provider fails). Defaults to `$TMPDIR/stream-share` when unset.
+- `CACHE_FOLDER` — Absolute path to the root cache directory. stream-share creates purpose-specific subfolders underneath it: `<CACHE_FOLDER>/vod` for cached VOD media, `<CACHE_FOLDER>/catchup` for live catchup buffers and `<CACHE_FOLDER>/epg` for the cached XMLTV guide (`xmltv.php` is downloaded once from the provider at startup, served from disk to every player, refreshed in the background after `M3U_CACHE_EXPIRATION_HOURS`, and the last good guide keeps being served if the provider fails). Defaults to `$TMPDIR/stream-share` when unset. The image-link signing key, `image-signing.key`, also lives here: deleting it or losing the volume makes players' cached image links return 403 until they refresh.
 - `CATALOG_STORAGE` — Where cached provider catalogues are kept: `memory` (default) or `disk`. `memory` is the fastest, but RAM grows with the catalogue.
   `disk` uses far less RAM and about 2–3× the provider's catalogue size on disk (under `CACHE_FOLDER`), with slightly slower searches.
   Disk mode sets `GOMEMLIMIT=90MiB` unless you set `GOMEMLIMIT` yourself. After a restart the previous run's catalogue folder is kept for up to 24 h (disk use is briefly ~2×).

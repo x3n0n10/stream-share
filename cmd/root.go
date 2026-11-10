@@ -30,6 +30,7 @@ import (
 	"github.com/lucasduport/stream-share/pkg/config"
 	"github.com/lucasduport/stream-share/pkg/filter"
 	"github.com/lucasduport/stream-share/pkg/server"
+	"github.com/lucasduport/stream-share/pkg/utils"
 	homedir "github.com/mitchellh/go-homedir"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -81,7 +82,7 @@ It supports:
 				xtreamPassword = password
 				xtreamBaseURL = fmt.Sprintf("%s://%s", remoteHostURL.Scheme, remoteHostURL.Host)
 				log.Printf("[stream-share] INFO: Xtream service enabled with base URL: %q, username: %q",
-					xtreamBaseURL, xtreamUser)
+					xtreamBaseURL, utils.MaskString(xtreamUser))
 			}
 		}
 

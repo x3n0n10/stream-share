@@ -203,7 +203,7 @@ func (c *Client) requestURL(action string, q url.Values) (string, error) {
 		}
 	}
 	u.RawQuery = params.Encode()
-	utils.DebugLog("Xtream raw request: %s", u.String())
+	utils.DebugLog("Xtream raw request: %s", utils.MaskURL(u.String()))
 	return u.String(), nil
 }
 

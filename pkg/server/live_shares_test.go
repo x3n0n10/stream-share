@@ -102,7 +102,7 @@ func shareTestServer(t *testing.T, capacity int, rules *filter.Config) *shareEnv
 	up := httptest.NewServer(p)
 	t.Cleanup(up.Close)
 
-	c := &Config{ProxyConfig: &config.ProxyConfig{XtreamBaseURL: up.URL, XtreamUser: "prov", XtreamPassword: "secret"}}
+	c := &Config{ProxyConfig: &config.ProxyConfig{XtreamBaseURL: up.URL, XtreamUser: "prov", XtreamPassword: "secret"}, imageKey: testImageKey}
 	c.PublicBaseURL = "https://tv.example"
 	if rules != nil {
 		set, err := filter.NewSet(*rules)
@@ -201,7 +201,7 @@ func TestShareLinkStates(t *testing.T) {
 		if code != http.StatusOK || h.Get("Cache-Control") != "no-store" {
 			t.Fatalf("scheduled playlist: %d %q", code, h.Get("Cache-Control"))
 		}
-		for _, want := range []string{"#EXTM3U", `tvg-id="one.a"`, `tvg-logo="https://tv.example/img?url=http%3A%2F%2Flogo%2Fone.png"`, ",A| Channel One",
+		for _, want := range []string{"#EXTM3U", `tvg-id="one.a"`, `tvg-logo="https://tv.example` + e.c.proxyImagePath("http://logo/one.png") + `"`, ",A| Channel One",
 			"https://tv.example/share/" + later.Token + "/live.ts"} {
 			if !strings.Contains(body, want) {
 				t.Fatalf("playlist lacks %q:\n%s", want, body)

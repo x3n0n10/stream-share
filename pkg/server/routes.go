@@ -34,14 +34,9 @@ import (
 func (c *Config) routes(r *gin.RouterGroup) {
 	r = r.Group(c.CustomEndpoint)
 
-	// No c.authenticate here: content reached via this route (image/manifest
-	// URLs already rewritten into player_api/xmltv/M3U responses) never
-	// carried proxy credentials to begin with -- players fetch it directly,
-	// with no way to attach username/password. requireRecentAuth is the
-	// next-best gate: it requires the calling IP to have authenticated
-	// successfully against another endpoint recently (see its doc comment
-	// for the IP-based trade-off), instead of accepting every request.
-	r.GET("/img", requireRecentAuth, c.assetProxy)
+	// No c.authenticate here: players fetch these links with no way to attach
+	// credentials. The HMAC signature in the link is the gate (see assetProxy).
+	r.GET("/img", c.assetProxy)
 
 	// Xtream service endpoints
 	if c.XtreamBaseURL != "" {
@@ -89,16 +84,16 @@ func (c *Config) xtreamRoutes(r *gin.RouterGroup) {
 	// the auth check (a request that doesn't have the right credentials in
 	// its path never reaches the handler at all). Some clients call these
 	// straight away without ever hitting player_api.php first, so
-	// recordRecentAuth needs to run here too -- otherwise /img stays locked
-	// for them even though they've proven valid credentials.
+	// recordRecentAuth runs here so these clients count as recently
+	// authenticated for the routes guarded by requireRecentAuth.
 	r.GET(fmt.Sprintf("/%s/%s/:id", c.XtreamUser.String(), c.XtreamPassword.String()), recordRecentAuth, c.xtreamStreamHandler)
 	r.GET(fmt.Sprintf("/live/%s/%s/:id", c.XtreamUser.String(), c.XtreamPassword.String()), recordRecentAuth, c.xtreamStreamLive)
 	r.GET(fmt.Sprintf("/timeshift/%s/%s/:duration/:start/:id", c.XtreamUser.String(), c.XtreamPassword.String()), recordRecentAuth, c.xtreamStreamTimeshift)
 	r.GET(fmt.Sprintf("/movie/%s/%s/:id", c.XtreamUser.String(), c.XtreamPassword.String()), recordRecentAuth, c.xtreamStreamMovie)
 	r.GET(fmt.Sprintf("/series/%s/%s/:id", c.XtreamUser.String(), c.XtreamPassword.String()), recordRecentAuth, c.xtreamStreamSeries)
 	r.GET(fmt.Sprintf("/hlsr/:token/%s/%s/:channel/:hash/:chunk", c.XtreamUser.String(), c.XtreamPassword.String()), recordRecentAuth, c.xtreamHlsrStream)
-	r.GET("/hls/:token/:chunk", c.xtreamHlsStream)
-	r.GET("/play/:token/:type", c.xtreamStreamPlay)
+	r.GET("/hls/:token/:chunk", requireRecentAuth, c.xtreamHlsStream)
+	r.GET("/play/:token/:type", requireRecentAuth, c.xtreamStreamPlay)
 }
 
 // m3uRoutes exposes a proxified, credential-rewritten M3U and its track endpoints.
@@ -127,7 +122,7 @@ func (c *Config) trackProxy(ctx *gin.Context) {
 	}
 	track := &c.playlist.Tracks[i]
 	file := strings.TrimPrefix(ctx.Param("file"), "/")
-	trackConfig := &Config{ProxyConfig: c.ProxyConfig, track: track}
+	trackConfig := &Config{ProxyConfig: c.ProxyConfig, track: track, imageKey: c.imageKey}
 	if strings.HasSuffix(track.URI, ".m3u8") {
 		if file == "" || strings.Contains(file, "/") {
 			ctx.AbortWithStatus(http.StatusNotFound)

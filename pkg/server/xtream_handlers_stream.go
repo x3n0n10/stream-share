@@ -78,8 +78,8 @@ func (c *Config) xtreamApiGet(ctx *gin.Context) {
 // viewer the multiplexed path applies full back-pressure and behaves like a
 // direct proxy; additional viewers reuse the same upstream connection.
 func (c *Config) xtreamStream(ctx *gin.Context, oriURL *url.URL) {
-	utils.DebugLog("-> Xtream streaming request: %s", ctx.Request.URL.Path)
-	utils.DebugLog("-> Proxying to Xtream upstream: %s", oriURL.String())
+	utils.DebugLog("-> Xtream streaming request: %s", c.redactRequestURI(ctx.Request.URL, ctx.FullPath()))
+	utils.DebugLog("-> Proxying to Xtream upstream: %s", utils.MaskURL(oriURL.String()))
 	c.multiplexedStream(ctx, oriURL)
 }
 
@@ -99,7 +99,7 @@ func (c *Config) xtreamStreamHandler(ctx *gin.Context) {
 	if c.rejectFilteredLive(ctx, id) {
 		return
 	}
-	rpURL, err := url.Parse(fmt.Sprintf("%s/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
+	rpURL, err := url.Parse(c.providerStreamURL("", id))
 	if err != nil {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
 		return
@@ -112,7 +112,7 @@ func (c *Config) xtreamStreamLive(ctx *gin.Context) {
 	if c.rejectFilteredLive(ctx, id) {
 		return
 	}
-	rpURL, err := url.Parse(fmt.Sprintf("%s/live/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
+	rpURL, err := url.Parse(c.providerStreamURL("live", id))
 	if err != nil {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
 		return
@@ -138,8 +138,7 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 
 	// Proxy upstream if catchup is disabled or the channel has native upstream support.
 	if c.catchupManager == nil || !c.catchupManager.IsEnabled() || c.catchupManager.HasUpstreamCatchup(idRaw) {
-		rpURL, err := url.Parse(fmt.Sprintf("%s/timeshift/%s/%s/%s/%s/%s",
-			c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, duration, start, idRaw))
+		rpURL, err := url.Parse(c.providerStreamURL("timeshift", duration, start, idRaw))
 		if err != nil {
 			_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
 			return
@@ -191,8 +190,7 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 
 	// Buffer exhausted — transition seamlessly to the live upstream so TiviMate
 	// catches up and continues watching without reconnecting on its own.
-	liveURL, err := url.Parse(fmt.Sprintf("%s/live/%s/%s/%s",
-		c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, idRaw))
+	liveURL, err := url.Parse(c.providerStreamURL("live", idRaw))
 	if err != nil {
 		return
 	}
@@ -395,12 +393,12 @@ func (c *Config) streamVODWithCache(ctx *gin.Context, basePath, defaultExt strin
 	// seekable and each viewer may be at a different position, so the direct
 	// proxy (c.stream) is used instead of multiplexing — sharing a single
 	// linear upstream connection across viewers does not work for VOD.
-	rpURL, err := url.Parse(fmt.Sprintf("%s/%s/%s/%s/%s", c.XtreamBaseURL, basePath, c.XtreamUser, c.XtreamPassword, id))
+	rpURL, err := url.Parse(c.providerStreamURL(basePath, id))
 	if err != nil {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
 		return
 	}
-	utils.DebugLog("VOD %s streaming request - proxying to upstream: %s", basePath, rpURL.String())
+	utils.DebugLog("VOD %s streaming request - proxying to upstream: %s", basePath, utils.MaskURL(rpURL.String()))
 	c.stream(ctx, rpURL)
 }
 
@@ -419,7 +417,7 @@ func (c *Config) xtreamProxyCredentialsStreamHandler(ctx *gin.Context) {
 		return
 	}
 	utils.DebugLog("Direct stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
-	rpURL, err := url.Parse(fmt.Sprintf("%s/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
+	rpURL, err := url.Parse(c.providerStreamURL("", id))
 	if err != nil {
 		utils.ErrorLog("Failed to parse upstream URL: %v", err)
 		ctx.AbortWithStatus(500)
@@ -434,7 +432,7 @@ func (c *Config) xtreamProxyCredentialsLiveStreamHandler(ctx *gin.Context) {
 		return
 	}
 	utils.DebugLog("Direct live stream request with proxy credentials: username=%s, id=%s", ctx.Param("username"), id)
-	rpURL, err := url.Parse(fmt.Sprintf("%s/live/%s/%s/%s", c.XtreamBaseURL, c.XtreamUser, c.XtreamPassword, id))
+	rpURL, err := url.Parse(c.providerStreamURL("live", id))
 	if err != nil {
 		utils.ErrorLog("Failed to parse upstream URL: %v", err)
 		ctx.AbortWithStatus(500)

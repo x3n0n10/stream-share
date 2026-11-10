@@ -59,10 +59,10 @@ func (c *Config) xtreamGenerateM3u(ctx *gin.Context, extension string) (*m3u.Pla
 
 	// this is specific to xtream API,
 	// prefix with "live" if there is an extension.
-	var prefix string
+	var kind string
 	if extension != "" {
 		extension = "." + extension
-		prefix = "live/"
+		kind = "live"
 	}
 
 	var playlist = new(m3u.Playlist)
@@ -136,7 +136,7 @@ func (c *Config) xtreamGenerateM3u(ctx *gin.Context, extension string) (*m3u.Pla
 			}
 
 			streamID = fmt.Sprintf("%v", streamMap["stream_id"])
-			track.URI = fmt.Sprintf("%s/%s%s/%s/%s%s", c.XtreamBaseURL, prefix, c.XtreamUser, c.XtreamPassword, streamID, extension)
+			track.URI = c.providerStreamURL(kind, streamID+extension)
 
 			utils.DebugLog("Added stream: %s (ID: %s)", track.Name, streamID)
 			playlist.Tracks = append(playlist.Tracks, track)

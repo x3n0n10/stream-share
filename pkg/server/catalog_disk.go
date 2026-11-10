@@ -22,6 +22,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +30,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -38,18 +40,24 @@ import (
 
 // diskCatalog is a provider catalogue (a JSON array) kept in the file raw, so
 // a list of hundreds of MB costs no heap. The JSON players get is rendered
-// once to raw+".render" (plus its .gz sibling); a category slice is cut from
-// that file by the byte spans recorded while rendering, so no list is ever
-// held in memory whole.
+// once per client-facing base URL to raw+".render-<hash>" (plus its .gz
+// sibling); a category slice is cut from that file by the byte spans recorded
+// while rendering, so no list is ever held in memory whole.
 type diskCatalog struct {
-	raw    string
-	mu     sync.Mutex
-	render *diskRender
+	raw     string
+	mu      sync.Mutex
+	renders []*diskRender // oldest first, at most maxCatalogRenders
+
+	// renderMu runs one render at a time per catalogue; a base already
+	// rendered is looked up under mu alone, so it never waits for one.
+	renderMu  sync.Mutex
+	harvested bool // guarded by renderMu: a render has fed the channel index and upstream catchup
 }
 
-// diskRender is a rendered whole list: its file, and per category id the
-// spans of that category's entries in it, in list order.
+// diskRender is a whole list rendered for base: its file, and per category id
+// the spans of that category's entries in it, in list order.
 type diskRender struct {
+	base  string
 	path  string
 	spans map[string][]catalogSpan
 }
@@ -102,30 +110,62 @@ func (d *diskCatalog) each(fn func(m map[string]interface{}) bool) error {
 	})
 }
 
-// ensureRender returns the rendered list, rendering it on first use. A failed
+// ensureRender returns the list rendered for base, rendering it on first use
+// and then dropping the oldest render beyond maxCatalogRenders. A failed
 // render leaves no files and is not stored, so the next request retries.
-func (d *diskCatalog) ensureRender(c *Config, action string) (*diskRender, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.render != nil {
-		return d.render, nil
+func (d *diskCatalog) ensureRender(c *Config, action, base string) (*diskRender, error) {
+	if r := d.renderOf(base); r != nil {
+		return r, nil
 	}
-	r := &diskRender{path: d.raw + ".render", spans: map[string][]catalogSpan{}}
-	if err := d.writeRender(c, action, r); err != nil {
+	d.renderMu.Lock()
+	defer d.renderMu.Unlock()
+	if r := d.renderOf(base); r != nil {
+		return r, nil // rendered while this request waited
+	}
+	// The file name carries a hash, never the base: the Host header is client input.
+	sum := sha256.Sum256([]byte(base))
+	path := fmt.Sprintf("%s.render-%x", d.raw, sum[:4])
+	// A base whose hash collides would share the file this render overwrites.
+	d.mu.Lock()
+	d.renders = slices.DeleteFunc(d.renders, func(r *diskRender) bool { return r.path == path })
+	d.mu.Unlock()
+	r := &diskRender{base: base, path: path, spans: map[string][]catalogSpan{}}
+	if err := d.writeRender(c, action, r, !d.harvested); err != nil {
 		for _, p := range []string{r.path + ".part", r.path, r.path + ".gz"} {
 			_ = os.Remove(p)
 		}
 		return nil, err
 	}
-	d.render = r
+	d.harvested = true
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.renders) == maxCatalogRenders {
+		// A request still streaming the old file keeps reading its open descriptor.
+		_ = os.Remove(d.renders[0].path)
+		_ = os.Remove(d.renders[0].path + ".gz")
+		d.renders = slices.Delete(d.renders, 0, 1) // zeroes the freed slot, so its span index can be collected
+	}
+	d.renders = append(d.renders, r)
 	return r, nil
 }
 
-// writeRender writes to r.path what renderCatalog(action, list, true) would
-// encode, one item at a time: json.Marshal of a list is its items' encodings
-// joined by commas. Non-object items pass through unfiltered, as in
-// filterEntries, and belong to no category.
-func (d *diskCatalog) writeRender(c *Config, action string, r *diskRender) error {
+// renderOf returns the stored render for base, or nil.
+func (d *diskCatalog) renderOf(base string) *diskRender {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, r := range d.renders {
+		if r.base == base {
+			return r
+		}
+	}
+	return nil
+}
+
+// writeRender writes to r.path what renderCatalog(action, list, harvest,
+// r.base) would encode, one item at a time: json.Marshal of a list is its
+// items' encodings joined by commas. Non-object items pass through
+// unfiltered, as in filterEntries, and belong to no category.
+func (d *diskCatalog) writeRender(c *Config, action string, r *diskRender, harvest bool) error {
 	a, known := catalogActions[action]
 	filtering := known && c.catalogFilter.ActiveFor(a.kind)
 	var names map[string]string
@@ -133,8 +173,9 @@ func (d *diskCatalog) writeRender(c *Config, action string, r *diskRender) error
 		names = c.categoryNames(a.pair)
 	}
 	live := action == "get_live_streams"
+	harvesting := live && harvest
 	flag := live && c.catchupManager != nil && c.catchupManager.IsEnabled()
-	harvest, upstream := newChannelHarvest(), map[string]bool{}
+	channels, upstream := newChannelHarvest(), map[string]bool{}
 
 	tmp := r.path + ".part"
 	f, err := os.Create(tmp)
@@ -150,9 +191,9 @@ func (d *diskCatalog) writeRender(c *Config, action string, r *diskRender) error
 	err = walkCatalogFile(d.raw, func(v interface{}) bool {
 		m, isObj := v.(map[string]interface{})
 		if isObj {
-			if live {
+			if harvesting {
 				// Names come from the full list, as in renderCatalog.
-				harvest.add(m)
+				channels.add(m)
 			}
 			if filtering && !c.keepCatalogEntry(a.kind, m, names) {
 				return true
@@ -162,7 +203,7 @@ func (d *diskCatalog) writeRender(c *Config, action string, r *diskRender) error
 			}
 		}
 		var b []byte
-		if b, merr = json.Marshal(v); merr != nil {
+		if b, merr = json.Marshal(c.clientSafeValue(r.base, v)); merr != nil {
 			return false
 		}
 		if off > 1 { // an item already follows the '['
@@ -207,10 +248,10 @@ func (d *diskCatalog) writeRender(c *Config, action string, r *diskRender) error
 	if err != nil {
 		return err
 	}
-	if live {
-		c.applyChannelHarvest(harvest)
+	if harvesting {
+		c.applyChannelHarvest(channels)
 	}
-	if flag {
+	if flag && harvest {
 		c.catchupManager.SetUpstreamCatchup(upstream)
 	}
 	return nil
@@ -219,7 +260,7 @@ func (d *diskCatalog) writeRender(c *Config, action string, r *diskRender) error
 // serveWhole sends the rendered file. Unlike sendCatalogJSON it makes no
 // debug-mode dump: the body is already a file in the cache folder.
 func (d *diskCatalog) serveWhole(ctx *gin.Context, c *Config, action string) error {
-	r, err := d.ensureRender(c, action)
+	r, err := d.ensureRender(c, action, c.requestBaseURL(ctx))
 	if err != nil {
 		return err
 	}
@@ -230,7 +271,7 @@ func (d *diskCatalog) serveWhole(ctx *gin.Context, c *Config, action string) err
 // serveSlice sends the category's entries, read from the rendered file by
 // their spans. An unknown category is [].
 func (d *diskCatalog) serveSlice(ctx *gin.Context, c *Config, action, categoryID string) error {
-	r, err := d.ensureRender(c, action)
+	r, err := d.ensureRender(c, action, c.requestBaseURL(ctx))
 	if err != nil {
 		return err
 	}
@@ -259,9 +300,11 @@ func (d *diskCatalog) serveSlice(ctx *gin.Context, c *Config, action, categoryID
 	return w.Close()
 }
 
-// removeCatalogFiles deletes a disk catalogue's files, given its raw path.
+// removeCatalogFiles deletes a disk catalogue's files, given its raw path:
+// the raw list and every base URL's render.
 func removeCatalogFiles(raw string) {
-	for _, p := range []string{raw, raw + ".render", raw + ".render.gz"} {
+	renders, _ := filepath.Glob(raw + ".render-*")
+	for _, p := range append(renders, raw) {
 		_ = os.Remove(p)
 	}
 }

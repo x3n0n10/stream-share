@@ -58,7 +58,7 @@ func (m *DBManager) CreateTemporaryLink(token, username, url, streamID, title st
 
 // GetTemporaryLink retrieves a temporary link by token
 func (m *DBManager) GetTemporaryLink(token string) (*types.TemporaryLink, error) {
-	utils.DebugLog("Database: Getting temporary link for token %s", token)
+	utils.DebugLog("Database: Getting temporary link for token %s", utils.MaskString(token))
 	if m == nil || m.db == nil {
 		return nil, fmt.Errorf("database not initialized")
 	}

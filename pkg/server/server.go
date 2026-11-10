@@ -23,7 +23,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -82,6 +81,9 @@ type Config struct {
 	// startTime records process start, used to report uptime via the API
 	startTime time.Time
 
+	// imageKey signs /img links (see imageSignature)
+	imageKey []byte
+
 	// ready flips to 1 once startup completes and the server is about to listen,
 	// so /healthz can report container readiness for `depends_on:
 	// condition: service_healthy` ordering. Accessed atomically (0 = starting).
@@ -114,6 +116,7 @@ type Config struct {
 
 // NewServer initializes a new server configuration with all necessary components.
 func NewServer(config *config.ProxyConfig) (*Config, error) {
+	utils.RegisterSecrets(config.XtreamUser.String(), config.XtreamPassword.String(), config.User.String(), config.Password.String())
 	config.CatalogStorage = parseCatalogStorage(config.CatalogStorage)
 	applyCatalogMemoryLimit(config.CatalogStorage)
 	var p m3u.Playlist
@@ -166,6 +169,7 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		discordBot:           nil,
 		startTime:            time.Now(),
 		catalogFilter:        catalogFilter,
+		imageKey:             loadImageSigningKey(utils.CacheRoot()),
 	}
 
 	// Provider health check: report-only. Reconnecting the VPN on a bad result is
@@ -462,6 +466,21 @@ func (c *Config) Serve() error {
 		defer close(ldapSweepStop)
 	}
 
+	recentAuthSweepStop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-recentAuthSweepStop:
+				return
+			case now := <-ticker.C:
+				sweepRecentAuth(now)
+			}
+		}
+	}()
+	defer close(recentAuthSweepStop)
+
 	if c.sessionManager != nil {
 		defer c.sessionManager.Stop()
 	}
@@ -481,19 +500,18 @@ func (c *Config) Serve() error {
 	// gin.New() rather than gin.Default(): the default access logger logs every
 	// request, which drowns the log in noise from the frequently-polled /healthz
 	// and internal API endpoints. Log only failures (>= 400) unless debug logging
-	// is on, in which case fall back to the full access log.
-	// Release mode unless debug logging is on: in debug mode gin prints every
-	// route at startup, and the Xtream stream routes embed the provider's
-	// username and password in their paths. An explicit GIN_MODE still wins.
-	if os.Getenv(gin.EnvGinMode) == "" && !utils.IsDebugLogEnabled() {
+	// is on, in which case successful requests are logged too, credentials redacted.
+	// Release mode always (unless GIN_MODE is set): in debug mode gin prints
+	// every route at startup straight to stdout, bypassing log redaction, and
+	// the Xtream stream routes embed the provider's username and password.
+	if os.Getenv(gin.EnvGinMode) == "" {
 		gin.SetMode(gin.ReleaseMode)
 	}
 	router := gin.New()
-	if utils.IsDebugLogEnabled() {
-		router.Use(gin.Logger())
-	} else {
-		router.Use(c.quietRequestLogger())
+	if err := c.applyTrustedProxies(router); err != nil {
+		return fmt.Errorf("invalid trusted proxy list: %w", err)
 	}
+	router.Use(c.quietRequestLogger())
 	router.Use(gin.Recovery())
 	router.Use(cors.Default())
 	utils.InfoLog("Setting up routes and internal API...")
@@ -538,22 +556,25 @@ func (c *Config) Serve() error {
 	return router.Run(fmt.Sprintf(":%d", c.HostConfig.Port))
 }
 
-// quietRequestLogger logs only failed HTTP requests (status >= 400), keeping the
-// success flood — health checks, internal API polling — out of the log. Requests
-// it does log go through the project logger at a severity matching their status.
+// quietRequestLogger logs failed HTTP requests (status >= 400) at a severity
+// matching their status, and successful ones only in debug mode, keeping the
+// success flood — health checks, internal API polling — out of the normal log.
+// Unlike gin.Logger it redacts credentials from the logged URI.
 func (c *Config) quietRequestLogger() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		start := time.Now()
 		ctx.Next()
 
 		status := ctx.Writer.Status()
-		if status < 400 {
+		if status < 400 && !utils.IsDebugLogEnabled() {
 			return
 		}
 		msg := fmt.Sprintf("[HTTP] %d | %v | %s | %s %q",
 			status, time.Since(start), ctx.ClientIP(), ctx.Request.Method, c.redactRequestURI(ctx.Request.URL, ctx.FullPath()))
 		if status >= 500 {
 			utils.ErrorLog("%s", msg)
+		} else if status < 400 {
+			utils.DebugLog("%s", msg)
 		} else {
 			utils.WarnLog("%s", msg)
 		}
@@ -631,17 +652,8 @@ func (c *Config) authWithPathCredentials() gin.HandlerFunc {
 
 		utils.DebugLog("Path credentials auth check: username=%s, IP=%s", username, ip)
 
-		// If LDAP is enabled, authenticate against LDAP
-		if c.LDAPEnabled {
-			ok := c.ldapAuthenticateCached(username, password)
-			if !ok {
-				utils.DebugLog("LDAP authentication failed for user in path: %s", username)
-				ctx.AbortWithStatus(http.StatusUnauthorized)
-				return
-			}
-			utils.DebugLog("LDAP authentication succeeded for user in path: %s", username)
-		} else if c.User.String() != username || c.Password.String() != password {
-			utils.DebugLog("Local authentication failed for user in path: %s", username)
+		if !c.credentialsValid(username, password) {
+			utils.DebugLog("Authentication failed for user in path: %s", username)
 			ctx.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
@@ -981,7 +993,7 @@ func (c *Config) marshallInto(into *os.File, xtream bool) error {
 		uri, err := c.replacePath(track.URI, i-ret, xtream)
 		if err != nil {
 			ret++
-			log.Printf("ERROR: track: %s: %s", track.Name, err)
+			utils.ErrorLog("track: %s: %s", track.Name, err)
 			continue
 		}
 

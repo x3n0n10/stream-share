@@ -20,17 +20,79 @@ package server
 
 import (
 	"bufio"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
+
+const (
+	imageSigningKeyFile = "image-signing.key"
+	imageSigningKeySize = 32
+)
+
+// loadImageSigningKey returns the HMAC key that signs /img links, creating
+// and persisting it on first use so links already handed to players survive
+// a restart. Never returns nil: when the key cannot be stored it stays in
+// memory only.
+func loadImageSigningKey(dir string) []byte {
+	path := filepath.Join(dir, imageSigningKeyFile)
+	existing, err := os.ReadFile(path)
+	if err == nil && len(existing) == imageSigningKeySize {
+		return existing
+	}
+	key := make([]byte, imageSigningKeySize)
+	if _, readErr := rand.Read(key); readErr != nil {
+		panic(readErr) // crypto/rand failing is unrecoverable
+	}
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		// unreadable but present: keep the file, use an in-memory key
+		utils.WarnLog("Image links: cannot read the signing key in %s (%v); links change on the next restart", dir, err)
+		return key
+	}
+	_ = os.MkdirAll(dir, 0o755)                              // the cache root may not exist yet; a failure surfaces below
+	tmp, err := os.CreateTemp(dir, imageSigningKeyFile+".*") // CreateTemp makes it 0600
+	if err == nil {
+		_, err = tmp.Write(key)
+		if cerr := tmp.Close(); err == nil {
+			err = cerr
+		}
+		if err == nil {
+			err = os.Rename(tmp.Name(), path)
+		}
+		if err != nil {
+			_ = os.Remove(tmp.Name())
+		}
+	}
+	if err != nil {
+		utils.WarnLog("Image links: cannot store the signing key in %s (%v); links change on the next restart", dir, err)
+	}
+	return key
+}
+
+// imageSignature authenticates raw so /img only fetches URLs this server
+// handed out (the route is otherwise an open fetch-any-URL proxy).
+func (c *Config) imageSignature(raw string) string {
+	if len(c.imageKey) == 0 {
+		panic("image signing key not set") // never sign with a key anyone can compute
+	}
+	m := hmac.New(sha256.New, c.imageKey)
+	m.Write([]byte(raw))
+	return base64.RawURLEncoding.EncodeToString(m.Sum(nil)[:16])
+}
 
 // proxyImagePath returns the relative /img?url= path for raw, with no
 // scheme or host — for callers with no live request (see marshallInto).
@@ -43,7 +105,7 @@ func (c *Config) proxyImagePath(raw string) string {
 	if customEnd != "" {
 		customEnd = "/" + customEnd
 	}
-	return fmt.Sprintf("%s/img?url=%s", customEnd, url.QueryEscape(raw))
+	return customEnd + "/img?url=" + url.QueryEscape(raw) + "&sig=" + c.imageSignature(raw)
 }
 
 // proxyImageURL rewrites an absolute image/asset URL to point at this
@@ -56,47 +118,6 @@ func (c *Config) proxyImageURL(ctx *gin.Context, raw string) string {
 		return raw // proxyImagePath left it untouched (empty/malformed/relative)
 	}
 	return c.requestBaseURL(ctx) + path
-}
-
-// rewriteImageFields walks a JSON-decoded player_api response (nested
-// map[string]interface{} / []interface{}) and rewrites every known
-// upstream-image field through proxyImageURL, in place, at any nesting
-// depth. direct_source is deleted rather than rewritten: a player that
-// uses it bypasses c.sessionManager's multiplexing entirely, and hiding
-// the URL wouldn't restore that, so it's dropped to force a fall back to
-// the session-managed stream_id play URL instead.
-func (c *Config) rewriteImageFields(ctx *gin.Context, v interface{}) interface{} {
-	switch val := v.(type) {
-	case map[string]interface{}:
-		for key, fieldVal := range val {
-			switch key {
-			case "stream_icon", "cover", "movie_image":
-				if s, ok := fieldVal.(string); ok {
-					val[key] = c.proxyImageURL(ctx, s)
-				}
-			case "backdrop_path":
-				if arr, ok := fieldVal.([]interface{}); ok {
-					for i, item := range arr {
-						if s, ok := item.(string); ok {
-							arr[i] = c.proxyImageURL(ctx, s)
-						}
-					}
-				}
-			case "direct_source":
-				delete(val, key)
-			default:
-				val[key] = c.rewriteImageFields(ctx, fieldVal)
-			}
-		}
-		return val
-	case []interface{}:
-		for i, item := range val {
-			val[i] = c.rewriteImageFields(ctx, item)
-		}
-		return val
-	default:
-		return v
-	}
 }
 
 // rewriteM3U8 rewrites every segment, key, and sub-playlist URI in an HLS
@@ -157,16 +178,10 @@ func rewriteQuotedURI(line, key string, rewrite func(string) string) string {
 	return line[:start+1] + rewrite(value) + line[end:]
 }
 
-// assetProxy fetches an arbitrary http(s) URL and streams it back, so
-// upstream image/manifest URLs never reach the client directly. There is
-// deliberately no host allowlist and no per-request credentials: content
-// reached via this route (rewritten into player_api/xmltv/M3U responses)
-// never carried proxy credentials to begin with, since players fetch it
-// directly with no way to attach a username/password. The route is
-// instead guarded by requireRecentAuth (see routes.go), which requires
-// the calling IP to have authenticated successfully elsewhere recently.
-// The known cost: within that window, anyone sharing the IP can make
-// this server fetch arbitrary http(s) URLs.
+// assetProxy fetches an http(s) URL this server signed (see imageSignature)
+// and streams it back, so upstream image/manifest URLs never reach the client
+// directly. Players fetch these links with no way to attach credentials, so
+// the signature in the link is the only gate; anything unsigned is a 403.
 //
 // A response whose Content-Type or requested path indicates an HLS
 // manifest is buffered and run through rewriteM3U8 instead of streamed
@@ -174,6 +189,10 @@ func rewriteQuotedURI(line, key string, rewrite func(string) string) string {
 // same route — recursively, since a rewritten sub-playlist is fetched
 // through /img again and re-enters this same check.
 func (c *Config) assetProxy(ctx *gin.Context) {
+	if !hmac.Equal([]byte(ctx.Query("sig")), []byte(c.imageSignature(ctx.Query("url")))) {
+		ctx.AbortWithStatus(http.StatusForbidden)
+		return
+	}
 	target, err := url.Parse(ctx.Query("url"))
 	if err != nil || (target.Scheme != "http" && target.Scheme != "https") {
 		ctx.AbortWithStatus(http.StatusBadRequest)
@@ -253,13 +272,15 @@ func (c *Config) requestBaseURL(ctx *gin.Context) string {
 	return fmt.Sprintf("%s://%s", protocol, host)
 }
 
-// rewritePlaylistHostsTo makes an M3U body client-ready by turning every track
-// URI and tvg-logo into an absolute URL on the current request's base URL.
-// marshallInto only emits relative values, so a value starting with "/" is
-// ours to prefix as is. The streamed get.php rewrite (m3u_stream_rewrite.go)
-// leaves the provider's absolute URLs in place, so those are mapped here the
-// way replacePath / proxyImagePath would have: a track keeps just its path
-// under the custom endpoint, a logo goes through /img.
+// rewritePlaylistHostsTo makes an M3U body client-ready: every URL in it ends
+// up on the current request's base URL. marshallInto only emits relative
+// values, so a track or tvg-logo starting with "/" is ours to prefix as is.
+// The streamed get.php rewrite (m3u_stream_rewrite.go) leaves the provider's
+// absolute URLs in place, so those are mapped here: a track keeps just its
+// path under the custom endpoint; url-tvg / x-tvg-url (whose provider value
+// carries the provider's credentials) become this server's own guide for the
+// viewer's credentials, or go when there are none; any other http(s) URL in an
+// attribute or directive goes through /img.
 // It works line by line, so a large playlist is never held in memory;
 // ReadString has no line-length limit.
 func (c *Config) rewritePlaylistHostsTo(ctx *gin.Context, r io.Reader, w io.Writer) error {
@@ -267,6 +288,37 @@ func (c *Config) rewritePlaylistHostsTo(ctx *gin.Context, r io.Reader, w io.Writ
 	customEnd := strings.Trim(c.CustomEndpoint, "/")
 	if customEnd != "" {
 		customEnd = "/" + customEnd
+	}
+	var guide string
+	if user := ctx.Request.FormValue("username"); user != "" && c.XtreamBaseURL != "" { // only Xtream mode serves /xmltv.php
+		guide = base + customEnd + "/xmltv.php?" + url.Values{"username": {user}, "password": {ctx.Request.FormValue("password")}}.Encode()
+	}
+	// A provider URL goes to our own routes (catchup templates keep their
+	// placeholders, credentials become the local ones); anything else via /img.
+	proxied := func(raw string) string {
+		raw = strings.TrimSpace(raw)
+		if local, _, ok := c.localizeProviderURL(base, raw); ok {
+			return local
+		}
+		return base + c.proxyImagePath(raw)
+	}
+	attr := func(key, value string) (string, bool) {
+		switch {
+		case key == "url-tvg" || key == "x-tvg-url":
+			return guide, guide != ""
+		case key == "tvg-logo" && strings.HasPrefix(value, "/"):
+			return base + value, true
+		case key == "tvg-logo" && isFetchableURL(value):
+			// We have no route for a provider's images: /img, unless it carries credentials.
+			raw := strings.TrimSpace(value)
+			if local, creds, _ := c.localizeProviderURL(base, raw); creds {
+				return local, true
+			}
+			return base + c.proxyImagePath(raw), true
+		case isFetchableURL(value):
+			return proxied(value), true
+		}
+		return value, true
 	}
 	br := bufio.NewReader(r)
 	bw := bufio.NewWriter(w)
@@ -276,17 +328,10 @@ func (c *Config) rewritePlaylistHostsTo(ctx *gin.Context, r io.Reader, w io.Writ
 		line = strings.TrimSuffix(line, "\n")
 		trimmed := strings.TrimRight(line, "\r")
 		switch {
-		case strings.HasPrefix(trimmed, "#EXTINF") && strings.Contains(trimmed, "tvg-logo="):
-			line = rewriteQuotedURI(trimmed, "tvg-logo=", func(raw string) string {
-				if strings.HasPrefix(raw, "/") {
-					return base + raw
-				}
-				if isHTTPURL(raw) {
-					return base + c.proxyImagePath(raw)
-				}
-				return raw
-			})
+		case strings.HasPrefix(trimmed, "#EXTM3U") || strings.HasPrefix(trimmed, "#EXTINF"):
+			line = rewriteM3UAttrs(trimmed, attr) + line[len(trimmed):]
 		case strings.HasPrefix(trimmed, "#"):
+			line = rewriteEmbeddedURLs(trimmed, proxied) + line[len(trimmed):]
 		case strings.HasPrefix(trimmed, "/"):
 			line = base + trimmed
 		case isHTTPURL(trimmed):
@@ -325,6 +370,62 @@ func (c *Config) streamPlaylist(ctx *gin.Context, path string) {
 		utils.WarnLog("playlist stream aborted: %v", err) // headers are already sent
 	}
 	_ = w.Close()
+}
+
+// rewriteM3UAttrs passes every key="value" attribute of an #EXTM3U/#EXTINF
+// line through fn, which returns the new value, or false to drop the attribute.
+func rewriteM3UAttrs(line string, fn func(key, value string) (string, bool)) string {
+	var b strings.Builder
+	for {
+		eq := strings.Index(line, `="`)
+		if eq < 0 {
+			break
+		}
+		end := strings.IndexByte(line[eq+2:], '"')
+		if end < 0 {
+			break
+		}
+		end += eq + 2
+		k := strings.LastIndexAny(line[:eq], " \t") + 1
+		if value, keep := fn(line[k:eq], line[eq+2:end]); keep {
+			b.WriteString(line[:eq+2])
+			b.WriteString(value)
+			b.WriteByte('"')
+		} else {
+			b.WriteString(strings.TrimRight(line[:k], " \t"))
+		}
+		line = line[end+1:]
+	}
+	b.WriteString(line)
+	return b.String()
+}
+
+// rewriteEmbeddedURLs replaces each http(s) URL in line (up to the next blank,
+// quote or |) that isFetchableURL accepts with fn(url).
+func rewriteEmbeddedURLs(line string, fn func(string) string) string {
+	var b strings.Builder
+	for {
+		i := strings.Index(line, "http://")
+		if j := strings.Index(line, "https://"); j >= 0 && (i < 0 || j < i) {
+			i = j
+		}
+		if i < 0 {
+			break
+		}
+		n := strings.IndexAny(line[i:], " \t\"'|") // a | starts Kodi's header suffix
+		if n < 0 {
+			n = len(line) - i
+		}
+		u := line[i : i+n]
+		b.WriteString(line[:i])
+		if isFetchableURL(u) {
+			u = fn(u)
+		}
+		b.WriteString(u)
+		line = line[i+n:]
+	}
+	b.WriteString(line)
+	return b.String()
 }
 
 func isHTTPURL(s string) bool {

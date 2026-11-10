@@ -19,7 +19,6 @@
 package server
 
 import (
-	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -31,6 +30,7 @@ import (
 func TestMarshallIntoRewritesTvgLogo(t *testing.T) {
 	c := &Config{
 		ProxyConfig: &config.ProxyConfig{},
+		imageKey:    testImageKey,
 		playlist: &m3u.Playlist{
 			Tracks: []m3u.Track{
 				{
@@ -62,7 +62,7 @@ func TestMarshallIntoRewritesTvgLogo(t *testing.T) {
 	}
 	out := string(data)
 
-	wantLogo := "/img?url=" + url.QueryEscape("http://upstream.example.com/logo1.png")
+	wantLogo := c.proxyImagePath("http://upstream.example.com/logo1.png")
 	if !strings.Contains(out, wantLogo) {
 		t.Errorf("output %q does not contain relative rewritten tvg-logo %q", out, wantLogo)
 	}

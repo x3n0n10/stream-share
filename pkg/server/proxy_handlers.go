@@ -73,8 +73,8 @@ func (c *Config) reverseProxy(ctx *gin.Context) {
 	q.Set("password", c.XtreamPassword.String())
 	rpURL.RawQuery = q.Encode()
 
-	utils.DebugLog("-> Upstream username: %s", c.XtreamUser.String())
-	utils.DebugLog("-> Final upstream URL: %s", rpURL.String())
+	utils.DebugLog("-> Upstream username: %s", utils.MaskString(c.XtreamUser.String()))
+	utils.DebugLog("-> Final upstream URL: %s", utils.MaskURL(rpURL.String()))
 
 	c.stream(ctx, rpURL)
 }
@@ -93,8 +93,8 @@ func (c *Config) m3u8ReverseProxy(ctx *gin.Context) {
 	q.Set("password", c.XtreamPassword.String())
 	rpURL.RawQuery = q.Encode()
 
-	utils.DebugLog("-> Upstream username: %s", c.XtreamUser.String())
-	utils.DebugLog("-> Final upstream URL: %s", rpURL.String())
+	utils.DebugLog("-> Upstream username: %s", utils.MaskString(c.XtreamUser.String()))
+	utils.DebugLog("-> Final upstream URL: %s", utils.MaskURL(rpURL.String()))
 
 	req, err := c.buildUpstreamRequest(ctx, rpURL)
 	if err != nil {
@@ -130,6 +130,18 @@ func (c *Config) m3u8ReverseProxy(ctx *gin.Context) {
 	ctx.Data(resp.StatusCode, contentType, body)
 }
 
+// forwardedClientHeaders are the only client headers sent to the provider;
+// cookies, Authorization and X-Forwarded-For must never leave this proxy.
+var forwardedClientHeaders = []string{"Range", "If-Range", "Accept", "Accept-Language"}
+
+func copyForwardedHeaders(dst, src http.Header) {
+	for _, k := range forwardedClientHeaders {
+		if v := src.Values(k); len(v) > 0 {
+			dst[http.CanonicalHeaderKey(k)] = append([]string(nil), v...)
+		}
+	}
+}
+
 // buildUpstreamRequest constructs the outbound request to oriURL, using the
 // strict VOD header whitelist for VOD-shaped paths and a minimal
 // passthrough header set otherwise.
@@ -141,16 +153,13 @@ func (c *Config) buildUpstreamRequest(ctx *gin.Context, oriURL *url.URL) (*http.
 	if isVODPath(oriURL.Path) {
 		req.Header = prepareVODHeaders(ctx)
 	} else {
-		mergeHttpHeader(req.Header, ctx.Request.Header)
+		copyForwardedHeaders(req.Header, ctx.Request.Header)
 		req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
-		req.Header.Del("Accept-Encoding")
 		req.Header.Set("Accept-Encoding", "identity")
 		if req.Header.Get("Accept") == "" {
 			req.Header.Set("Accept", "*/*")
 		}
-		if req.Header.Get("Connection") == "" {
-			req.Header.Set("Connection", "keep-alive")
-		}
+		req.Header.Set("Connection", "keep-alive")
 	}
 	return req, nil
 }
@@ -189,7 +198,7 @@ func writeUpstreamResponse(ctx *gin.Context, resp *http.Response, isVOD bool) {
 	for {
 		select {
 		case <-ctx.Request.Context().Done():
-			utils.DebugLog("Client cancelled stream for URL: %s", ctx.Request.URL)
+			utils.DebugLog("Client cancelled stream")
 			return
 		default:
 		}
@@ -216,8 +225,8 @@ func writeUpstreamResponse(ctx *gin.Context, resp *http.Response, isVOD bool) {
 // stream proxies the content from upstream to the client, preserving status
 // and most headers, while normalizing VOD header sets for stricter providers.
 func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
-	utils.DebugLog("-> Streaming request URL: %s", ctx.Request.URL)
-	utils.DebugLog("-> Proxying to upstream URL: %s", oriURL.String())
+	utils.DebugLog("-> Streaming request URL: %s", c.redactRequestURI(ctx.Request.URL, ctx.FullPath()))
+	utils.DebugLog("-> Proxying to upstream URL: %s", utils.MaskURL(oriURL.String()))
 
 	req, err := c.buildUpstreamRequest(ctx, oriURL)
 	if err != nil {

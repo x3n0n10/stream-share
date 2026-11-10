@@ -42,13 +42,14 @@ import (
 
 // diskTestBody covers string and numeric ids, category_ids, a hidden name, a
 // hidden category, a non-object element, numbers and HTML-escaped text that
-// must survive re-encoding, and trailing bytes after the array.
-const diskTestBody = `[{"stream_id":"1","name":"A| One","category_id":"42","tv_archive":0,"epg_channel_id":"one.a"},
+// must survive re-encoding, image URLs and a direct_source to rewrite, and
+// trailing bytes after the array.
+const diskTestBody = `[{"stream_id":"1","name":"A| One","category_id":"42","tv_archive":0,"epg_channel_id":"one.a","stream_icon":"http://prov.example/1.png","direct_source":"http://prov.example/live/1.ts"},
  {"stream_id":2,"name":"A| Two","category_id":43,"tv_archive":1,"category_ids":[43,7]},
  {"stream_id":"7703","name":"B| Hidden","category_id":"42"},
  {"stream_id":"4","name":"A| Four","category_id":"99"},
  "junk",
- {"stream_id":"5","name":"A| Five <b>&</b>","category_id":"10","category_ids":["7"],"rating":1.50},
+ {"stream_id":"5","name":"A| Five <b>&</b>","category_id":"10","category_ids":["7"],"rating":1.50,"backdrop_path":["https://cdn.example/b5.jpg"]},
  {"stream_id":"6","name":"A| Six","category_ids":[7,"7"]}] trailing`
 
 // writeDiskCatalog writes body to a fresh file and returns the disk store and
@@ -104,9 +105,16 @@ type servedCatalog struct {
 // serveTest runs serve against a test request and returns the decompressed body.
 func serveTest(t *testing.T, gz bool, serve func(ctx *gin.Context) error) servedCatalog {
 	t.Helper()
+	return serveTestHost(t, "example.com", gz, serve)
+}
+
+// serveTestHost is serveTest with the request's Host set to host.
+func serveTestHost(t *testing.T, host string, gz bool, serve func(ctx *gin.Context) error) servedCatalog {
+	t.Helper()
 	w := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(w)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/player_api.php", nil)
+	ctx.Request.Host = host
 	if gz {
 		ctx.Request.Header.Set("Accept-Encoding", "gzip")
 	}
@@ -176,11 +184,16 @@ func TestDiskCatalogWholeIsByteIdentical(t *testing.T) {
 	for _, cb := range diskCombos() {
 		c := diskTestConfig(t, cb.filtered, cb.withCatch)
 		d, m := writeDiskCatalog(t, diskTestBody)
-		for _, gz := range []bool{false, true} {
-			want := serveTest(t, gz, func(ctx *gin.Context) error { return m.serveWhole(ctx, c, cb.action) })
-			got := serveTest(t, gz, func(ctx *gin.Context) error { return d.serveWhole(ctx, c, cb.action) })
-			if got != want {
-				t.Fatalf("%+v gzip=%v:\ndisk   %+v\nmemory %+v", cb, gz, got, want)
+		for _, host := range []string{"a.example", "b.example"} {
+			for _, gz := range []bool{false, true} {
+				want := serveTestHost(t, host, gz, func(ctx *gin.Context) error { return m.serveWhole(ctx, c, cb.action) })
+				got := serveTestHost(t, host, gz, func(ctx *gin.Context) error { return d.serveWhole(ctx, c, cb.action) })
+				if got != want {
+					t.Fatalf("%+v %s gzip=%v:\ndisk   %+v\nmemory %+v", cb, host, gz, got, want)
+				}
+				if !strings.Contains(got.body, "http://"+host+"/img?url=") || strings.Contains(got.body, "direct_source") {
+					t.Fatalf("%+v %s: links not rewritten: %s", cb, host, got.body)
+				}
 			}
 		}
 	}
@@ -190,12 +203,14 @@ func TestDiskCatalogSliceIsByteIdentical(t *testing.T) {
 	for _, cb := range diskCombos() {
 		c := diskTestConfig(t, cb.filtered, cb.withCatch)
 		d, m := writeDiskCatalog(t, diskTestBody)
-		for _, cat := range []string{"42", "43", "7", "999"} {
-			for _, gz := range []bool{false, true} {
-				want := serveTest(t, gz, func(ctx *gin.Context) error { return m.serveSlice(ctx, c, cb.action, cat) })
-				got := serveTest(t, gz, func(ctx *gin.Context) error { return d.serveSlice(ctx, c, cb.action, cat) })
-				if got != want {
-					t.Fatalf("%+v category %s gzip=%v:\ndisk   %+v\nmemory %+v", cb, cat, gz, got, want)
+		for _, host := range []string{"a.example", "b.example"} {
+			for _, cat := range []string{"42", "43", "7", "999"} {
+				for _, gz := range []bool{false, true} {
+					want := serveTestHost(t, host, gz, func(ctx *gin.Context) error { return m.serveSlice(ctx, c, cb.action, cat) })
+					got := serveTestHost(t, host, gz, func(ctx *gin.Context) error { return d.serveSlice(ctx, c, cb.action, cat) })
+					if got != want {
+						t.Fatalf("%+v %s category %s gzip=%v:\ndisk   %+v\nmemory %+v", cb, host, cat, gz, got, want)
+					}
 				}
 			}
 		}
@@ -225,7 +240,8 @@ func TestDiskCatalogRendersOnceConcurrently(t *testing.T) {
 		return bodies
 	}
 	first := wave()
-	info, err := os.Stat(d.raw + ".render")
+	render := testRenderPath(d.raw, "http://example.com")
+	info, err := os.Stat(render)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +251,7 @@ func TestDiskCatalogRendersOnceConcurrently(t *testing.T) {
 			t.Fatalf("bodies differ: %q vs %q", b, first[0])
 		}
 	}
-	if again, err := os.Stat(d.raw + ".render"); err != nil || !again.ModTime().Equal(info.ModTime()) {
+	if again, err := os.Stat(render); err != nil || !again.ModTime().Equal(info.ModTime()) {
 		t.Fatalf("render file rewritten: %v %v", again.ModTime(), info.ModTime())
 	}
 }
@@ -349,8 +365,8 @@ func TestDiskModeReplacedFilesRemovedAfterGrace(t *testing.T) {
 		t.Fatalf("old file removed before the grace: %v", err)
 	}
 	time.Sleep(200 * time.Millisecond)
-	if _, err := os.Stat(old.raw + ".render"); !os.IsNotExist(err) {
-		t.Fatalf("old render still there after the grace: %v", err)
+	if renders, _ := filepath.Glob(old.raw + ".render-*"); len(renders) != 0 {
+		t.Fatalf("old renders still there after the grace: %v", renders)
 	}
 	if _, err := os.Stat(old.raw); !os.IsNotExist(err) {
 		t.Fatalf("old file still there after the grace: %v", err)
@@ -430,5 +446,70 @@ func TestLiveChannelNumberFromDiskCatalogue(t *testing.T) {
 		if n, ok := c.liveChannelNumber(id); !ok || n != want {
 			t.Errorf("liveChannelNumber(%q) = %d, %v; want %d", id, n, ok, want)
 		}
+	}
+}
+
+// Rendering a further base reuses the first render's channel harvest and
+// upstream-catchup map instead of rebuilding them.
+func TestCatalogSecondBaseDoesNotReharvest(t *testing.T) {
+	c := diskTestConfig(t, false, true)
+	d, m := writeDiskCatalog(t, diskTestBody)
+	for _, s := range []catalogStore{m, d} {
+		serve := func(host string) {
+			serveTestHost(t, host, false, func(ctx *gin.Context) error { return s.serveWhole(ctx, c, "get_live_streams") })
+		}
+		serve("a.example")
+		marker := newChannelHarvest()
+		marker.add(map[string]interface{}{"stream_id": "1", "name": "marker"})
+		c.applyChannelHarvest(marker)
+		c.catchupManager.SetUpstreamCatchup(map[string]bool{"marker": true})
+		serve("b.example")
+		if name, _ := lookupAPIChannelName(normalizeStreamID("1")); name != "marker" {
+			t.Fatalf("%T: second base re-harvested names (%q)", s, name)
+		}
+		if !c.catchupManager.HasUpstreamCatchup("marker") {
+			t.Fatalf("%T: second base reset the upstream catchup map", s)
+		}
+	}
+}
+
+// A base already rendered is served while another base's render holds the
+// render lock, and a new base waits for that render instead of running
+// alongside it.
+func TestCatalogRenderedBaseNotBlockedByRender(t *testing.T) {
+	c := diskTestConfig(t, false, false)
+	d, m := writeDiskCatalog(t, diskTestBody)
+	for _, tc := range []struct {
+		s  catalogStore
+		mu *sync.Mutex
+	}{{m, &m.renderMu}, {d, &d.renderMu}} {
+		serve := func(host string) chan struct{} {
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+				ctx.Request = httptest.NewRequest(http.MethodGet, "/player_api.php", nil)
+				ctx.Request.Host = host
+				if err := tc.s.serveWhole(ctx, c, "get_vod_streams"); err != nil {
+					t.Error(err)
+				}
+			}()
+			return done
+		}
+		<-serve("a.example")
+		tc.mu.Lock() // stands for a render of another base in progress
+		select {
+		case <-serve("a.example"):
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%T: rendered base waited for another base's render", tc.s)
+		}
+		waiting := serve("b.example")
+		select {
+		case <-waiting:
+			t.Fatalf("%T: a second render ran alongside the first", tc.s)
+		case <-time.After(50 * time.Millisecond):
+		}
+		tc.mu.Unlock()
+		<-waiting
 	}
 }

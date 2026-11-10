@@ -19,10 +19,40 @@
 package server
 
 import (
-	"net/url"
 	"strings"
 	"testing"
 )
+
+// Providers often send a UTF-8 BOM or a blank line before the XML
+// declaration, and some concatenate guides; the rewrite must still emit the
+// whole guide instead of aborting at the declaration.
+func TestRewriteXMLTVIconsToToleratesLeadingDataAndRepeatedDeclarations(t *testing.T) {
+	c := testImageProxyConfig()
+	ctx := testRequestContext()
+	decl := `<?xml version="1.0" encoding="UTF-8"?>`
+	body := `<tv><channel id="1"><icon src="http://upstream.example.com/ch1.png"/></channel></tv>`
+	for name, in := range map[string]string{
+		"BOM":                  "\xef\xbb\xbf" + decl + body,
+		"leading blank line":   "\n\r\n" + decl + body,
+		"repeated declaration": decl + body + "\n" + decl,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var out strings.Builder
+			if err := c.rewriteXMLTVIconsTo(ctx, strings.NewReader(in), &out); err != nil {
+				t.Fatalf("rewrite failed: %v", err)
+			}
+			if !strings.HasPrefix(out.String(), decl) {
+				t.Errorf("output does not start with the declaration: %q", out.String())
+			}
+			if strings.Count(out.String(), "<?xml") != 1 {
+				t.Errorf("want exactly one declaration, got %q", out.String())
+			}
+			if !strings.Contains(out.String(), `<channel id="1">`) || !strings.Contains(out.String(), "/img?url=") {
+				t.Errorf("guide body missing or icon not rewritten: %q", out.String())
+			}
+		})
+	}
+}
 
 func TestRewriteXMLTVIcons(t *testing.T) {
 	c := testImageProxyConfig()
@@ -31,7 +61,7 @@ func TestRewriteXMLTVIcons(t *testing.T) {
 	t.Run("channel-level icon src rewritten", func(t *testing.T) {
 		in := `<tv><channel id="1"><icon src="http://upstream.example.com/ch1.png"/></channel></tv>`
 		out := string(c.rewriteXMLTVIcons(ctx, []byte(in)))
-		want := "http://proxy.example.com:8080/img?url=" + url.QueryEscape("http://upstream.example.com/ch1.png")
+		want := "http://proxy.example.com:8080" + strings.ReplaceAll(c.proxyImagePath("http://upstream.example.com/ch1.png"), "&", "&amp;")
 		if !strings.Contains(out, want) {
 			t.Errorf("output %q does not contain rewritten channel icon %q", out, want)
 		}
@@ -40,7 +70,7 @@ func TestRewriteXMLTVIcons(t *testing.T) {
 	t.Run("programme-level icon src rewritten", func(t *testing.T) {
 		in := `<tv><programme channel="1"><icon src="http://upstream.example.com/prog1.png"/></programme></tv>`
 		out := string(c.rewriteXMLTVIcons(ctx, []byte(in)))
-		want := "http://proxy.example.com:8080/img?url=" + url.QueryEscape("http://upstream.example.com/prog1.png")
+		want := "http://proxy.example.com:8080" + strings.ReplaceAll(c.proxyImagePath("http://upstream.example.com/prog1.png"), "&", "&amp;")
 		if !strings.Contains(out, want) {
 			t.Errorf("output %q does not contain rewritten programme icon %q", out, want)
 		}
@@ -49,17 +79,29 @@ func TestRewriteXMLTVIcons(t *testing.T) {
 	t.Run("entity-escaped query string survives", func(t *testing.T) {
 		in := `<tv><channel id="1"><icon src="http://upstream.example.com/a?b=1&amp;c=2"/></channel></tv>`
 		out := string(c.rewriteXMLTVIcons(ctx, []byte(in)))
-		want := "http://proxy.example.com:8080/img?url=" + url.QueryEscape("http://upstream.example.com/a?b=1&c=2")
+		want := "http://proxy.example.com:8080" + strings.ReplaceAll(c.proxyImagePath("http://upstream.example.com/a?b=1&c=2"), "&", "&amp;")
 		if !strings.Contains(out, want) {
 			t.Errorf("output %q does not contain the correctly round-tripped rewritten icon %q", out, want)
 		}
 	})
 
-	t.Run("url element left untouched", func(t *testing.T) {
-		in := `<tv><channel id="1"><url>http://upstream.example.com/info</url></channel></tv>`
+	t.Run("element text that is a URL, src and href attributes go through /img", func(t *testing.T) {
+		in := `<tv><programme channel="1"><title>See https://x.example</title>` +
+			`<url>https://www.tvguide.example/p/1</url><image> https://img.example/p.jpg </image><url>not a link</url>` +
+			`<review type="url" href="http://rev.example/r">http://rev.example/full</review></programme></tv>`
 		out := string(c.rewriteXMLTVIcons(ctx, []byte(in)))
-		if !strings.Contains(out, "http://upstream.example.com/info") {
-			t.Errorf("output %q should still contain the untouched <url> content", out)
+		img := func(raw string) string {
+			return "http://proxy.example.com:8080" + strings.ReplaceAll(c.proxyImagePath(raw), "&", "&amp;")
+		}
+		for _, want := range []string{
+			"<url>" + img("https://www.tvguide.example/p/1") + "</url>",
+			"<image>" + img("https://img.example/p.jpg") + "</image>",
+			`href="` + img("http://rev.example/r") + `">` + img("http://rev.example/full") + "</review>",
+			"<title>See https://x.example</title>", "<url>not a link</url>",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output %q does not contain %q", out, want)
+			}
 		}
 	})
 

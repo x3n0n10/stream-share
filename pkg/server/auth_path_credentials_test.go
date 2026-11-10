@@ -154,3 +154,10 @@ func TestPathCredentialsIdentityIsLDAPUsernameWhenLDAPEnabled(t *testing.T) {
 		t.Errorf("ctxUsername = %q, want %q", rig.ctxUsername, "carol")
 	}
 }
+
+func TestPathCredentialsWrongPasswordIsUnauthorized(t *testing.T) {
+	rig := newPathAuthRig(t, &config.ProxyConfig{User: "custom-login", Password: "custom-pass"})
+	if got := rig.get("custom-login", "custom-pasx", "198.51.100.1"); got != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", got)
+	}
+}

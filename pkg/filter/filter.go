@@ -51,6 +51,8 @@ const (
 )
 
 // String names the kind as it appears in option names.
+// Unused in this repo for now; kept on purpose for upstream (lucasduport)
+// work in progress — do not remove as dead code.
 func (k Kind) String() string {
 	switch k {
 	case Live:
@@ -211,6 +213,8 @@ func (s *Set) ActiveFor(k Kind) bool {
 }
 
 // ExcludesAdult tells whether adult-flagged entries are dropped.
+// Unused in this repo for now; kept on purpose for upstream (lucasduport)
+// work in progress — do not remove as dead code.
 func (s *Set) ExcludesAdult() bool {
 	return s != nil && s.excludeAdult
 }

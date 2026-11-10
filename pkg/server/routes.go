@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lucasduport/stream-share/pkg/utils"
 )
 
 // routes registers the primary API surface under the configurable custom endpoint.
@@ -137,4 +138,27 @@ func (c *Config) trackProxy(ctx *gin.Context) {
 		return
 	}
 	trackConfig.reverseProxy(ctx)
+}
+
+// addProxyCredentialRoutes registers direct streaming endpoints that accept
+// proxy credentials in the path but always use Xtream credentials upstream.
+func (c *Config) addProxyCredentialRoutes(router *gin.Engine) {
+	utils.InfoLog("[stream-share] Setting up direct stream routes with proxy credentials")
+
+	// Root level (generic)
+	router.GET("/:username/:password/:id", c.authWithPathCredentials(), c.xtreamStreamHandler)
+
+	// Live
+	router.GET("/live/:username/:password/:id", c.authWithPathCredentials(), c.xtreamStreamLive)
+
+	// Movie
+	router.GET("/movie/:username/:password/:id", c.authWithPathCredentials(), c.xtreamStreamMovie)
+
+	// Series
+	router.GET("/series/:username/:password/:id", c.authWithPathCredentials(), c.xtreamStreamSeries)
+
+	// Timeshift — routed through xtreamStreamTimeshift which handles local catchup
+	router.GET("/timeshift/:username/:password/:duration/:start/:id", c.authWithPathCredentials(), c.xtreamStreamTimeshift)
+
+	utils.InfoLog("[stream-share] Routes initialized with direct stream URL support")
 }

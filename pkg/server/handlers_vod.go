@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -583,4 +584,70 @@ func (c *Config) listCache(ctx *gin.Context) {
 		out = append(out, item)
 	}
 	ctx.JSON(http.StatusOK, types.APIResponse{Success: true, Data: out})
+}
+
+// handleTemporaryLink processes temporary link downloads
+// handleTemporaryLink serves a previously created temporary link, preferring a
+// local cache hit and falling back to proxying the original upstream URL.
+func (c *Config) handleTemporaryLink(ctx *gin.Context) {
+	token := ctx.Param("token")
+
+	// Get the temporary link from session manager
+	tempLink, err := c.sessionManager.GetTemporaryLink(token)
+	if err != nil {
+		utils.DebugLog("Temporary link not found: %v", err)
+		ctx.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+
+	// Normalize the stream ID and classify its type once for both the view
+	// registration and the cache lookup below.
+	idRaw := strings.TrimSuffix(tempLink.StreamID, path.Ext(tempLink.StreamID))
+	basePath := classifyStreamType(tempLink.URL, "movie")
+
+	defer c.registerVODView(tempLink.Username, idRaw, basePath, tempLink.Title)()
+
+	// If cached locally, serve from disk (normalize ID without extension)
+	if c.db != nil && tempLink.StreamID != "" {
+		if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil && entry.Status == "ready" {
+			utils.InfoLog("Download via cache for %s -> %s", c.vodLabel(tempLink.StreamID), entry.FilePath)
+			ext := strings.ToLower(path.Ext(entry.FilePath))
+			if ext == "" {
+				ext = ".mp4"
+			}
+			c.touchVODCache(idRaw)
+			serveLocalFileRange(ctx, entry.FilePath, contentTypeForPath(entry.FilePath), sanitiseFilename(tempLink.Title)+ext, true)
+			return
+		}
+
+		// Cache miss: when VOD caching is enabled, start (or join) the
+		// background download and serve this download from it, so future
+		// requests serve from local disk and this one opens no second provider
+		// connection. This realizes the "always cache" policy.
+		if c.VODCacheEnabled {
+			defaultExt := ".mp4"
+			if basePath == "series" {
+				defaultExt = ".mkv"
+			}
+			upstream, dest, _ := c.resolveVODTarget(basePath, defaultExt, tempLink.StreamID, false)
+			expires := time.Now().Add(7 * 24 * time.Hour)
+			dl := c.startBackgroundDownload(upstream, dest, idRaw, basePath, expires, nil)
+			c.serveVODDownload(ctx, dl, vodCachedLabel(idRaw), sanitiseFilename(tempLink.Title)+path.Ext(dest), true)
+			return
+		}
+	}
+
+	// Fallback: proxy upstream URL
+	targetURL, err := url.Parse(tempLink.URL)
+	if err != nil {
+		utils.ErrorLog("Invalid URL in temporary link: %v", err)
+		ctx.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	ext := strings.ToLower(path.Ext(targetURL.Path))
+	if ext == "" {
+		ext = ".mp4"
+	}
+	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, sanitiseFilename(tempLink.Title), ext))
+	c.stream(ctx, targetURL)
 }

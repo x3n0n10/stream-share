@@ -29,7 +29,7 @@ func TestNilSetKeepsEverything(t *testing.T) {
 	if s != nil {
 		t.Fatal("an empty config must compile to a nil set")
 	}
-	if s.Active() || s.ActiveFor(Live) || s.Fingerprint() != "" {
+	if s.Active() || s.ActiveFor(Live) || s.ExcludesAdult() || s.Fingerprint() != "" {
 		t.Fatal("nil set must report inactive")
 	}
 	if !s.Keep(Live, "any", "thing", true) || !s.KeepGroup(Movie, "any") {

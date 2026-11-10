@@ -50,6 +50,20 @@ const (
 	Series
 )
 
+// String names the kind as it appears in option names.
+func (k Kind) String() string {
+	switch k {
+	case Live:
+		return "live"
+	case Movie:
+		return "movie"
+	case Series:
+		return "series"
+	default:
+		return "unknown"
+	}
+}
+
 // Patterns are the regular expressions of one rule set, as configured. An
 // empty pattern does not filter.
 type Patterns struct {
@@ -194,6 +208,11 @@ func (s *Set) Active() bool {
 // ActiveFor tells whether entries of kind k may be filtered out.
 func (s *Set) ActiveFor(k Kind) bool {
 	return s.Active() && (s.all != nil || s.excludeAdult || s.kind(k) != nil)
+}
+
+// ExcludesAdult tells whether adult-flagged entries are dropped.
+func (s *Set) ExcludesAdult() bool {
+	return s != nil && s.excludeAdult
 }
 
 func (s *Set) kind(k Kind) *Rules {

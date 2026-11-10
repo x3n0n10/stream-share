@@ -248,8 +248,8 @@ func TestProviderSlotsReaderReturningToAParkedDownloadResumesIt(t *testing.T) {
 	c, front := slotTestServer(t, p, 1)
 
 	exp := time.Now().Add(time.Hour)
-	upA, destA, _ := c.resolveVODCacheURL("series", ".mkv", "301.mkv")
-	upB, destB, _ := c.resolveVODCacheURL("series", ".mkv", "302.mkv")
+	upA, destA, _ := c.resolveVODTarget("series", ".mkv", "301.mkv", false)
+	upB, destB, _ := c.resolveVODTarget("series", ".mkv", "302.mkv", false)
 	c.startBackgroundDownload(upA, destA, "301", "series", exp, nil)
 	time.Sleep(150 * time.Millisecond) // A holds the slot
 	c.startBackgroundDownload(upB, destB, "302", "series", exp, nil)
@@ -281,8 +281,8 @@ func TestProviderSlotsDisabledKeepsOldBehaviour(t *testing.T) {
 	c, _ := slotTestServer(t, p, 0)
 
 	exp := time.Now().Add(time.Hour)
-	upA, destA, _ := c.resolveVODCacheURL("series", ".mkv", "401.mkv")
-	upB, destB, _ := c.resolveVODCacheURL("series", ".mkv", "402.mkv")
+	upA, destA, _ := c.resolveVODTarget("series", ".mkv", "401.mkv", false)
+	upB, destB, _ := c.resolveVODTarget("series", ".mkv", "402.mkv", false)
 	c.startBackgroundDownload(upA, destA, "401", "series", exp, nil)
 	c.startBackgroundDownload(upB, destB, "402", "series", exp, nil)
 	waitDownloadDone(t, c, "401")

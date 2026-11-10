@@ -378,7 +378,7 @@ func (c *Config) streamVODWithCache(ctx *gin.Context, basePath, defaultExt strin
 		// the download already running) and serve the player from it. A
 		// second, direct provider connection for the same file would make a
 		// one-connection provider cut the download, and vice versa.
-		upstream, dest, _ := c.resolveVODCacheURL(basePath, defaultExt, id)
+		upstream, dest, _ := c.resolveVODTarget(basePath, defaultExt, id, false)
 		expires := time.Now().Add(7 * 24 * time.Hour)
 		dl := c.startBackgroundDownload(upstream, dest, idRaw, basePath, expires, func() {
 			if err := c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: idRaw, Type: basePath, FilePath: dest, Status: "downloading", ExpiresAt: expires, CreatedAt: time.Now()}); err != nil {

@@ -720,7 +720,7 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 			if basePath == "series" {
 				defaultExt = ".mkv"
 			}
-			upstream, dest, _ := c.resolveVODCacheURL(basePath, defaultExt, tempLink.StreamID)
+			upstream, dest, _ := c.resolveVODTarget(basePath, defaultExt, tempLink.StreamID, false)
 			expires := time.Now().Add(7 * 24 * time.Hour)
 			dl := c.startBackgroundDownload(upstream, dest, idRaw, basePath, expires, nil)
 			c.serveVODDownload(ctx, dl, vodCachedLabel(idRaw), sanitiseFilename(tempLink.Title)+path.Ext(dest), true)

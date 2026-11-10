@@ -765,21 +765,36 @@ func isValidStreamID(idRaw string) bool {
 	return !strings.Contains(idRaw, "/") && !strings.Contains(idRaw, "..")
 }
 
-// resolveVODCacheURL builds the upstream URL and local cache path for a VOD
-// stream ID, resolving the file extension from the request, the M3U catalogue
-// cache, or a default. Returns the upstream URL, the local destination path, and
-// the bare stream ID (without extension).
-func (c *Config) resolveVODCacheURL(basePath, defaultExt, id string) (upstream, dest, idRaw string) {
+// resolveVODTarget builds the upstream URL and local cache path for a VOD
+// stream ID. The extension comes from the ID, else the M3U catalogue, else (when
+// probe is set and probing is enabled) a network probe, else defaultExt (the
+// per-type default when empty). One resolver for players and downloads keeps
+// both on the same cache file; only the background download may probe, since
+// request paths cannot afford the network round trips. Returns the upstream URL,
+// the local destination path, and the bare stream ID (without extension).
+func (c *Config) resolveVODTarget(basePath, defaultExt, id string, probe bool) (upstream, dest, idRaw string) {
 	idRaw = strings.TrimSuffix(id, path.Ext(id))
 	resolvedExt := path.Ext(id)
 	if resolvedExt == "" {
 		resolvedExt = c.findVODExtensionInCache(basePath, idRaw)
+		if resolvedExt != "" {
+			utils.DebugLog("Cache: using M3U extension %s for %s", resolvedExt, idRaw)
+		}
+	}
+	if resolvedExt == "" && probe && c.VODExtProbeEnabled {
+		resolvedExt = c.pickVODExtension(nil, basePath, idRaw)
+		if resolvedExt != "" {
+			utils.DebugLog("Cache: probed extension %s for %s due to vod-ext-probe-enabled", resolvedExt, idRaw)
+		}
 	}
 	if resolvedExt == "" {
 		resolvedExt = defaultExt
+		if resolvedExt == "" {
+			resolvedExt = defaultVODExt(basePath)
+		}
+		utils.DebugLog("Cache: defaulting extension %s for %s", resolvedExt, idRaw)
 	}
-	finalID := idRaw + resolvedExt
-	upstream = c.providerStreamURL(basePath, finalID)
+	upstream = c.providerStreamURL(basePath, idRaw+resolvedExt)
 	cacheDir := utils.VODCacheDir()
 	_ = os.MkdirAll(cacheDir, 0o755)
 	dest = filepath.Join(cacheDir, idRaw+resolvedExt)

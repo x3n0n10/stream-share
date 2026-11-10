@@ -442,7 +442,7 @@ func (c *Config) startCache(ctx *gin.Context) {
 		if _, err := c.waitVODM3UCache(); err != nil {
 			utils.DebugLog("Cache: VOD M3U unavailable for %s, using defaults: %v", req.StreamID, err)
 		}
-		upstream, filename := c.resolveVODCacheTarget(basePath, req.StreamID)
+		upstream, filename, _ := c.resolveVODTarget(basePath, "", req.StreamID, true)
 		if c.db != nil {
 			_ = c.db.SetVODCachePath(req.StreamID, filename)
 			if tt := c.findVODTitleInCache(basePath, req.StreamID); strings.TrimSpace(tt) != "" {
@@ -480,39 +480,6 @@ func vodFallbackTitle(t, title, seriesTitle string, season, episode int) string 
 		return title
 	}
 	return "Unknown title"
-}
-
-// resolveVODCacheTarget resolves the real extension for a VOD stream (from the
-// cached M3U, optional network probing, or a per-type default) and returns the
-// upstream URL plus the local destination path. Meant to run off the request
-// path, where catalogue scans and a cold M3U download are affordable.
-func (c *Config) resolveVODCacheTarget(basePath, streamID string) (upstream, dest string) {
-	finalID := streamID
-	if path.Ext(finalID) == "" {
-		// 1) Try to resolve from cached M3U first (movie/series)
-		if ext := c.findVODExtensionInCache(basePath, finalID); ext != "" {
-			utils.DebugLog("Cache: using M3U extension %s for %s", ext, finalID)
-			finalID += ext
-		} else {
-			// 2) Optional: allow network probing only if explicitly enabled
-			if c.VODExtProbeEnabled {
-				if ext := c.pickVODExtension(nil, basePath, finalID); ext != "" {
-					utils.DebugLog("Cache: probed extension %s for %s due to vod-ext-probe-enabled", ext, finalID)
-					finalID += ext
-				}
-			}
-			// 3) Still unknown? Use sane defaults without probing
-			if path.Ext(finalID) == "" {
-				def := defaultVODExt(basePath)
-				utils.DebugLog("Cache: defaulting extension %s for %s", def, finalID)
-				finalID += def
-			}
-		}
-	}
-	upstream = c.providerStreamURL(basePath, finalID)
-	idOnly := strings.TrimSuffix(streamID, path.Ext(streamID))
-	dest = filepath.Join(utils.VODCacheDir(), idOnly+path.Ext(finalID))
-	return upstream, dest
 }
 
 // getCacheByStream returns cache info for a stream id

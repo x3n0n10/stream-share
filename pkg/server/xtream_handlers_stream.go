@@ -33,6 +33,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/lucasduport/stream-share/pkg/catchup"
+	"github.com/lucasduport/stream-share/pkg/session"
 	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
@@ -428,7 +429,6 @@ func classifyStreamType(p, fallback string) string {
 	}
 }
 
-// multiplexedStream handles streaming with connection multiplexing
 // multiplexedStream proxies a stream while sharing a single upstream connection
 // across multiple clients for the same content using the SessionManager.
 func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
@@ -461,21 +461,8 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	utils.DebugLog("Multiplexed stream request: user=%s, id=%s, type=%s, title=%s, upstream=%s",
 		username, streamID, streamType, streamTitle, targetURL.String())
 
-	// If VOD and cached locally, serve from disk to avoid upstream connection.
-	// Register a synthetic VOD view so /status and watch history reflect this
-	// playback — without it, cached VOD served through the multiplexed path
-	// (e.g. the generic /:user/:pass/:id route) would be invisible.
-	if c.db != nil && (streamType == "movie" || streamType == "series") {
-		if entry, err := c.db.GetVODCache(streamIDRaw); err == nil && entry != nil && entry.Status == "ready" {
-			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
-				utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, c.streamLabel(streamIDRaw), entry.FilePath)
-				defer c.registerVODView(username, streamIDRaw, streamType, streamTitle)()
-				c.touchVODCache(streamIDRaw)
-				serveLocalFileRange(ctx, entry.FilePath, contentTypeForPath(entry.FilePath), "", false)
-				return
-			}
-			utils.WarnLog("Multiplex: cached %s missing on disk for %s at %s; falling back to upstream", streamType, c.streamLabel(streamIDRaw), entry.FilePath)
-		}
+	if c.serveCachedVOD(ctx, username, streamIDRaw, streamType, streamTitle) {
+		return
 	}
 
 	if c.sessionManager == nil {
@@ -484,15 +471,57 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 		return
 	}
 
-	// Request the stream through the session manager for multiplexing
 	label := c.streamLabel(streamID)
+	dataChan, doneChan, clientKey, ok := c.joinStreamSession(ctx, username, streamID, streamType, streamTitle, targetURL, label)
+	if !ok {
+		return
+	}
+
+	// Set content-type and disable intermediary buffering
+	setNoBufferingHeaders(ctx, contentTypeForPath(targetURL.Path))
+
+	// Stream data to the client
+	utils.DebugLog("Starting multiplexed stream for user %s (%s)", username, label)
+	relayToClient(ctx, dataChan, doneChan, username, label)
+
+	// Clean up after streaming is done
+	utils.DebugLog("Stream ended for user %s (%s)", username, label)
+	c.sessionManager.RemoveClient(streamID, username, clientKey)
+}
+
+// serveCachedVOD serves a VOD from disk when it is cached locally, to avoid an
+// upstream connection, and reports whether it did. It registers a synthetic
+// VOD view so /status and watch history reflect this playback — without it,
+// cached VOD served through the multiplexed path (e.g. the generic
+// /:user/:pass/:id route) would be invisible.
+func (c *Config) serveCachedVOD(ctx *gin.Context, username, streamIDRaw, streamType, streamTitle string) bool {
+	if c.db != nil && (streamType == "movie" || streamType == "series") {
+		if entry, err := c.db.GetVODCache(streamIDRaw); err == nil && entry != nil && entry.Status == "ready" {
+			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
+				utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, c.streamLabel(streamIDRaw), entry.FilePath)
+				defer c.registerVODView(username, streamIDRaw, streamType, streamTitle)()
+				c.touchVODCache(streamIDRaw)
+				serveLocalFileRange(ctx, entry.FilePath, contentTypeForPath(entry.FilePath), "", false)
+				return true
+			}
+			utils.WarnLog("Multiplex: cached %s missing on disk for %s at %s; falling back to upstream", streamType, c.streamLabel(streamIDRaw), entry.FilePath)
+		}
+	}
+	return false
+}
+
+// joinStreamSession requests the stream through the session manager for
+// multiplexing and returns this client's data and done channels once the
+// upstream is up. ok is false when the request has already been answered (and
+// the client removed from the session).
+func (c *Config) joinStreamSession(ctx *gin.Context, username, streamID, streamType, streamTitle string, targetURL *url.URL, label string) (dataChan chan []byte, doneChan <-chan struct{}, clientKey string, ok bool) {
 	// clientKey identifies this connection: one user can hold several (e.g.
 	// two devices on the same account), so every later call names its own.
 	buffer, clientKey, err := c.sessionManager.RequestStream(username, streamID, streamType, streamTitle, targetURL)
 	if err != nil {
 		utils.ErrorLog("Multiplex: RequestStream failed for user=%s %s err=%v", username, label, err)
 		ctx.AbortWithStatus(http.StatusInternalServerError)
-		return
+		return nil, nil, "", false
 	}
 	if buffer == nil {
 		utils.WarnLog("Multiplex: buffer returned is NIL for %s (user=%s)", label, username)
@@ -503,51 +532,57 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 	if !exists {
 		utils.ErrorLog("Failed to get client channel for user=%s, %s", username, label)
 		ctx.AbortWithStatus(http.StatusInternalServerError)
-		return
+		return nil, nil, "", false
 	}
-	doneChan, _ := c.sessionManager.GetClientDone(streamID, clientKey)
+	doneChan, _ = c.sessionManager.GetClientDone(streamID, clientKey)
+
+	if buffer != nil && !c.awaitUpstreamStart(ctx, buffer, username, streamID, clientKey, label) {
+		return nil, nil, "", false
+	}
+	return dataChan, doneChan, clientKey, true
+}
+
+// awaitUpstreamStart waits until the pump knows whether the upstream actually
+// came up, before we commit to a 200. Historically RequestStream returned
+// before the provider was ever contacted, so a 403 or dial timeout could only
+// ever surface as an unexplained mid-body disconnect. A co-viewer joining a
+// healthy stream sees an already-closed channel here and does not wait. It
+// returns false when the request has been answered and the client removed.
+func (c *Config) awaitUpstreamStart(ctx *gin.Context, buffer *session.StreamBuffer, username, streamID, clientKey, label string) bool {
 	clientGone := ctx.Request.Context().Done()
-
-	// Wait until the pump knows whether the upstream actually came up, before we
-	// commit to a 200. Historically RequestStream returned before the provider
-	// was ever contacted, so a 403 or dial timeout could only ever surface as an
-	// unexplained mid-body disconnect. A co-viewer joining a healthy stream sees
-	// an already-closed channel here and does not wait.
-	if buffer != nil {
-		select {
-		case <-buffer.Ready():
-			if startErr := buffer.StartError(); startErr != nil {
-				// The session manager serves an error slate for eligible live
-				// streams; the bytes arrive on dataChan like any other content,
-				// so fall through. Anything else keeps the old behavior, except
-				// the status is now genuinely reachable before the first byte.
-				if !c.sessionManager.ServesSlateFor(streamID) {
-					utils.WarnLog("Multiplex: upstream failed for %s (user=%s): %s",
-						label, username, startErr.Error())
-					c.sessionManager.RemoveClient(streamID, username, clientKey)
-					ctx.AbortWithStatus(http.StatusBadGateway)
-					return
-				}
+	select {
+	case <-buffer.Ready():
+		if startErr := buffer.StartError(); startErr != nil {
+			// The session manager serves an error slate for eligible live
+			// streams; the bytes arrive on dataChan like any other content,
+			// so fall through. Anything else keeps the old behavior, except
+			// the status is now genuinely reachable before the first byte.
+			if !c.sessionManager.ServesSlateFor(streamID) {
+				utils.WarnLog("Multiplex: upstream failed for %s (user=%s): %s",
+					label, username, startErr.Error())
+				c.sessionManager.RemoveClient(streamID, username, clientKey)
+				ctx.AbortWithStatus(http.StatusBadGateway)
+				return false
 			}
-		case <-time.After(upstreamReadyTimeout):
-			utils.WarnLog("Multiplex: upstream did not respond within %s for %s (user=%s)",
-				upstreamReadyTimeout, label, username)
-			c.sessionManager.RemoveClient(streamID, username, clientKey)
-			ctx.AbortWithStatus(http.StatusGatewayTimeout)
-			return
-		case <-clientGone:
-			utils.DebugLog("Multiplex: client %s left before %s started", username, label)
-			c.sessionManager.RemoveClient(streamID, username, clientKey)
-			return
 		}
+	case <-time.After(upstreamReadyTimeout):
+		utils.WarnLog("Multiplex: upstream did not respond within %s for %s (user=%s)",
+			upstreamReadyTimeout, label, username)
+		c.sessionManager.RemoveClient(streamID, username, clientKey)
+		ctx.AbortWithStatus(http.StatusGatewayTimeout)
+		return false
+	case <-clientGone:
+		utils.DebugLog("Multiplex: client %s left before %s started", username, label)
+		c.sessionManager.RemoveClient(streamID, username, clientKey)
+		return false
 	}
+	return true
+}
 
-	// Set content-type and disable intermediary buffering
-	setNoBufferingHeaders(ctx, contentTypeForPath(targetURL.Path))
-
-	// Stream data to the client
-	utils.DebugLog("Starting multiplexed stream for user %s (%s)", username, label)
-
+// relayToClient writes the session's data to the client until the channel
+// closes, the pump drops this client, or the client goes away.
+func relayToClient(ctx *gin.Context, dataChan chan []byte, doneChan <-chan struct{}, username, label string) {
+	clientGone := ctx.Request.Context().Done()
 	ctx.Stream(func(w io.Writer) bool {
 		select {
 		case data, ok := <-dataChan:
@@ -575,8 +610,4 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 			return false
 		}
 	})
-
-	// Clean up after streaming is done
-	utils.DebugLog("Stream ended for user %s (%s)", username, label)
-	c.sessionManager.RemoveClient(streamID, username, clientKey)
 }

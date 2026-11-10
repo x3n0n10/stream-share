@@ -586,7 +586,6 @@ func (c *Config) listCache(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, types.APIResponse{Success: true, Data: out})
 }
 
-// handleTemporaryLink processes temporary link downloads
 // handleTemporaryLink serves a previously created temporary link, preferring a
 // local cache hit and falling back to proxying the original upstream URL.
 func (c *Config) handleTemporaryLink(ctx *gin.Context) {

@@ -558,6 +558,9 @@ func (c *Config) newRouter() (*gin.Engine, error) {
 
 	// Add direct streaming routes with proxy credentials
 	c.addProxyCredentialRoutes(router)
+	if c.CustomEndpoint != "" { // links the server hands out carry the prefix
+		c.addProxyCredentialRoutes(router.Group(c.CustomEndpoint))
+	}
 
 	// Add temporary link download route
 	router.GET("/download/:token", c.handleTemporaryLink)

@@ -142,7 +142,7 @@ func (c *Config) trackProxy(ctx *gin.Context) {
 
 // addProxyCredentialRoutes registers direct streaming endpoints that accept
 // proxy credentials in the path but always use Xtream credentials upstream.
-func (c *Config) addProxyCredentialRoutes(router *gin.Engine) {
+func (c *Config) addProxyCredentialRoutes(router gin.IRoutes) {
 	utils.InfoLog("[stream-share] Setting up direct stream routes with proxy credentials")
 
 	// Root level (generic)
@@ -160,5 +160,30 @@ func (c *Config) addProxyCredentialRoutes(router *gin.Engine) {
 	// Timeshift — routed through xtreamStreamTimeshift which handles local catchup
 	router.GET("/timeshift/:username/:password/:duration/:start/:id", c.authWithPathCredentials(), c.xtreamStreamTimeshift)
 
+	// Query-style catchup templates (/streaming/timeshift.php?username=..&stream=..)
+	router.GET("/streaming/timeshift.php", c.xtreamTimeshiftQuery)
+
 	utils.InfoLog("[stream-share] Routes initialized with direct stream URL support")
+}
+
+// xtreamTimeshiftQuery adapts query-style catchup to the path-style timeshift
+// handler: same credential check and session registration, id = stream.
+func (c *Config) xtreamTimeshiftQuery(ctx *gin.Context) {
+	q := ctx.Request.URL.Query()
+	for _, k := range []string{"username", "password", "stream", "start", "duration"} {
+		if q.Get(k) == "" {
+			ctx.AbortWithStatus(http.StatusBadRequest)
+			return
+		}
+	}
+	id := q.Get("stream")
+	if path.Ext(id) == "" { // path-style ids carry the extension (e.g. 42.ts)
+		id += ".ts"
+	}
+	ctx.Params = gin.Params{{Key: "username", Value: q.Get("username")}, {Key: "password", Value: q.Get("password")},
+		{Key: "duration", Value: q.Get("duration")}, {Key: "start", Value: q.Get("start")}, {Key: "id", Value: id}}
+	c.authWithPathCredentials()(ctx)
+	if !ctx.IsAborted() {
+		c.xtreamStreamTimeshift(ctx)
+	}
 }

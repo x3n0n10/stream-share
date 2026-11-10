@@ -199,7 +199,6 @@ func (c *Config) fetchToFile(ctx context.Context, dl *vodDownload, upstream, des
 	defer func() { _ = f.Close() }()
 
 	var downloaded, total int64
-	lastUpdate := time.Now()
 	completed := false
 
 	// The provider connection is held through a slot (see provider.Arbiter):
@@ -307,6 +306,7 @@ func (c *Config) fetchToFile(ctx context.Context, dl *vodDownload, upstream, des
 			continue
 		}
 
+		retryStatus := false // an answer that is not the file: retried after the switch
 		switch resp.StatusCode {
 		case http.StatusOK:
 			bounded = false // the whole file: read it all
@@ -347,18 +347,14 @@ func (c *Config) fetchToFile(ctx context.Context, dl *vodDownload, upstream, des
 			// Nothing left past what we have: with the total unknown (the
 			// header was the whole file), the download is complete.
 			if downloaded > 0 && (total == 0 || downloaded >= total) {
-				cancelAttempt()
-				_ = resp.Body.Close()
 				completed = true
 			} else {
-				cancelAttempt()
-				_ = resp.Body.Close()
-				utils.WarnLog("Cache: upstream status %d (attempt %d)", resp.StatusCode, attempt)
-				attempt++
-				retrying = true
-				continue
+				retryStatus = true
 			}
 		default:
+			retryStatus = true
+		}
+		if retryStatus {
 			cancelAttempt()
 			_ = resp.Body.Close()
 			utils.WarnLog("Cache: upstream status %d (attempt %d)", resp.StatusCode, attempt)
@@ -368,6 +364,7 @@ func (c *Config) fetchToFile(ctx context.Context, dl *vodDownload, upstream, des
 		}
 		if completed {
 			cancelAttempt()
+			_ = resp.Body.Close()
 			break
 		}
 		dl.setTotal(total)
@@ -376,10 +373,11 @@ func (c *Config) fetchToFile(ctx context.Context, dl *vodDownload, upstream, des
 		watchDone := make(chan struct{})
 		go watchForPause(dl, lease.Preempted(), bounded, cancelAttempt, &preempted, watchDone)
 
-		ok, readErr := c.copyVODResponse(dl, f, resp, cancelAttempt, watchDone, streamID, &downloaded, total, &lastUpdate)
+		n, ok, readErr := c.copyVODResponse(dl, f, resp, cancelAttempt, watchDone, streamID, downloaded, total)
 		if !ok {
 			return
 		}
+		downloaded = n
 
 		if (total > 0 && downloaded >= total) || (readErr == io.EOF && !bounded) {
 			completed = true
@@ -517,14 +515,16 @@ func watchForPause(dl *vodDownload, slot <-chan struct{}, bounded bool, cancelAt
 
 // copyVODResponse copies resp's body into f at the current offset, reporting
 // progress, until the body ends or the attempt is cancelled. It closes
-// watchDone, the body and the attempt. ok is false after a write error, which
-// already marked the cache entry failed.
-func (c *Config) copyVODResponse(dl *vodDownload, f *os.File, resp *http.Response, cancelAttempt context.CancelFunc, watchDone chan struct{}, streamID string, downloaded *int64, total int64, lastUpdate *time.Time) (ok bool, readErr error) {
+// watchDone, the body and the attempt, and returns downloaded plus the bytes
+// written. ok is false after a write error, which already marked the cache
+// entry failed.
+func (c *Config) copyVODResponse(dl *vodDownload, f *os.File, resp *http.Response, cancelAttempt context.CancelFunc, watchDone chan struct{}, streamID string, downloaded int64, total int64) (newDownloaded int64, ok bool, readErr error) {
 	// Written straight to the file (no buffering) and published right
 	// after, so readers of the file see every counted byte.
 	buf := make([]byte, 256*1024)
 	stall := time.AfterFunc(vodCacheStallTimeout, cancelAttempt)
 	body := &stallReader{r: resp.Body, timer: stall, idle: vodCacheStallTimeout}
+	lastUpdate := time.Now() // the throttle restarting per attempt is invisible
 	for {
 		nr, er := body.Read(buf)
 		if nr > 0 {
@@ -535,15 +535,15 @@ func (c *Config) copyVODResponse(dl *vodDownload, f *os.File, resp *http.Respons
 				_ = resp.Body.Close()
 				utils.ErrorLog("Cache: write error: %v", ew)
 				c.cacheFail(streamID)
-				return false, nil
+				return downloaded, false, nil
 			}
-			*downloaded += int64(nr)
+			downloaded += int64(nr)
 			dl.advance(int64(nr))
-			if c.db != nil && time.Since(*lastUpdate) > vodProgressInterval {
+			if c.db != nil && time.Since(lastUpdate) > vodProgressInterval {
 				// Narrow update: only the counters move, so there is no need
 				// to rewrite the whole row on every tick.
-				_ = c.db.UpdateVODProgress(streamID, *downloaded, total)
-				*lastUpdate = time.Now()
+				_ = c.db.UpdateVODProgress(streamID, downloaded, total)
+				lastUpdate = time.Now()
 			}
 		}
 		if er != nil {
@@ -557,7 +557,7 @@ func (c *Config) copyVODResponse(dl *vodDownload, f *os.File, resp *http.Respons
 	// to the pool for the next request instead of being torn down.
 	_ = resp.Body.Close()
 	cancelAttempt()
-	return true, readErr
+	return downloaded, true, readErr
 }
 
 // commitVODDownload moves the completed download into place and records it as

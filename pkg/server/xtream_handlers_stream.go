@@ -512,8 +512,9 @@ func (c *Config) serveCachedVOD(ctx *gin.Context, username, streamIDRaw, streamT
 
 // joinStreamSession requests the stream through the session manager for
 // multiplexing and returns this client's data and done channels once the
-// upstream is up. ok is false when the request has already been answered (and
-// the client removed from the session).
+// upstream is up. ok is false when the request has already been answered: an
+// error status if the stream or the client channel could not be had, or
+// whatever awaitUpstreamStart answered (it removes the client).
 func (c *Config) joinStreamSession(ctx *gin.Context, username, streamID, streamType, streamTitle string, targetURL *url.URL, label string) (dataChan chan []byte, doneChan <-chan struct{}, clientKey string, ok bool) {
 	// clientKey identifies this connection: one user can hold several (e.g.
 	// two devices on the same account), so every later call names its own.

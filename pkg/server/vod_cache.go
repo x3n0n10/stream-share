@@ -248,8 +248,6 @@ func (c *Config) fetchToFile(ctx context.Context, dl *vodDownload, upstream, des
 	// tried, after the header. Players read the index there right after the
 	// header, so it comes before the rest of the file, on the same connection.
 	tailFetched := !vodIndexAtEnd(dest)
-	// tailPieces fetches the end of the file in two bounded requests, last part
-	// first, on the connection that carried the header.
 	for attempt <= maxCacheRetries {
 		if ctx.Err() != nil {
 			break
@@ -263,8 +261,27 @@ func (c *Config) fetchToFile(ctx context.Context, dl *vodDownload, upstream, des
 		}
 		// Out-of-order reads waiting on this download come first; then the
 		// sequential download resumes where it stopped.
-		if total > 0 && c.fetchWindowsAndTail(ctx, dl, f, upstream, total, downloaded, lease, &tailFetched, &parked) {
-			continue
+		if total > 0 {
+			c.fetchWindows(ctx, dl, f, upstream, total, lease)
+			if lease.IsPreempted() {
+				parked = true
+				continue
+			}
+			if !tailFetched && downloaded > 0 {
+				if total < vodTailMinFile {
+					tailFetched = true
+				} else {
+					tailFetched = true
+					if !c.fetchTail(ctx, dl, f, upstream, total, lease) {
+						tailFetched = false // preempted: fetched once the download resumes
+						parked = true
+						continue
+					}
+					// Windows asked for meanwhile are fetched before the rest of
+					// the file starts, so that request is not interrupted for them.
+					continue
+				}
+			}
 		}
 		// Seek file to current offset so we append correctly on resume
 		if _, seekErr := f.Seek(downloaded, io.SeekStart); seekErr != nil {
@@ -316,24 +333,12 @@ func (c *Config) fetchToFile(ctx context.Context, dl *vodDownload, upstream, des
 				}
 			}
 			if total == 0 {
-				if cl := resp.Header.Get("Content-Length"); cl != "" {
-					if v, pErr := strconv.ParseInt(cl, 10, 64); pErr == nil {
-						total = v
-					}
-				}
+				total = responseTotal(resp)
 			}
 		case http.StatusPartialContent:
 			// Resumed successfully — extract total from Content-Range.
 			if total == 0 {
-				if cr := resp.Header.Get("Content-Range"); cr != "" {
-					if idx := strings.LastIndex(cr, "/"); idx >= 0 {
-						if t := strings.TrimSpace(cr[idx+1:]); t != "*" {
-							if v, pErr := strconv.ParseInt(t, 10, 64); pErr == nil {
-								total = v
-							}
-						}
-					}
-				}
+				total = responseTotal(resp)
 			}
 			// A provider sending more than the header asked for: read on, as
 			// for a request for everything left.
@@ -434,33 +439,34 @@ func waitBeforeVODRetry(ctx context.Context, lease *provider.Lease, attempt int,
 	}
 }
 
-// fetchWindowsAndTail fetches the windows readers are waiting for (see
-// fetchWindows) and, once the header is in, the end of the file (see
-// fetchTail), ahead of the sequential download. It returns true when the
-// download loop must start over: the slot was preempted (parked is set), or
-// the tail was just fetched.
-func (c *Config) fetchWindowsAndTail(ctx context.Context, dl *vodDownload, f *os.File, upstream string, total, downloaded int64, lease *provider.Lease, tailFetched, parked *bool) bool {
-	c.fetchWindows(ctx, dl, f, upstream, total, lease)
-	if lease.IsPreempted() {
-		*parked = true
-		return true
-	}
-	if !*tailFetched && downloaded > 0 {
-		if total < vodTailMinFile {
-			*tailFetched = true
-		} else {
-			*tailFetched = true
-			if !c.fetchTail(ctx, dl, f, upstream, total, lease) {
-				*tailFetched = false // preempted: fetched once the download resumes
-				*parked = true
-				return true
-			}
-			// Windows asked for meanwhile are fetched before the rest of
-			// the file starts, so that request is not interrupted for them.
-			return true
+// responseTotal returns the file size an answer reports: Content-Range's total
+// for a 206, Content-Length otherwise; 0 when unknown.
+func responseTotal(resp *http.Response) int64 {
+	if resp.StatusCode == http.StatusPartialContent {
+		cr := resp.Header.Get("Content-Range")
+		idx := strings.LastIndex(cr, "/")
+		if idx < 0 {
+			return 0
 		}
+		t := strings.TrimSpace(cr[idx+1:])
+		if t == "*" {
+			return 0
+		}
+		v, err := strconv.ParseInt(t, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return v
 	}
-	return false
+	cl := resp.Header.Get("Content-Length")
+	if cl == "" {
+		return 0
+	}
+	v, err := strconv.ParseInt(cl, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 // newVODRequest builds the request for one download attempt. The first
@@ -485,7 +491,8 @@ func newVODRequest(ctx context.Context, upstream string, downloaded, total int64
 // watchForPause pauses a download attempt when a reader asks for a window
 // (after a short minimum run, so the sequential download always progresses):
 // the provider allows one connection, so this one is closed first. It sets
-// preempted and cancels the attempt; it returns once watchDone is closed.
+// preempted, cancels the attempt and returns; it also returns once watchDone
+// is closed.
 func watchForPause(dl *vodDownload, slot <-chan struct{}, bounded bool, cancelAttempt context.CancelFunc, preempted *atomic.Bool, watchDone <-chan struct{}) {
 	minRun := time.NewTimer(vodWindowMainRun)
 	defer minRun.Stop()

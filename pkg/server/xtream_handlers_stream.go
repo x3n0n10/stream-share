@@ -464,12 +464,6 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 		return
 	}
 
-	if c.sessionManager == nil {
-		utils.ErrorLog("Multiplex: sessionManager is NIL, falling back to direct streaming")
-		c.stream(ctx, targetURL)
-		return
-	}
-
 	label := c.streamLabel(streamID)
 	dataChan, doneChan, clientKey, ok := c.joinStreamSession(ctx, username, streamID, streamType, streamTitle, targetURL, label)
 	if !ok {
@@ -529,6 +523,7 @@ func (c *Config) joinStreamSession(ctx *gin.Context, username, streamID, streamT
 	dataChan, exists := c.sessionManager.GetClientChannel(streamID, clientKey)
 	if !exists {
 		utils.ErrorLog("Failed to get client channel for user=%s, %s", username, label)
+		c.sessionManager.RemoveClient(streamID, username, clientKey)
 		ctx.AbortWithStatus(http.StatusInternalServerError)
 		return nil, nil, "", false
 	}

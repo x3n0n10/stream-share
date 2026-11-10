@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/jamesnetherton/m3u"
+	"github.com/lucasduport/stream-share/pkg/session"
 )
 
 // TestTrackManifestLinksFetchThroughImg guards the trackProxy path: the
@@ -73,6 +74,8 @@ func TestPlayAndHLSRequireRecentAuth(t *testing.T) {
 	up, hits := countingUpstream(t)
 	c := testImageProxyConfig()
 	c.XtreamUser, c.XtreamPassword, c.XtreamBaseURL = "u", "p", up.URL
+	c.sessionManager = session.NewSessionManager(nil)
+	t.Cleanup(c.sessionManager.Stop)
 	router := newImgRouter(c)
 
 	recentlyAuthenticatedMu.Lock()
@@ -92,8 +95,15 @@ func TestPlayAndHLSRequireRecentAuth(t *testing.T) {
 	recentlyAuthenticated["192.0.2.1"] = time.Now()
 	recentlyAuthenticatedMu.Unlock()
 	for _, path := range []string{"/play/tok/ts", "/hls/tok/1_2"} {
-		if w := getImg(router, path); w.Code == http.StatusForbidden {
+		// The multiplexed relay needs a CloseNotifier, which a bare recorder lacks.
+		w := closeNotifyRecorder{httptest.NewRecorder()}
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code == http.StatusForbidden {
 			t.Fatalf("%s after auth: still 403", path)
 		}
 	}
 }
+
+type closeNotifyRecorder struct{ *httptest.ResponseRecorder }
+
+func (closeNotifyRecorder) CloseNotify() <-chan bool { return nil }

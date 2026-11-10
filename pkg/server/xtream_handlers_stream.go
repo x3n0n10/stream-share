@@ -360,7 +360,8 @@ func (c *Config) streamVODWithCache(ctx *gin.Context, basePath, defaultExt strin
 	defer c.registerVODView(c.resolveRequestUsername(ctx), idRaw, basePath, idRaw)()
 
 	if c.VODCacheEnabled && c.db != nil {
-		if file, ok := c.cachedVODFile(idRaw); ok {
+		if entry := c.cachedVODEntry(idRaw); entry != nil {
+			file := entry.FilePath
 			ct := contentTypeForPath(file)
 			c.touchVODCache(idRaw)
 			// Only the opening read gets an INFO line; seeks are DEBUG.
@@ -494,7 +495,8 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 // /:user/:pass/:id route) would be invisible.
 func (c *Config) serveCachedVOD(ctx *gin.Context, username, streamIDRaw, streamType, streamTitle string) bool {
 	if c.db != nil && (streamType == "movie" || streamType == "series") {
-		if file, ok := c.cachedVODFile(streamIDRaw); ok {
+		if entry := c.cachedVODEntry(streamIDRaw); entry != nil {
+			file := entry.FilePath
 			utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, c.streamLabel(streamIDRaw), file)
 			defer c.registerVODView(username, streamIDRaw, streamType, streamTitle)()
 			c.touchVODCache(streamIDRaw)

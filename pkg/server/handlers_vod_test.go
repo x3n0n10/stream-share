@@ -74,7 +74,7 @@ func vodTestDB(t *testing.T) *database.DBManager {
 	return db
 }
 
-func TestCachedVODFile(t *testing.T) {
+func TestCachedVODEntry(t *testing.T) {
 	c := &Config{ProxyConfig: &config.ProxyConfig{}, db: vodTestDB(t)}
 	dir := t.TempDir()
 	file := filepath.Join(dir, "a.mp4")
@@ -92,17 +92,30 @@ func TestCachedVODFile(t *testing.T) {
 	put("c1-gone", filepath.Join(dir, "gone.mp4"))
 	put("c1-dir", dir)
 
-	if p, ok := c.cachedVODFile("c1-ok"); !ok || p != file {
-		t.Fatalf("existing file = %q,%v", p, ok)
+	if e := c.cachedVODEntry("c1-ok"); e == nil || e.FilePath != file {
+		t.Fatalf("existing file = %+v", e)
 	}
-	if p, ok := c.cachedVODFile("c1-gone"); ok || p != "" {
-		t.Fatalf("missing file = %q,%v", p, ok)
+	for _, id := range []string{"c1-gone", "c1-dir", "c1-norow"} {
+		if e := c.cachedVODEntry(id); e != nil {
+			t.Fatalf("%s = %+v, want nil", id, e)
+		}
 	}
-	if p, ok := c.cachedVODFile("c1-dir"); ok || p != "" {
-		t.Fatalf("directory = %q,%v", p, ok)
+}
+
+// Runs without a database, so CI covers the file rule.
+func TestRegularFileExists(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a.mp4")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if p, ok := c.cachedVODFile("c1-norow"); ok || p != "" {
-		t.Fatalf("no row = %q,%v", p, ok)
+	for name, tc := range map[string]struct {
+		path string
+		want bool
+	}{"file": {file, true}, "missing": {filepath.Join(dir, "gone"), false}, "directory": {dir, false}} {
+		if got := regularFileExists(tc.path); got != tc.want {
+			t.Errorf("%s: got %v want %v", name, got, tc.want)
+		}
 	}
 }
 

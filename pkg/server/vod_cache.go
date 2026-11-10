@@ -780,6 +780,22 @@ const vodProgressInterval = 5 * time.Second
 
 var vodLastTouch sync.Map // streamID -> time.Time
 
+// cachedVODFile returns the cached file for a stream when its row exists and
+// the file is a regular file on disk. Downloads rename into place on
+// completion, so existence means complete and the status column is not
+// consulted. A row whose file is gone warns once and counts as a miss.
+func (c *Config) cachedVODFile(idRaw string) (string, bool) {
+	entry, err := c.db.GetVODCache(idRaw)
+	if err != nil || entry == nil {
+		return "", false
+	}
+	if fi, statErr := os.Stat(entry.FilePath); statErr != nil || fi.IsDir() {
+		utils.WarnLog("VOD cache: %s missing on disk at %s; not serving from cache", c.vodLabel(idRaw), entry.FilePath)
+		return "", false
+	}
+	return entry.FilePath, true
+}
+
 // touchVODCache marks a cached item as recently used, at most once per
 // vodTouchInterval per stream.
 func (c *Config) touchVODCache(streamID string) {

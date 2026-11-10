@@ -360,19 +360,17 @@ func (c *Config) streamVODWithCache(ctx *gin.Context, basePath, defaultExt strin
 	defer c.registerVODView(c.resolveRequestUsername(ctx), idRaw, basePath, idRaw)()
 
 	if c.VODCacheEnabled && c.db != nil {
-		if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil {
-			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
-				ct := contentTypeForPath(entry.FilePath)
-				c.touchVODCache(idRaw)
-				// Only the opening read gets an INFO line; seeks are DEBUG.
-				logServe := utils.DebugLog
-				if rng := ctx.GetHeader("Range"); rng == "" || strings.HasPrefix(rng, "bytes=0-") {
-					logServe = utils.InfoLog
-				}
-				logServe("Serving cached %s for %s from %s", basePath, c.vodLabel(idRaw), entry.FilePath)
-				serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
-				return
+		if file, ok := c.cachedVODFile(idRaw); ok {
+			ct := contentTypeForPath(file)
+			c.touchVODCache(idRaw)
+			// Only the opening read gets an INFO line; seeks are DEBUG.
+			logServe := utils.DebugLog
+			if rng := ctx.GetHeader("Range"); rng == "" || strings.HasPrefix(rng, "bytes=0-") {
+				logServe = utils.InfoLog
 			}
+			logServe("Serving cached %s for %s from %s", basePath, c.vodLabel(idRaw), file)
+			serveLocalFileRange(ctx, file, ct, "", false)
+			return
 		}
 
 		// Not cached yet: auto-start 7-day caching in the background (or join
@@ -496,15 +494,12 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 // /:user/:pass/:id route) would be invisible.
 func (c *Config) serveCachedVOD(ctx *gin.Context, username, streamIDRaw, streamType, streamTitle string) bool {
 	if c.db != nil && (streamType == "movie" || streamType == "series") {
-		if entry, err := c.db.GetVODCache(streamIDRaw); err == nil && entry != nil && entry.Status == "ready" {
-			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
-				utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, c.streamLabel(streamIDRaw), entry.FilePath)
-				defer c.registerVODView(username, streamIDRaw, streamType, streamTitle)()
-				c.touchVODCache(streamIDRaw)
-				serveLocalFileRange(ctx, entry.FilePath, contentTypeForPath(entry.FilePath), "", false)
-				return true
-			}
-			utils.WarnLog("Multiplex: cached %s missing on disk for %s at %s; falling back to upstream", streamType, c.streamLabel(streamIDRaw), entry.FilePath)
+		if file, ok := c.cachedVODFile(streamIDRaw); ok {
+			utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, c.streamLabel(streamIDRaw), file)
+			defer c.registerVODView(username, streamIDRaw, streamType, streamTitle)()
+			c.touchVODCache(streamIDRaw)
+			serveLocalFileRange(ctx, file, contentTypeForPath(file), "", false)
+			return true
 		}
 	}
 	return false

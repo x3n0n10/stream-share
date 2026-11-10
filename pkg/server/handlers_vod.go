@@ -393,7 +393,13 @@ func (c *Config) startCache(ctx *gin.Context) {
 
 	// If already cached and valid, return it
 	if c.db != nil {
-		if entry, err := c.db.GetVODCache(req.StreamID); err == nil && entry != nil && entry.Status == "ready" {
+		// The helper decides; the row is read again only for the response fields.
+		if _, ok := c.cachedVODFile(req.StreamID); ok {
+			entry, err := c.db.GetVODCache(req.StreamID)
+			if err != nil {
+				ctx.JSON(http.StatusInternalServerError, types.APIResponse{Success: false, Error: "cache lookup failed"})
+				return
+			}
 			c.touchVODCache(req.StreamID)
 			ctx.JSON(http.StatusOK, types.APIResponse{Success: true, Data: map[string]interface{}{
 				"cached":     true,
@@ -608,14 +614,14 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 
 	// If cached locally, serve from disk (normalize ID without extension)
 	if c.db != nil && tempLink.StreamID != "" {
-		if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil && entry.Status == "ready" {
-			utils.InfoLog("Download via cache for %s -> %s", c.vodLabel(tempLink.StreamID), entry.FilePath)
-			ext := strings.ToLower(path.Ext(entry.FilePath))
+		if file, ok := c.cachedVODFile(idRaw); ok {
+			utils.InfoLog("Download via cache for %s -> %s", c.vodLabel(tempLink.StreamID), file)
+			ext := strings.ToLower(path.Ext(file))
 			if ext == "" {
 				ext = ".mp4"
 			}
 			c.touchVODCache(idRaw)
-			serveLocalFileRange(ctx, entry.FilePath, contentTypeForPath(entry.FilePath), sanitiseFilename(tempLink.Title)+ext, true)
+			serveLocalFileRange(ctx, file, contentTypeForPath(file), sanitiseFilename(tempLink.Title)+ext, true)
 			return
 		}
 

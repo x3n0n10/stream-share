@@ -32,11 +32,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/lucasduport/stream-share/pkg/catchup"
 	"github.com/lucasduport/stream-share/pkg/database"
 	"github.com/lucasduport/stream-share/pkg/provider"
-	"github.com/lucasduport/stream-share/pkg/slate"
 	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
@@ -353,31 +351,6 @@ func (sm *SessionManager) cleanupRoutine() {
 			sm.runCacheMaintenance()
 		case <-cacheTicker.C:
 			sm.runCacheMaintenance()
-		}
-	}
-}
-
-// runCacheMaintenance reaps everything that accumulates on disk: expired temp
-// links, expired and stale VOD cache files (plus their .part siblings), orphaned
-// VOD files no longer referenced by any row, and stale slate clips.
-func (sm *SessionManager) runCacheMaintenance() {
-	if sm.db != nil {
-		if count, err := sm.db.CleanupExpiredLinks(); err != nil {
-			utils.ErrorLog("Failed to clean expired links: %v", err)
-		} else if count > 0 {
-			utils.InfoLog("Cleaned %d expired temporary links", count)
-		}
-		// Order matters: delete expired/stale entries' files *before* their rows,
-		// then reap anything left unreferenced (e.g. failed downloads' .part files).
-		sm.cleanupExpiredVODFiles()
-		sm.cleanupStaleVODFiles()
-		sm.reapVODOrphans()
-	}
-	if sm.slateStaleAge > 0 && sm.slateCacheDir != "" {
-		if n, err := slate.PruneCache(sm.slateCacheDir, sm.slateStaleAge); err != nil {
-			utils.WarnLog("Slate cache prune failed: %v", err)
-		} else if n > 0 {
-			utils.InfoLog("Pruned %d stale slate clip(s)", n)
 		}
 	}
 }
@@ -1178,55 +1151,6 @@ func (sm *SessionManager) stopStream(streamID string) {
 	}
 
 	utils.DebugLog("%s stopped and all clients disconnected", sm.streamLabel(streamID))
-}
-
-// GenerateTemporaryLink creates a temporary download link
-func (sm *SessionManager) GenerateTemporaryLink(username, streamID, title, rawURL string) (string, error) {
-	token := uuid.New().String()
-	expiresAt := time.Now().Add(sm.tempLinkTimeout)
-
-	tempLink := &types.TemporaryLink{
-		Token:     token,
-		Username:  username,
-		URL:       rawURL,
-		ExpiresAt: expiresAt,
-		StreamID:  streamID,
-		Title:     title,
-	}
-
-	// Store in memory
-	sm.tempLinkLock.Lock()
-	sm.tempLinks[token] = tempLink
-	sm.tempLinkLock.Unlock()
-
-	// Store in database if available
-	if sm.db != nil {
-		if err := sm.db.CreateTemporaryLink(token, username, rawURL, streamID, title, expiresAt); err != nil {
-			utils.ErrorLog("Failed to store temporary link in database: %v", err)
-		}
-	}
-
-	utils.InfoLog("Generated temporary link for user %s, expires at %v", username, expiresAt)
-	return token, nil
-}
-
-// GetTemporaryLink retrieves a temporary link by token
-func (sm *SessionManager) GetTemporaryLink(token string) (*types.TemporaryLink, error) {
-	// First check in memory
-	sm.tempLinkLock.RLock()
-	tempLink, exists := sm.tempLinks[token]
-	sm.tempLinkLock.RUnlock()
-
-	if exists && time.Now().Before(tempLink.ExpiresAt) {
-		return tempLink, nil
-	}
-
-	// If not in memory or expired, try the database
-	if sm.db != nil {
-		return sm.db.GetTemporaryLink(token)
-	}
-
-	return nil, fmt.Errorf("temporary link not found or expired")
 }
 
 // GetAllSessions returns all current user sessions

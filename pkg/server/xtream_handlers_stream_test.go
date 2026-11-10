@@ -223,7 +223,7 @@ func TestViewerCredentialRoutesUseStreamHandlers(t *testing.T) {
 	t.Cleanup(up.Close)
 
 	c := filteredTestConfig(t, up.URL, aOnlyNoAdult)
-	c.ProxyConfig.User, c.ProxyConfig.Password = "me", "pw"
+	c.User, c.Password = "me", "pw"
 	c.sessionManager = session.NewSessionManager(nil)
 	t.Cleanup(c.sessionManager.Stop)
 	if _, err := c.getCachedLiveStreamsCatalog(); err != nil {

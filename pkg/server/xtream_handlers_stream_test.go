@@ -25,11 +25,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/lucasduport/stream-share/pkg/config"
+	"github.com/lucasduport/stream-share/pkg/session"
 )
 
 func resetHlsRedirectCache() {
@@ -198,5 +200,60 @@ func TestHlsXtreamStreamRewritesManifestHost(t *testing.T) {
 	wantSegment := "http://proxy.example.com:8080" + c.proxyImagePath(segURL.Scheme+"://"+segURL.Host+"/segment1.ts")
 	if !strings.Contains(w.Body.String(), wantSegment) {
 		t.Errorf("body %q does not contain rewritten segment URI %q", w.Body.String(), wantSegment)
+	}
+}
+
+// Viewer-credential routes must behave like the provider-credential ones:
+// filtered live ids are refused and permitted ids reach the provider with the
+// provider's credentials.
+func TestViewerCredentialRoutesUseStreamHandlers(t *testing.T) {
+	var mu sync.Mutex
+	var seen string
+	catalog := filterProvider(t)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("action") != "" {
+			catalog.Config.Handler.ServeHTTP(w, r)
+			return
+		}
+		mu.Lock()
+		seen = r.URL.EscapedPath()
+		mu.Unlock()
+		_, _ = w.Write([]byte("x"))
+	}))
+	t.Cleanup(up.Close)
+
+	c := filteredTestConfig(t, up.URL, aOnlyNoAdult)
+	c.ProxyConfig.User, c.ProxyConfig.Password = "me", "pw"
+	c.sessionManager = session.NewSessionManager(nil)
+	t.Cleanup(c.sessionManager.Stop)
+	if _, err := c.getCachedLiveStreamsCatalog(); err != nil {
+		t.Fatal(err)
+	}
+
+	viewer := gin.New()
+	c.addProxyCredentialRoutes(viewer)
+	provider := gin.New()
+	c.xtreamRoutes(&provider.RouterGroup)
+	get := func(r *gin.Engine, path string) int {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		return w.Code
+	}
+
+	if v, p := get(viewer, "/live/me/pw/2.ts"), get(provider, "/live/prov/secret/2.ts"); v != http.StatusNotFound || v != p {
+		t.Fatalf("filtered id: viewer route %d, provider route %d, want both 404", v, p)
+	}
+
+	front := httptest.NewServer(viewer)
+	t.Cleanup(front.Close)
+	resp, err := http.Get(front.URL + "/live/me/pw/42.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	if want := "/live/prov/secret/42.ts"; seen != want {
+		t.Fatalf("provider saw %q (status %d), want %q", seen, resp.StatusCode, want)
 	}
 }

@@ -618,16 +618,16 @@ func (c *Config) addProxyCredentialRoutes(router *gin.Engine) {
 	utils.InfoLog("[stream-share] Setting up direct stream routes with proxy credentials")
 
 	// Root level (generic)
-	router.GET("/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsStreamHandler)
+	router.GET("/:username/:password/:id", c.authWithPathCredentials(), c.xtreamStreamHandler)
 
 	// Live
-	router.GET("/live/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsLiveStreamHandler)
+	router.GET("/live/:username/:password/:id", c.authWithPathCredentials(), c.xtreamStreamLive)
 
 	// Movie
-	router.GET("/movie/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsMovieStreamHandler)
+	router.GET("/movie/:username/:password/:id", c.authWithPathCredentials(), c.xtreamStreamMovie)
 
 	// Series
-	router.GET("/series/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsSeriesStreamHandler)
+	router.GET("/series/:username/:password/:id", c.authWithPathCredentials(), c.xtreamStreamSeries)
 
 	// Timeshift — routed through xtreamStreamTimeshift which handles local catchup
 	router.GET("/timeshift/:username/:password/:duration/:start/:id", c.authWithPathCredentials(), c.xtreamStreamTimeshift)

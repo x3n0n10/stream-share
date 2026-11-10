@@ -98,7 +98,7 @@ func TestLiveStreamReachesProviderWithEscapedPassword(t *testing.T) {
 		sessionManager: sm,
 	}
 	r := gin.New()
-	r.GET("/live/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsLiveStreamHandler)
+	r.GET("/live/:username/:password/:id", c.authWithPathCredentials(), c.xtreamStreamLive)
 
 	front := httptest.NewServer(r)
 	t.Cleanup(front.Close)

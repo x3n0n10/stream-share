@@ -20,13 +20,8 @@
 package server
 
 import (
-	"bytes"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -119,40 +114,18 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	utils.RegisterSecrets(config.XtreamUser.String(), config.XtreamPassword.String(), config.User.String(), config.Password.String())
 	config.CatalogStorage = parseCatalogStorage(config.CatalogStorage)
 	applyCatalogMemoryLimit(config.CatalogStorage)
-	var p m3u.Playlist
 
-	// Parse the M3U playlist from the remote URL if provided — unless it is the
-	// Xtream account's own get.php, which is then served by the streaming
-	// get.php proxy instead. Parsing it here would download the whole playlist
-	// before the server can start and keep every track in memory for nothing
-	// (about 1.3 GiB of heap and minutes of boot on a million-track catalogue).
-	if config.RemoteURL.String() != "" {
-		if (&Config{ProxyConfig: config}).xtreamServesM3U() {
-			utils.InfoLog("M3U_URL is the Xtream account's get.php: serving it through the Xtream proxy, not parsing it at boot")
-		} else {
-			var err error
-			p, err = m3u.Parse(config.RemoteURL.String())
-			if err != nil {
-				return nil, utils.PrintErrorAndReturn(err)
-			}
-			utils.InfoLog("Successfully parsed M3U playlist from %s", utils.MaskURL(config.RemoteURL.String()))
-		}
-	}
-
-	catalogFilter, err := filter.NewSet(config.CatalogFilter)
+	p, err := parseRemotePlaylist(config)
 	if err != nil {
-		return nil, utils.PrintErrorAndReturn(err)
-	}
-	if catalogFilter.Active() {
-		utils.InfoLog("Catalogue filter enabled (rules %s)", catalogFilter.Fingerprint())
+		return nil, err
 	}
 
-	// Use custom ID for endpoint if provided, otherwise use a generated one
-	customID := endpointAntiColision
-	if trimmedCustomId := strings.Trim(config.CustomId, "/"); trimmedCustomId != "" {
-		customID = trimmedCustomId
-		utils.InfoLog("Using custom endpoint ID: %s", customID)
+	catalogFilter, err := loadCatalogFilter(config)
+	if err != nil {
+		return nil, err
 	}
+
+	customID := resolveEndpointID(config)
 
 	// Pin the internal API key from configuration if provided
 	SetAPIKey(config.InternalAPIKey)
@@ -172,21 +145,7 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		imageKey:             loadImageSigningKey(utils.CacheRoot()),
 	}
 
-	// Provider health check: report-only. Reconnecting the VPN on a bad result is
-	// left to an external watchdog (see docker-compose.yml), so nothing here knows
-	// about gluetun or any VPN.
-	if config.HealthCheckEnabled {
-		if config.HealthCheckTimeoutSeconds <= 0 {
-			config.HealthCheckTimeoutSeconds = 15
-		}
-		if config.HealthCheckMinIntervalSeconds <= 0 {
-			config.HealthCheckMinIntervalSeconds = 60
-		}
-		if strings.TrimSpace(config.HealthCheckStreamID) == "" {
-			utils.WarnLog("Health check enabled but HEALTHCHECK_STREAM_ID is empty; probes will report 'error'")
-		}
-		serverConfig.health = &healthState{}
-	}
+	serverConfig.setupHealthCheck()
 
 	// Subscription info comes from the provider's own login response, so it only
 	// exists for Xtream-backed deployments.
@@ -196,166 +155,15 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	serverConfig.providerSlots = provider.New(serverConfig.providerSlotCapacity)
 	serverConfig.shares = newShareStore()
 
-	// Force PostgreSQL initialization (sqlite removed)
-	utils.InfoLog("Bootstrap: Forcing PostgreSQL database initialization")
-	db, err := database.NewDBManager("") // path unused for postgres
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize database: %w", err)
+	if err := serverConfig.setupDatabaseAndSessions(); err != nil {
+		return nil, err
 	}
-	serverConfig.db = db
-	serverConfig.sessionManager = session.NewSessionManager(db)
-	serverConfig.sessionManager.SetNameResolver(serverConfig.resolveStreamName)
-	serverConfig.sessionManager.SetProviderSlots(serverConfig.providerSlots)
-	utils.InfoLog("Session manager initialized with database connection")
-
-	// Seed in-memory name indices from DB so names are available before the first API call.
-	serverConfig.warmChannelIndexFromDB()
-
-	// After session manager init
-	if serverConfig.sessionManager == nil {
-		utils.ErrorLog("Bootstrap: sessionManager is NIL - multiplexing will NOT be used")
-	} else {
-		utils.InfoLog("Bootstrap: sessionManager initialized OK")
-	}
-
-	// Initialize local catchup buffering from configuration
-	catchupEnabled := config.CatchupEnabled
-	catchupDir := utils.CatchupBufferDir()
-	catchupDur := 4
-	if config.CatchupDurationHours > 0 {
-		catchupDur = config.CatchupDurationHours
-	}
-	serverConfig.catchupManager = catchup.New(catchupEnabled, catchupDir, catchupDur)
-	if catchupEnabled {
-		serverConfig.catchupManager.CleanupOldFiles()
-		tz := os.Getenv("TZ")
-		if tz == "" {
-			utils.WarnLog("Bootstrap: catchup is ENABLED but TZ env var is not set — timeshift timestamps from clients will be parsed as UTC and rewinds will land at the wrong position. Set TZ to your clients' timezone (e.g. TZ=Europe/Amsterdam).")
-		} else {
-			utils.InfoLog("Bootstrap: local catchup buffering ENABLED (dir=%s, duration=%dh, TZ=%s)", catchupDir, catchupDur, tz)
-		}
-	} else {
-		utils.InfoLog("Bootstrap: local catchup buffering DISABLED (set CATCHUP_ENABLED=true to enable)")
-	}
-	if serverConfig.sessionManager != nil {
-		serverConfig.sessionManager.SetCatchupManager(serverConfig.catchupManager)
-	}
-
-	// Pause grace: how long a catchup-enabled live stream stays alive (upstream
-	// connection open, disk recording continuing) after its last viewer
-	// disconnects, so a TiviMate "pause" followed by a timeshift-based resume
-	// has continuous buffered content with no gap. Channel switches are detected
-	// separately and bypass this grace period (see SessionManager.RequestStream).
-	catchupPauseGrace := 5
-	if config.CatchupPauseGraceMinutes >= 0 {
-		catchupPauseGrace = config.CatchupPauseGraceMinutes
-	}
-	if serverConfig.sessionManager != nil {
-		serverConfig.sessionManager.SetPauseGrace(time.Duration(catchupPauseGrace) * time.Minute)
-		if catchupEnabled && catchupPauseGrace > 0 {
-			utils.InfoLog("Bootstrap: catchup pause grace set to %d minute(s) — paused live streams keep recording for seamless resume", catchupPauseGrace)
-		}
-	}
-
-	// Error slate: show viewers why a live stream failed instead of dropping the
-	// connection, and keep retrying the provider behind the slate. Requires
-	// ffmpeg; when it is missing the generator reports unavailable and the
-	// session manager silently keeps the previous drop behavior, so older images
-	// are unaffected by the default being on.
-	if serverConfig.sessionManager != nil {
-		slateRetry := 10
-		if config.ErrorSlateRetryMaxMinutes > 0 {
-			slateRetry = config.ErrorSlateRetryMaxMinutes
-		}
-		serverConfig.sessionManager.SetErrorCatalog(session.LoadCatalog(config.ErrorSlateMessagesFile))
-
-		if config.ErrorSlateEnabled {
-			gen := slate.New(utils.SlateCacheDir())
-			serverConfig.sessionManager.SetSlateProvider(gen)
-			serverConfig.sessionManager.SetSlateRetryMax(time.Duration(slateRetry) * time.Minute)
-			if gen.Available() {
-				utils.InfoLog("Bootstrap: error slates ENABLED (retry up to %d minute(s) before giving up)", slateRetry)
-			} else {
-				utils.WarnLog("Bootstrap: error slates requested but ffmpeg is unavailable; streams will drop on upstream failure as before")
-			}
-		} else {
-			utils.InfoLog("Bootstrap: error slates DISABLED (set ERROR_SLATE_ENABLED=true to show upstream errors on screen)")
-		}
-	}
-
-	// The LDAP cache trades revocation latency for a large drop in directory
-	// traffic, so make the active window visible at startup rather than leaving
-	// an operator to infer it.
-	if config.LDAPEnabled {
-		if mins := config.LDAPAuthCacheMinutes; mins > 0 {
-			utils.InfoLog("Bootstrap: LDAP auth cache ENABLED (successful logins trusted for %d minute(s); disabled accounts keep working until their entry expires)", mins)
-		} else {
-			utils.InfoLog("Bootstrap: LDAP auth cache DISABLED — every request re-checks the directory")
-		}
-	}
-
-	// Configure session parameters from configuration. Each setter is only
-	// applied when the value is > 0, leaving the manager defaults otherwise.
-	if serverConfig.sessionManager != nil {
-		if mins := config.SessionTimeoutMinutes; mins > 0 {
-			serverConfig.sessionManager.SetSessionTimeout(time.Duration(mins) * time.Minute)
-			utils.InfoLog("Session timeout set to %d minutes", mins)
-		}
-		if mins := config.StreamTimeoutMinutes; mins > 0 {
-			serverConfig.sessionManager.SetStreamTimeout(time.Duration(mins) * time.Minute)
-			utils.InfoLog("Stream timeout set to %d minutes", mins)
-		}
-		if hours := config.TempLinkHours; hours > 0 {
-			serverConfig.sessionManager.SetTempLinkTimeout(time.Duration(hours) * time.Hour)
-			utils.InfoLog("Temporary link timeout set to %d hours", hours)
-		}
-		if hours := config.VODCacheStaleHours; hours > 0 {
-			serverConfig.sessionManager.SetVODCacheStaleAge(time.Duration(hours) * time.Hour)
-			utils.InfoLog("VOD cache stale age set to %d hours", hours)
-		}
-		// Prune the on-disk slate clip cache too (clips are regenerated on demand).
-		// This runs regardless of ErrorSlateEnabled so leftover clips are cleaned up
-		// even after the feature is turned off. 0 = default 7 days; negative disables.
-		if hours := config.SlateCacheStaleHours; hours >= 0 {
-			if hours == 0 {
-				hours = 168
-			}
-			serverConfig.sessionManager.SetSlateCache(utils.SlateCacheDir(), time.Duration(hours)*time.Hour)
-			utils.InfoLog("Slate cache stale age set to %d hours", hours)
-		}
-		if secs := config.MultiplexStallTimeoutSeconds; secs > 0 {
-			serverConfig.sessionManager.SetClientStallTimeout(time.Duration(secs) * time.Second)
-			utils.InfoLog("Multiplex client stall timeout set to %d seconds", secs)
-		}
-	}
-
-	// Initialize Discord bot if token is provided
-	discordToken := config.DiscordBotToken
-	if discordToken != "" {
-		utils.InfoLog("Initializing Discord bot")
-		discordAdminRole := config.DiscordAdminRoleID
-
-		// Get API URL from config, defaulting to host/port, but honor reverse proxy
-		apiURL := config.DiscordAPIURL
-		if apiURL == "" {
-			// The bot runs in this same process and calls the local API, which only
-			// serves plain HTTP on the listening port. Default to loopback so it
-			// works regardless of the public scheme/host: a TLS-terminating proxy
-			// in front would make a public HTTPS URL unreachable from here. Set
-			// DISCORD_API_URL to override (e.g. when the bot runs elsewhere).
-			apiURL = fmt.Sprintf("http://127.0.0.1:%d", config.HostConfig.Port)
-		}
-		utils.InfoLog("Discord API URL used by bot: %s", apiURL)
-		utils.InfoLog("Reminder: Ensure 'MESSAGE CONTENT INTENT' is enabled in Discord Developer Portal for this bot.")
-
-		bot, err := discord.NewBot(discordToken, discordAdminRole, apiURL, GetAPIKey())
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize Discord bot: %w", err)
-		}
-
-		serverConfig.discordBot = bot
-	} else {
-		utils.InfoLog("Bootstrap: DISCORD_BOT_TOKEN not set - Discord bot is DISABLED")
+	serverConfig.setupCatchup()
+	serverConfig.setupErrorSlate()
+	serverConfig.logLDAPAuthCache()
+	serverConfig.applySessionTimeouts()
+	if err := serverConfig.setupDiscordBot(); err != nil {
+		return nil, err
 	}
 
 	// Remove debug API JSON dumps left over from previous runs when debug logging
@@ -368,6 +176,238 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	}
 
 	return serverConfig, nil
+}
+
+// parseRemotePlaylist parses the M3U playlist from the remote URL if provided —
+// unless it is the Xtream account's own get.php, which is then served by the
+// streaming get.php proxy instead. Parsing it here would download the whole
+// playlist before the server can start and keep every track in memory for
+// nothing (about 1.3 GiB of heap and minutes of boot on a million-track
+// catalogue).
+func parseRemotePlaylist(config *config.ProxyConfig) (m3u.Playlist, error) {
+	var p m3u.Playlist
+	if config.RemoteURL.String() != "" {
+		if (&Config{ProxyConfig: config}).xtreamServesM3U() {
+			utils.InfoLog("M3U_URL is the Xtream account's get.php: serving it through the Xtream proxy, not parsing it at boot")
+		} else {
+			var err error
+			p, err = m3u.Parse(config.RemoteURL.String())
+			if err != nil {
+				return p, utils.PrintErrorAndReturn(err)
+			}
+			utils.InfoLog("Successfully parsed M3U playlist from %s", utils.MaskURL(config.RemoteURL.String()))
+		}
+	}
+	return p, nil
+}
+
+// loadCatalogFilter compiles the catalogue filter rules from configuration.
+func loadCatalogFilter(config *config.ProxyConfig) (*filter.Set, error) {
+	catalogFilter, err := filter.NewSet(config.CatalogFilter)
+	if err != nil {
+		return nil, utils.PrintErrorAndReturn(err)
+	}
+	if catalogFilter.Active() {
+		utils.InfoLog("Catalogue filter enabled (rules %s)", catalogFilter.Fingerprint())
+	}
+	return catalogFilter, nil
+}
+
+// resolveEndpointID uses the custom ID for endpoints if provided, otherwise the
+// generated one.
+func resolveEndpointID(config *config.ProxyConfig) string {
+	customID := endpointAntiColision
+	if trimmedCustomId := strings.Trim(config.CustomId, "/"); trimmedCustomId != "" {
+		customID = trimmedCustomId
+		utils.InfoLog("Using custom endpoint ID: %s", customID)
+	}
+	return customID
+}
+
+// setupHealthCheck enables the provider health check: report-only.
+// Reconnecting the VPN on a bad result is left to an external watchdog (see
+// docker-compose.yml), so nothing here knows about gluetun or any VPN.
+func (c *Config) setupHealthCheck() {
+	if !c.HealthCheckEnabled {
+		return
+	}
+	if c.HealthCheckTimeoutSeconds <= 0 {
+		c.HealthCheckTimeoutSeconds = 15
+	}
+	if c.HealthCheckMinIntervalSeconds <= 0 {
+		c.HealthCheckMinIntervalSeconds = 60
+	}
+	if strings.TrimSpace(c.HealthCheckStreamID) == "" {
+		utils.WarnLog("Health check enabled but HEALTHCHECK_STREAM_ID is empty; probes will report 'error'")
+	}
+	c.health = &healthState{}
+}
+
+// setupDatabaseAndSessions connects PostgreSQL and builds the session manager
+// on it.
+func (c *Config) setupDatabaseAndSessions() error {
+	// Force PostgreSQL initialization (sqlite removed)
+	utils.InfoLog("Bootstrap: Forcing PostgreSQL database initialization")
+	db, err := database.NewDBManager("") // path unused for postgres
+	if err != nil {
+		return fmt.Errorf("failed to initialize database: %w", err)
+	}
+	c.db = db
+	c.sessionManager = session.NewSessionManager(db)
+	c.sessionManager.SetNameResolver(c.resolveStreamName)
+	c.sessionManager.SetProviderSlots(c.providerSlots)
+	utils.InfoLog("Session manager initialized with database connection")
+
+	// Seed in-memory name indices from DB so names are available before the first API call.
+	c.warmChannelIndexFromDB()
+
+	return nil
+}
+
+// setupCatchup initializes local catchup buffering from configuration, and the
+// pause grace that keeps a paused catchup stream recording.
+func (c *Config) setupCatchup() {
+	catchupEnabled := c.CatchupEnabled
+	catchupDir := utils.CatchupBufferDir()
+	catchupDur := 4
+	if c.CatchupDurationHours > 0 {
+		catchupDur = c.CatchupDurationHours
+	}
+	c.catchupManager = catchup.New(catchupEnabled, catchupDir, catchupDur)
+	if catchupEnabled {
+		c.catchupManager.CleanupOldFiles()
+		tz := os.Getenv("TZ")
+		if tz == "" {
+			utils.WarnLog("Bootstrap: catchup is ENABLED but TZ env var is not set — timeshift timestamps from clients will be parsed as UTC and rewinds will land at the wrong position. Set TZ to your clients' timezone (e.g. TZ=Europe/Amsterdam).")
+		} else {
+			utils.InfoLog("Bootstrap: local catchup buffering ENABLED (dir=%s, duration=%dh, TZ=%s)", catchupDir, catchupDur, tz)
+		}
+	} else {
+		utils.InfoLog("Bootstrap: local catchup buffering DISABLED (set CATCHUP_ENABLED=true to enable)")
+	}
+	c.sessionManager.SetCatchupManager(c.catchupManager)
+
+	// Pause grace: how long a catchup-enabled live stream stays alive (upstream
+	// connection open, disk recording continuing) after its last viewer
+	// disconnects, so a TiviMate "pause" followed by a timeshift-based resume
+	// has continuous buffered content with no gap. Channel switches are detected
+	// separately and bypass this grace period (see SessionManager.RequestStream).
+	catchupPauseGrace := 5
+	if c.CatchupPauseGraceMinutes >= 0 {
+		catchupPauseGrace = c.CatchupPauseGraceMinutes
+	}
+	c.sessionManager.SetPauseGrace(time.Duration(catchupPauseGrace) * time.Minute)
+	if catchupEnabled && catchupPauseGrace > 0 {
+		utils.InfoLog("Bootstrap: catchup pause grace set to %d minute(s) — paused live streams keep recording for seamless resume", catchupPauseGrace)
+	}
+}
+
+// setupErrorSlate shows viewers why a live stream failed instead of dropping
+// the connection, and keeps retrying the provider behind the slate. Requires
+// ffmpeg; when it is missing the generator reports unavailable and the session
+// manager silently keeps the previous drop behavior, so older images are
+// unaffected by the default being on.
+func (c *Config) setupErrorSlate() {
+	slateRetry := 10
+	if c.ErrorSlateRetryMaxMinutes > 0 {
+		slateRetry = c.ErrorSlateRetryMaxMinutes
+	}
+	c.sessionManager.SetErrorCatalog(session.LoadCatalog(c.ErrorSlateMessagesFile))
+
+	if c.ErrorSlateEnabled {
+		gen := slate.New(utils.SlateCacheDir())
+		c.sessionManager.SetSlateProvider(gen)
+		c.sessionManager.SetSlateRetryMax(time.Duration(slateRetry) * time.Minute)
+		if gen.Available() {
+			utils.InfoLog("Bootstrap: error slates ENABLED (retry up to %d minute(s) before giving up)", slateRetry)
+		} else {
+			utils.WarnLog("Bootstrap: error slates requested but ffmpeg is unavailable; streams will drop on upstream failure as before")
+		}
+	} else {
+		utils.InfoLog("Bootstrap: error slates DISABLED (set ERROR_SLATE_ENABLED=true to show upstream errors on screen)")
+	}
+}
+
+// logLDAPAuthCache reports the LDAP auth cache window. The cache trades
+// revocation latency for a large drop in directory traffic, so make the active
+// window visible at startup rather than leaving an operator to infer it.
+func (c *Config) logLDAPAuthCache() {
+	if !c.LDAPEnabled {
+		return
+	}
+	if mins := c.LDAPAuthCacheMinutes; mins > 0 {
+		utils.InfoLog("Bootstrap: LDAP auth cache ENABLED (successful logins trusted for %d minute(s); disabled accounts keep working until their entry expires)", mins)
+	} else {
+		utils.InfoLog("Bootstrap: LDAP auth cache DISABLED — every request re-checks the directory")
+	}
+}
+
+// applySessionTimeouts configures session parameters from configuration. Each
+// setter is only applied when the value is > 0, leaving the manager defaults
+// otherwise.
+func (c *Config) applySessionTimeouts() {
+	if mins := c.SessionTimeoutMinutes; mins > 0 {
+		c.sessionManager.SetSessionTimeout(time.Duration(mins) * time.Minute)
+		utils.InfoLog("Session timeout set to %d minutes", mins)
+	}
+	if mins := c.StreamTimeoutMinutes; mins > 0 {
+		c.sessionManager.SetStreamTimeout(time.Duration(mins) * time.Minute)
+		utils.InfoLog("Stream timeout set to %d minutes", mins)
+	}
+	if hours := c.TempLinkHours; hours > 0 {
+		c.sessionManager.SetTempLinkTimeout(time.Duration(hours) * time.Hour)
+		utils.InfoLog("Temporary link timeout set to %d hours", hours)
+	}
+	if hours := c.VODCacheStaleHours; hours > 0 {
+		c.sessionManager.SetVODCacheStaleAge(time.Duration(hours) * time.Hour)
+		utils.InfoLog("VOD cache stale age set to %d hours", hours)
+	}
+	// Prune the on-disk slate clip cache too (clips are regenerated on demand).
+	// This runs regardless of ErrorSlateEnabled so leftover clips are cleaned up
+	// even after the feature is turned off. 0 = default 7 days; negative disables.
+	if hours := c.SlateCacheStaleHours; hours >= 0 {
+		if hours == 0 {
+			hours = 168
+		}
+		c.sessionManager.SetSlateCache(utils.SlateCacheDir(), time.Duration(hours)*time.Hour)
+		utils.InfoLog("Slate cache stale age set to %d hours", hours)
+	}
+	if secs := c.MultiplexStallTimeoutSeconds; secs > 0 {
+		c.sessionManager.SetClientStallTimeout(time.Duration(secs) * time.Second)
+		utils.InfoLog("Multiplex client stall timeout set to %d seconds", secs)
+	}
+}
+
+// setupDiscordBot initializes the Discord bot if a token is provided.
+func (c *Config) setupDiscordBot() error {
+	discordToken := c.DiscordBotToken
+	if discordToken == "" {
+		utils.InfoLog("Bootstrap: DISCORD_BOT_TOKEN not set - Discord bot is DISABLED")
+		return nil
+	}
+	utils.InfoLog("Initializing Discord bot")
+	discordAdminRole := c.DiscordAdminRoleID
+
+	// Get API URL from config, defaulting to host/port, but honor reverse proxy
+	apiURL := c.DiscordAPIURL
+	if apiURL == "" {
+		// The bot runs in this same process and calls the local API, which only
+		// serves plain HTTP on the listening port. Default to loopback so it
+		// works regardless of the public scheme/host: a TLS-terminating proxy
+		// in front would make a public HTTPS URL unreachable from here. Set
+		// DISCORD_API_URL to override (e.g. when the bot runs elsewhere).
+		apiURL = fmt.Sprintf("http://127.0.0.1:%d", c.HostConfig.Port)
+	}
+	utils.InfoLog("Discord API URL used by bot: %s", apiURL)
+	utils.InfoLog("Reminder: Ensure 'MESSAGE CONTENT INTENT' is enabled in Discord Developer Portal for this bot.")
+
+	bot, err := discord.NewBot(discordToken, discordAdminRole, apiURL, GetAPIKey())
+	if err != nil {
+		return fmt.Errorf("failed to initialize Discord bot: %w", err)
+	}
+
+	c.discordBot = bot
+	return nil
 }
 
 // cleanDebugAPIFiles removes timestamped JSON debug dumps written by the
@@ -402,14 +442,6 @@ func (c *Config) Serve() error {
 		utils.WarnLog("Bootstrap: Database manager present but not initialized")
 	default:
 		utils.WarnLog("Bootstrap: Database is DISABLED (no persistence)")
-	}
-
-	if c.sessionManager == nil {
-		utils.ErrorLog("Bootstrap: sessionManager is NIL inside Serve()")
-	} else {
-		utils.InfoLog("Bootstrap: sessionManager ready (timeouts: session=%v, stream=%v, tempLink=%v)",
-			// not exported; we just acknowledge presence
-			time.Minute, time.Minute, time.Hour)
 	}
 
 	if err := c.playlistInitialization(); err != nil {
@@ -447,38 +479,14 @@ func (c *Config) Serve() error {
 	defer close(shareSweepStop)
 	defer close(providerInfoStop)
 
-	// Drop expired LDAP auth-cache entries so they do not linger for the life of
-	// the process. Only successes are cached, so the map is small either way.
 	if c.LDAPEnabled && c.ldapCacheTTL() > 0 {
 		ldapSweepStop := make(chan struct{})
-		go func() {
-			ticker := time.NewTicker(c.ldapCacheTTL())
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ldapSweepStop:
-					return
-				case <-ticker.C:
-					sweepLDAPCache()
-				}
-			}
-		}()
+		c.startLDAPCacheSweeper(ldapSweepStop)
 		defer close(ldapSweepStop)
 	}
 
 	recentAuthSweepStop := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-recentAuthSweepStop:
-				return
-			case now := <-ticker.C:
-				sweepRecentAuth(now)
-			}
-		}
-	}()
+	startRecentAuthSweeper(recentAuthSweepStop)
 	defer close(recentAuthSweepStop)
 
 	if c.sessionManager != nil {
@@ -497,6 +505,31 @@ func (c *Config) Serve() error {
 		defer c.discordBot.Stop()
 	}
 
+	router, err := c.newRouter()
+	if err != nil {
+		return err
+	}
+
+	// Seed and, if configured, schedule provider health probes.
+	if c.health != nil {
+		healthStop := make(chan struct{})
+		c.startHealthMonitor(healthStop)
+		defer close(healthStop)
+	}
+
+	// Startup is complete; mark the service ready so /healthz returns 200 (and the
+	// container reports healthy) from here on. router.Run below starts accepting
+	// connections, so any request that reaches /healthz is necessarily past this
+	// point.
+	atomic.StoreInt32(&c.ready, 1)
+
+	// Add a message to indicate the server is ready
+	utils.InfoLog("[stream-share] Server is ready and listening on :%d", c.HostConfig.Port)
+	return router.Run(fmt.Sprintf(":%d", c.HostConfig.Port))
+}
+
+// newRouter builds the HTTP router: middleware, internal API and every route.
+func (c *Config) newRouter() (*gin.Engine, error) {
 	// gin.New() rather than gin.Default(): the default access logger logs every
 	// request, which drowns the log in noise from the frequently-polled /healthz
 	// and internal API endpoints. Log only failures (>= 400) unless debug logging
@@ -509,7 +542,7 @@ func (c *Config) Serve() error {
 	}
 	router := gin.New()
 	if err := c.applyTrustedProxies(router); err != nil {
-		return fmt.Errorf("invalid trusted proxy list: %w", err)
+		return nil, fmt.Errorf("invalid trusted proxy list: %w", err)
 	}
 	router.Use(c.quietRequestLogger())
 	router.Use(gin.Recovery())
@@ -534,532 +567,45 @@ func (c *Config) Serve() error {
 	router.GET("/share/:token/live.ts", c.handleShareStream)
 
 	// Container readiness endpoint for the Docker HEALTHCHECK. Reports whether
-	// THIS service has finished starting (see the ready flag set below), never
+	// THIS service has finished starting (see the ready flag set in Serve), never
 	// provider/VPN state, so it is safe to gate compose ordering on.
 	router.GET("/healthz", c.healthz)
 
-	// Seed and, if configured, schedule provider health probes.
-	if c.health != nil {
-		healthStop := make(chan struct{})
-		c.startHealthMonitor(healthStop)
-		defer close(healthStop)
-	}
-
-	// Startup is complete; mark the service ready so /healthz returns 200 (and the
-	// container reports healthy) from here on. router.Run below starts accepting
-	// connections, so any request that reaches /healthz is necessarily past this
-	// point.
-	atomic.StoreInt32(&c.ready, 1)
-
-	// Add a message to indicate the server is ready
-	utils.InfoLog("[stream-share] Server is ready and listening on :%d", c.HostConfig.Port)
-	return router.Run(fmt.Sprintf(":%d", c.HostConfig.Port))
+	return router, nil
 }
 
-// quietRequestLogger logs failed HTTP requests (status >= 400) at a severity
-// matching their status, and successful ones only in debug mode, keeping the
-// success flood — health checks, internal API polling — out of the normal log.
-// Unlike gin.Logger it redacts credentials from the logged URI.
-func (c *Config) quietRequestLogger() gin.HandlerFunc {
-	return func(ctx *gin.Context) {
-		start := time.Now()
-		ctx.Next()
-
-		status := ctx.Writer.Status()
-		if status < 400 && !utils.IsDebugLogEnabled() {
-			return
-		}
-		msg := fmt.Sprintf("[HTTP] %d | %v | %s | %s %q",
-			status, time.Since(start), ctx.ClientIP(), ctx.Request.Method, c.redactRequestURI(ctx.Request.URL, ctx.FullPath()))
-		if status >= 500 {
-			utils.ErrorLog("%s", msg)
-		} else if status < 400 {
-			utils.DebugLog("%s", msg)
-		} else {
-			utils.WarnLog("%s", msg)
-		}
-	}
-}
-
-// redactRequestURI renders a request path and query for logging with every
-// credential masked: the username/password query parameters, path segments the
-// matched route declares as :password (stream routes carry a viewer's own
-// credentials as /live/<user>/<pass>/<id>, LDAP ones included), and any segment
-// equal to the proxy's or the provider's username or password. route is the
-// matched route pattern (ctx.FullPath()), empty when nothing matched.
-func (c *Config) redactRequestURI(u *url.URL, route string) string {
-	secrets := map[string]bool{}
-	for _, s := range []string{c.User.String(), c.Password.String(), c.XtreamUser.String(), c.XtreamPassword.String()} {
-		if s != "" {
-			secrets[s] = true
-		}
-	}
-	segs := strings.Split(u.Path, "/")
-	routeSegs := strings.Split(route, "/")
-	for i, seg := range segs {
-		// :token segments are credentials too (share and download links).
-		if secrets[seg] || (i < len(routeSegs) && (routeSegs[i] == ":password" || routeSegs[i] == ":token")) {
-			segs[i] = "***"
-		}
-	}
-	out := strings.Join(segs, "/")
-	if u.RawQuery == "" {
-		return out
-	}
-	q := u.Query()
-	for _, k := range []string{"username", "password"} {
-		if q.Has(k) {
-			q.Set(k, "***")
-		}
-	}
-	return out + "?" + q.Encode()
-}
-
-// Add direct streaming routes with proxy credentials
-// addProxyCredentialRoutes registers direct streaming endpoints that accept
-// proxy credentials in the path but always use Xtream credentials upstream.
-func (c *Config) addProxyCredentialRoutes(router *gin.Engine) {
-	utils.InfoLog("[stream-share] Setting up direct stream routes with proxy credentials")
-
-	// Root level (generic)
-	router.GET("/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsStreamHandler)
-
-	// Live
-	router.GET("/live/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsLiveStreamHandler)
-
-	// Movie
-	router.GET("/movie/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsMovieStreamHandler)
-
-	// Series
-	router.GET("/series/:username/:password/:id", c.authWithPathCredentials(), c.xtreamProxyCredentialsSeriesStreamHandler)
-
-	// Timeshift — routed through xtreamStreamTimeshift which handles local catchup
-	router.GET("/timeshift/:username/:password/:duration/:start/:id", c.authWithPathCredentials(), c.xtreamStreamTimeshift)
-
-	utils.InfoLog("[stream-share] Routes initialized with direct stream URL support")
-}
-
-// Authentication middleware that checks credentials from URL path parameters
-// and manages user sessions for multiplexing
-// authWithPathCredentials authenticates :username/:password path params against
-// either LDAP (if enabled) or local credentials, and registers the user session.
-func (c *Config) authWithPathCredentials() gin.HandlerFunc {
-	return func(ctx *gin.Context) {
-		username := ctx.Param("username")
-		password := ctx.Param("password")
-		ip := ctx.ClientIP()
-		userAgent := ctx.Request.UserAgent()
-
-		utils.DebugLog("Path credentials auth check: username=%s, IP=%s", username, ip)
-
-		if !c.credentialsValid(username, password) {
-			utils.DebugLog("Authentication failed for user in path: %s", username)
-			ctx.AbortWithStatus(http.StatusUnauthorized)
-			return
-		}
-
-		// Track the viewer by client IP unless LDAP is on: a shared local login
-		// would otherwise collapse every device into one session/history
-		// identity, and IP aliases could never apply. Matches the provider-
-		// credentials routes, where resolveRequestUsername falls back to the IP.
-		identity := username
-		if !c.LDAPEnabled {
-			identity = ip
-		}
-
-		// Register or update the user session and set identity in context for later logs
-		if c.sessionManager == nil {
-			utils.ErrorLog("authWithPathCredentials: sessionManager is NIL - cannot register user session")
-		} else {
-			c.sessionManager.RegisterUser(identity, ip, userAgent)
-			// Per request: RegisterUser itself logs a genuinely new session.
-			utils.DebugLog("authWithPathCredentials: session registered for user=%s ip=%s", username, ip)
-		}
-		ctx.Set("username", identity)
-
-		ctx.Next()
-	}
-}
-
-// handleTemporaryLink processes temporary link downloads
-// handleTemporaryLink serves a previously created temporary link, preferring a
-// local cache hit and falling back to proxying the original upstream URL.
-func (c *Config) handleTemporaryLink(ctx *gin.Context) {
-	token := ctx.Param("token")
-
-	// Get the temporary link from session manager
-	tempLink, err := c.sessionManager.GetTemporaryLink(token)
-	if err != nil {
-		utils.DebugLog("Temporary link not found: %v", err)
-		ctx.AbortWithStatus(http.StatusNotFound)
-		return
-	}
-
-	// Normalize the stream ID and classify its type once for both the view
-	// registration and the cache lookup below.
-	idRaw := strings.TrimSuffix(tempLink.StreamID, path.Ext(tempLink.StreamID))
-	basePath := classifyStreamType(tempLink.URL, "movie")
-
-	defer c.registerVODView(tempLink.Username, idRaw, basePath, tempLink.Title)()
-
-	// If cached locally, serve from disk (normalize ID without extension)
-	if c.db != nil && tempLink.StreamID != "" {
-		if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil && entry.Status == "ready" {
-			utils.InfoLog("Download via cache for %s -> %s", c.vodLabel(tempLink.StreamID), entry.FilePath)
-			ext := strings.ToLower(path.Ext(entry.FilePath))
-			if ext == "" {
-				ext = ".mp4"
-			}
-			c.touchVODCache(idRaw)
-			serveLocalFileRange(ctx, entry.FilePath, contentTypeForPath(entry.FilePath), sanitiseFilename(tempLink.Title)+ext, true)
-			return
-		}
-
-		// Cache miss: when VOD caching is enabled, start (or join) the
-		// background download and serve this download from it, so future
-		// requests serve from local disk and this one opens no second provider
-		// connection. This realizes the "always cache" policy.
-		if c.VODCacheEnabled {
-			defaultExt := ".mp4"
-			if basePath == "series" {
-				defaultExt = ".mkv"
-			}
-			upstream, dest, _ := c.resolveVODCacheURL(basePath, defaultExt, tempLink.StreamID)
-			expires := time.Now().Add(7 * 24 * time.Hour)
-			dl := c.startBackgroundDownload(upstream, dest, idRaw, basePath, expires, nil)
-			c.serveVODDownload(ctx, dl, vodCachedLabel(idRaw), sanitiseFilename(tempLink.Title)+path.Ext(dest), true)
-			return
-		}
-	}
-
-	// Fallback: proxy upstream URL
-	targetURL, err := url.Parse(tempLink.URL)
-	if err != nil {
-		utils.ErrorLog("Invalid URL in temporary link: %v", err)
-		ctx.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
-	ext := strings.ToLower(path.Ext(targetURL.Path))
-	if ext == "" {
-		ext = ".mp4"
-	}
-	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, sanitiseFilename(tempLink.Title), ext))
-	c.stream(ctx, targetURL)
-}
-
-// resolveRequestUsername derives the viewer identity for session tracking. It
-// prefers the authenticated username set by middleware, then path/query params,
-// and finally falls back to the client IP. The fallback matters for the direct
-// Xtream-credentials routes (e.g. /movie/<user>/<pass>/:id), which have no auth
-// middleware and therefore no username in context — without it, VOD views would
-// never be registered and /status would miss them.
-func (c *Config) resolveRequestUsername(ctx *gin.Context) string {
-	username := ctx.GetString("username")
-	if username == "" {
-		username = ctx.Param("username")
-	}
-	if username == "" {
-		username = ctx.Query("username")
-	}
-	if username == "" {
-		username = ctx.ClientIP()
-	}
-	return username
-}
-
-// multiplexedStream handles streaming with connection multiplexing
-// multiplexedStream proxies a stream while sharing a single upstream connection
-// across multiple clients for the same content using the SessionManager.
-// classifyStreamType infers the Xtream stream type ("movie", "series", "live",
-// "timeshift") from the segments of a URL path, returning fallback when none of
-// the known segments are present.
-func classifyStreamType(p, fallback string) string {
-	switch {
-	case strings.Contains(p, "/movie/"):
-		return "movie"
-	case strings.Contains(p, "/series/"):
-		return "series"
-	case strings.Contains(p, "/live/"):
-		return "live"
-	case strings.Contains(p, "/timeshift/"):
-		return "timeshift"
-	default:
-		return fallback
-	}
-}
-
-func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
-	username := c.resolveRequestUsername(ctx)
-
-	// Extract stream ID and type
-	streamID := path.Base(targetURL.Path)
-	// Normalize stream id for cache lookup (strip extension if present)
-	streamIDRaw := strings.TrimSuffix(streamID, path.Ext(streamID))
-	streamType := classifyStreamType(targetURL.Path, "unknown")
-	// Fallback: check the incoming request path for type hints. The generic
-	// /:user/:pass/:id route maps to live streams in the Xtream protocol.
-	if streamType == "unknown" {
-		streamType = classifyStreamType(ctx.Request.URL.Path, "live")
-	}
-
-	// Title from query parameter, name resolution (live index or lazy VOD
-	// get_vod_info), or fallback to stream ID. Resolving here — before
-	// RequestStream takes streamLock — both stores the title on the session and
-	// warms the VOD cache so later locked log lookups resolve without network I/O.
-	streamTitle := targetURL.Query().Get("title")
-	if streamTitle == "" {
-		if name, ok := c.resolveTitleAtStart(streamIDRaw, streamType); ok && strings.TrimSpace(name) != "" {
-			streamTitle = name
-		} else {
-			streamTitle = streamID
-		}
-	}
-
-	utils.DebugLog("Multiplexed stream request: user=%s, id=%s, type=%s, title=%s, upstream=%s",
-		username, streamID, streamType, streamTitle, targetURL.String())
-
-	// If VOD and cached locally, serve from disk to avoid upstream connection.
-	// Register a synthetic VOD view so /status and watch history reflect this
-	// playback — without it, cached VOD served through the multiplexed path
-	// (e.g. the generic /:user/:pass/:id route) would be invisible.
-	if c.db != nil && (streamType == "movie" || streamType == "series") {
-		if entry, err := c.db.GetVODCache(streamIDRaw); err == nil && entry != nil && entry.Status == "ready" {
-			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
-				utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, c.streamLabel(streamIDRaw), entry.FilePath)
-				defer c.registerVODView(username, streamIDRaw, streamType, streamTitle)()
-				c.touchVODCache(streamIDRaw)
-				serveLocalFileRange(ctx, entry.FilePath, contentTypeForPath(entry.FilePath), "", false)
+// startLDAPCacheSweeper drops expired LDAP auth-cache entries so they do not
+// linger for the life of the process. Only successes are cached, so the map is
+// small either way.
+func (c *Config) startLDAPCacheSweeper(stop <-chan struct{}) {
+	go func() {
+		ticker := time.NewTicker(c.ldapCacheTTL())
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
 				return
+			case <-ticker.C:
+				sweepLDAPCache()
 			}
-			utils.WarnLog("Multiplex: cached %s missing on disk for %s at %s; falling back to upstream", streamType, c.streamLabel(streamIDRaw), entry.FilePath)
 		}
-	}
-
-	if c.sessionManager == nil {
-		utils.ErrorLog("Multiplex: sessionManager is NIL, falling back to direct streaming")
-		c.stream(ctx, targetURL)
-		return
-	}
-
-	// Request the stream through the session manager for multiplexing
-	label := c.streamLabel(streamID)
-	// clientKey identifies this connection: one user can hold several (e.g.
-	// two devices on the same account), so every later call names its own.
-	buffer, clientKey, err := c.sessionManager.RequestStream(username, streamID, streamType, streamTitle, targetURL)
-	if err != nil {
-		utils.ErrorLog("Multiplex: RequestStream failed for user=%s %s err=%v", username, label, err)
-		ctx.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
-	if buffer == nil {
-		utils.WarnLog("Multiplex: buffer returned is NIL for %s (user=%s)", label, username)
-	}
-
-	// Get the data channel and termination signal for this client
-	dataChan, exists := c.sessionManager.GetClientChannel(streamID, clientKey)
-	if !exists {
-		utils.ErrorLog("Failed to get client channel for user=%s, %s", username, label)
-		ctx.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
-	doneChan, _ := c.sessionManager.GetClientDone(streamID, clientKey)
-	clientGone := ctx.Request.Context().Done()
-
-	// Wait until the pump knows whether the upstream actually came up, before we
-	// commit to a 200. Historically RequestStream returned before the provider
-	// was ever contacted, so a 403 or dial timeout could only ever surface as an
-	// unexplained mid-body disconnect. A co-viewer joining a healthy stream sees
-	// an already-closed channel here and does not wait.
-	if buffer != nil {
-		select {
-		case <-buffer.Ready():
-			if startErr := buffer.StartError(); startErr != nil {
-				// The session manager serves an error slate for eligible live
-				// streams; the bytes arrive on dataChan like any other content,
-				// so fall through. Anything else keeps the old behavior, except
-				// the status is now genuinely reachable before the first byte.
-				if !c.sessionManager.ServesSlateFor(streamID) {
-					utils.WarnLog("Multiplex: upstream failed for %s (user=%s): %s",
-						label, username, startErr.Error())
-					c.sessionManager.RemoveClient(streamID, username, clientKey)
-					ctx.AbortWithStatus(http.StatusBadGateway)
-					return
-				}
-			}
-		case <-time.After(upstreamReadyTimeout):
-			utils.WarnLog("Multiplex: upstream did not respond within %s for %s (user=%s)",
-				upstreamReadyTimeout, label, username)
-			c.sessionManager.RemoveClient(streamID, username, clientKey)
-			ctx.AbortWithStatus(http.StatusGatewayTimeout)
-			return
-		case <-clientGone:
-			utils.DebugLog("Multiplex: client %s left before %s started", username, label)
-			c.sessionManager.RemoveClient(streamID, username, clientKey)
-			return
-		}
-	}
-
-	// Set content-type and disable intermediary buffering
-	setNoBufferingHeaders(ctx, contentTypeForPath(targetURL.Path))
-
-	// Stream data to the client
-	utils.DebugLog("Starting multiplexed stream for user %s (%s)", username, label)
-
-	ctx.Stream(func(w io.Writer) bool {
-		select {
-		case data, ok := <-dataChan:
-			if !ok {
-				utils.DebugLog("Stream channel closed for user %s (%s)", username, label)
-				return false
-			}
-			if _, err := w.Write(data); err != nil {
-				// Client disconnected
-				utils.DebugLog("Client write error for user %s (%s): %v", username, label, err)
-				return false
-			}
-			// Force immediate delivery to client to avoid periodic buffering
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
-			return true
-		case <-doneChan:
-			// Pump dropped this client (slow viewer) or the stream stopped
-			utils.DebugLog("Stream done signal for user %s (%s)", username, label)
-			return false
-		case <-clientGone:
-			// Client closed the connection while we were waiting for data
-			utils.DebugLog("Client disconnected (idle) for user %s (%s)", username, label)
-			return false
-		}
-	})
-
-	// Clean up after streaming is done
-	utils.DebugLog("Stream ended for user %s (%s)", username, label)
-	c.sessionManager.RemoveClient(streamID, username, clientKey)
+	}()
 }
 
-// playlistInitialization writes a proxified M3U file to disk if a playlist was parsed.
-func (c *Config) playlistInitialization() error {
-	if len(c.playlist.Tracks) == 0 {
-		return nil
-	}
-
-	f, err := os.Create(c.proxyfiedM3UPath)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
-	return c.marshallInto(f, false)
-}
-
-// MarshallInto a *bufio.Writer a Playlist.
-// marshallInto writes the in-memory playlist into an M3U file, rewriting
-// credentials and paths depending on xtream mode. When M3U dedup is enabled,
-// redundant tracks are dropped first (same stream ID listed twice, or
-// same-title copies differing only by language/quality), keeping the best
-// source per group.
-func (c *Config) marshallInto(into *os.File, xtream bool) error {
-	tracks := c.playlist.Tracks
-	if c.M3UDedupEnabled && len(tracks) > 1 {
-		before := len(tracks)
-		tracks, _ = deduplicateTracks(tracks, dedupPreferredLanguages(c.M3UDedupPreferredLangs))
-		if len(tracks) != before {
-			utils.InfoLog("M3U dedup: %d tracks -> %d kept (%d redundant removed)", before, len(tracks), before-len(tracks))
-		}
-	}
-
-	filteredTrack := make([]m3u.Track, 0, len(tracks))
-
-	ret := 0
-	into.WriteString("#EXTM3U\n") // nolint: errcheck
-	for i, track := range tracks {
-		var buffer bytes.Buffer
-
-		buffer.WriteString("#EXTINF:") // nolint: errcheck
-		fmt.Fprintf(&buffer, "%d ", track.Length)
-		for i := range track.Tags {
-			tagValue := track.Tags[i].Value
-			if track.Tags[i].Name == "tvg-logo" {
-				tagValue = c.proxyImagePath(tagValue)
+// startRecentAuthSweeper drops stale recent-auth entries once an hour.
+func startRecentAuthSweeper(stop <-chan struct{}) {
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case now := <-ticker.C:
+				sweepRecentAuth(now)
 			}
-			if i == len(track.Tags)-1 {
-				fmt.Fprintf(&buffer, "%s=%q", track.Tags[i].Name, tagValue)
-				continue
-			}
-			fmt.Fprintf(&buffer, "%s=%q ", track.Tags[i].Name, tagValue)
 		}
-
-		uri, err := c.replacePath(track.URI, i-ret, xtream)
-		if err != nil {
-			ret++
-			utils.ErrorLog("track: %s: %s", track.Name, err)
-			continue
-		}
-
-		_, _ = fmt.Fprintf(into, "%s, %s\n%s\n", buffer.String(), track.Name, uri)
-
-		filteredTrack = append(filteredTrack, track)
-	}
-	// Store back the written list so route registration (which runs after
-	// playlistInitialization) sees the same tracks and indices as the file.
-	c.playlist.Tracks = filteredTrack
-
-	return into.Sync()
-}
-
-// replacePath rewrites a track URI into the relative path this proxy will
-// serve it at — no scheme or host, since the same cached playlist may be
-// served to clients reaching this server via different hostnames; the
-// host gets prefixed at serve time by rewritePlaylistHosts.
-//
-// Known limitation: a track URI with embedded HTTP Basic Auth credentials
-// (rare; e.g. a raw M3U-provider URI shaped like http://user:pass@host/...)
-// previously carried those credentials into the generated proxy URL. That
-// is not preserved here — there is no existing test covering it, and
-// encoding it into a purely relative value that still resolves correctly
-// at serve time isn't worth the complexity for what appears to be an
-// unused path.
-func (c *Config) replacePath(uri string, trackIndex int, xtream bool) (string, error) {
-	oriURL, err := url.Parse(uri)
-	if err != nil {
-		return "", err
-	}
-
-	customEnd := strings.Trim(c.CustomEndpoint, "/")
-	if customEnd != "" {
-		customEnd = fmt.Sprintf("/%s", customEnd)
-	}
-
-	uriPath := oriURL.EscapedPath()
-	if xtream {
-		// Xtream get.php mode: replace provider creds with local creds in path
-		uriPath = strings.ReplaceAll(uriPath, c.XtreamUser.PathEscape(), c.User.PathEscape())
-		uriPath = strings.ReplaceAll(uriPath, c.XtreamPassword.PathEscape(), c.Password.PathEscape())
-	} else {
-		// M3U proxified path
-		uriPath = path.Join(
-			"/",
-			c.endpointAntiColision,
-			c.User.PathEscape(),
-			c.Password.PathEscape(),
-			fmt.Sprintf("%d", trackIndex),
-			path.Base(uriPath),
-		)
-	}
-
-	return customEnd + uriPath, nil
-}
-
-// sanitiseFilename strips characters that are unsafe inside a quoted
-// Content-Disposition filename value, preventing header injection.
-func sanitiseFilename(name string) string {
-	return strings.Map(func(r rune) rune {
-		if r == '"' || r == '\r' || r == '\n' || r == '\\' {
-			return '_'
-		}
-		return r
-	}, name)
+	}()
 }
 
 // startNameIndexRefresher runs a background goroutine that periodically re-fetches

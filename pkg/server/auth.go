@@ -306,3 +306,65 @@ func ldapGroupMatches(groupValue, requiredGroup string) bool {
 	// Plain name: exact case-insensitive equality
 	return lower == strings.ToLower(requiredGroup)
 }
+
+// Authentication middleware that checks credentials from URL path parameters
+// and manages user sessions for multiplexing
+// authWithPathCredentials authenticates :username/:password path params against
+// either LDAP (if enabled) or local credentials, and registers the user session.
+func (c *Config) authWithPathCredentials() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		username := ctx.Param("username")
+		password := ctx.Param("password")
+		ip := ctx.ClientIP()
+		userAgent := ctx.Request.UserAgent()
+
+		utils.DebugLog("Path credentials auth check: username=%s, IP=%s", username, ip)
+
+		if !c.credentialsValid(username, password) {
+			utils.DebugLog("Authentication failed for user in path: %s", username)
+			ctx.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+
+		// Track the viewer by client IP unless LDAP is on: a shared local login
+		// would otherwise collapse every device into one session/history
+		// identity, and IP aliases could never apply. Matches the provider-
+		// credentials routes, where resolveRequestUsername falls back to the IP.
+		identity := username
+		if !c.LDAPEnabled {
+			identity = ip
+		}
+
+		// Register or update the user session and set identity in context for later logs
+		if c.sessionManager == nil {
+			utils.ErrorLog("authWithPathCredentials: sessionManager is NIL - cannot register user session")
+		} else {
+			c.sessionManager.RegisterUser(identity, ip, userAgent)
+			// Per request: RegisterUser itself logs a genuinely new session.
+			utils.DebugLog("authWithPathCredentials: session registered for user=%s ip=%s", username, ip)
+		}
+		ctx.Set("username", identity)
+
+		ctx.Next()
+	}
+}
+
+// resolveRequestUsername derives the viewer identity for session tracking. It
+// prefers the authenticated username set by middleware, then path/query params,
+// and finally falls back to the client IP. The fallback matters for the direct
+// Xtream-credentials routes (e.g. /movie/<user>/<pass>/:id), which have no auth
+// middleware and therefore no username in context — without it, VOD views would
+// never be registered and /status would miss them.
+func (c *Config) resolveRequestUsername(ctx *gin.Context) string {
+	username := ctx.GetString("username")
+	if username == "" {
+		username = ctx.Param("username")
+	}
+	if username == "" {
+		username = ctx.Query("username")
+	}
+	if username == "" {
+		username = ctx.ClientIP()
+	}
+	return username
+}

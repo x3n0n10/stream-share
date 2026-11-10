@@ -213,8 +213,8 @@ func progressiveTestServer(t *testing.T, provider http.Handler, cacheEnabled boo
 	gin.SetMode(gin.TestMode)
 	// These tests are not about connection spacing (see vod_churn_test.go):
 	// keep it short so a test does not wait on the previous one's close.
-	prevSpacing := vodConnPacer.setSpacing(20 * time.Millisecond)
-	t.Cleanup(func() { vodConnPacer.setSpacing(prevSpacing) })
+	prevSpacing := setVODSpacing(20 * time.Millisecond)
+	t.Cleanup(func() { setVODSpacing(prevSpacing) })
 	vodCacheClient.CloseIdleConnections()
 	up := httptest.NewServer(provider)
 	t.Cleanup(up.Close)

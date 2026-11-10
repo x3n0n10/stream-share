@@ -141,13 +141,6 @@ func init() {
 		Config.DebugLoggingEnabled, levelToString(Config.LogLevel))
 }
 
-// Close closes any open log files
-func Close() {
-	if Config.logFile != nil {
-		_ = Config.logFile.Close()
-	}
-}
-
 // InfoLog logs an info message
 func InfoLog(format string, v ...interface{}) {
 	if Config.LogLevel <= LevelInfo {

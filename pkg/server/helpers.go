@@ -33,8 +33,6 @@ import (
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
 
-// isVODPath reports whether the given URL path likely targets VOD content
-// (movie or series) based on known path segments or file extensions.
 // prepareVODHeaders returns a clean set of headers for strict VOD providers.
 func prepareVODHeaders(ctx *gin.Context) http.Header {
 	clean := http.Header{}
@@ -55,6 +53,8 @@ func prepareVODHeaders(ctx *gin.Context) http.Header {
 	return clean
 }
 
+// isVODPath reports whether the given URL path likely targets VOD content
+// (movie or series) based on known path segments or file extensions.
 func isVODPath(p string) bool {
 	lp := strings.ToLower(p)
 	// Live, timeshift, and HLS are never VOD even if they end in .ts

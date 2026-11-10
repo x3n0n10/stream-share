@@ -403,6 +403,91 @@ Delete: `rewriteXMLTVIcons` (test-only wrapper; tests call
 anything else it reports that has no caller, unless removing it changes
 behaviour.
 
+## PR C — follow-ups (owner asked for a plan, 2026-11-10)
+
+Findings the PR A/PR B final reviews placed out of scope. All predate those
+PRs. Branch `fix/followups`, started from PR B's head; opened against master
+once PR B is merged.
+
+### C1. One "serve the VOD cache hit" rule (bug + duplication)
+
+Four places decide whether a VOD item is served from the local cache, with
+different rules:
+- `streamVODWithCache` (`xtream_handlers_stream.go`): entry exists and the
+  file is on disk (any status);
+- `serveCachedVOD` (`xtream_handlers_stream.go`): `Status == "ready"` and the
+  file is on disk; warns and falls back when missing;
+- `handleTemporaryLink` (`handlers_vod.go`): `Status == "ready"`, **file never
+  checked** — a ready row whose file is gone answers an error instead of
+  falling back to the provider;
+- `startCache` (`handlers_vod.go`): `Status == "ready"`, file not checked.
+
+One rule (controller call): an entry counts as a cache hit when its file
+exists on disk as a regular file. A download writes to a temporary file and
+renames on completion, so the final path existing means the file is complete;
+the status column is not needed for this decision. A row whose file is
+missing logs one warning and falls back (provider, or a new download). One
+small helper returns the cached file path for an id; all four places use it.
+
+### C2. Download key matches the player key
+
+`startCache` keys the in-progress download and the database row by
+`req.StreamID`, which may carry an extension (`123.mkv`), while players use
+the bare id (`123`). A Discord download started with an extension is then
+invisible to a player asking for the same item (and vice versa), causing a
+second download. Key both by the bare id (extension stripped), as the player
+paths do; keep the requested extension for the file name only.
+
+### C3. Session and server loose ends
+
+- `joinStreamSession`: when `GetClientChannel` fails after `RequestStream`
+  succeeded, the client stays registered in the session (a leaked client and,
+  for a single-viewer stream, an upstream kept open). Remove the client before
+  answering 500.
+- `multiplexedStream`: the `c.sessionManager == nil` fallback is dead
+  (`NewServer` fails without a session manager); delete it.
+- `Serve`: each `defer close(stop)` directly follows its worker's start, so
+  shutdown runs in reverse start order (today the share sweeper's and the
+  provider-info refresher's defers are swapped).
+
+### C4. Routes under `CUSTOM_ENDPOINT`; query-style catchup
+
+- The viewer-credential stream routes (`addProxyCredentialRoutes`: generic,
+  `/live`, `/movie`, `/series`, `/timeshift`) are registered only at the
+  router root, while every link this server hands out (M3U tracks, localized
+  catchup templates) carries the custom endpoint prefix. With `CUSTOM_ENDPOINT`
+  set those links reach no route. Register the same routes under the custom
+  endpoint group too; keep the root routes, because Xtream players build
+  stream URLs from `server_info` without any path prefix.
+- Query-style catchup (`/streaming/timeshift.php?username=&password=&stream=&start=&duration=`),
+  which providers use in `catchup-source` templates and A10 now localizes onto
+  this server, has no route. Add it (root and custom endpoint), authenticated
+  with `credentialsValid` like the path-credential routes, and serve it
+  through the same timeshift handling as `/timeshift/...` (local catchup or
+  provider proxy).
+
+### C5. `fetchToFile` retry path and `copyVODResponse` parameters
+
+- `fetchToFile` repeats the "give up on this attempt and retry" block
+  (`cancelAttempt(); _ = resp.Body.Close(); WarnLog; attempt++; retrying =
+  true; continue`) in several status branches. Each branch decides only
+  *whether* to retry and logs why; one retry path performs it. Behaviour,
+  log text and backoff unchanged.
+- `copyVODResponse` (9 parameters, two out-pointers): `lastUpdate` becomes a
+  local (the progress throttle restarting per attempt is invisible), and the
+  byte count is passed in and returned instead of written through a pointer.
+
+### C6. `vod_cache.go` split by job
+
+`vod_cache.go` (~890 lines) holds five jobs. Pure moves:
+- the connection pacer (`connPacer`, `pacedConn`, `vodConnPacer`,
+  `vodCacheClient`) → `vod_pacer.go`;
+- tail and window fetching (`fetchTail`, `fetchTailPiece`, `fetchWindows`,
+  `fetchWindow`, `errRangeIgnored`, the head/tail size helpers) →
+  `vod_windows.go`;
+- `vod_cache.go` keeps the download loop, resolver/validation and the
+  background-download registry.
+
 ## Verification
 
 - Both PRs: full suite with `-race`, `go vet`, CI (golangci-lint) green.

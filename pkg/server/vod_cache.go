@@ -20,10 +20,8 @@ package server
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"path"
@@ -38,118 +36,6 @@ import (
 	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
-
-// vodCacheClient is used exclusively by fetchToFile. No global timeout so large files
-// can be downloaded fully; transport-level timeouts prevent infinite stalls.
-//
-// A download keeps one connection for as long as it can: the header, the
-// container index at the end and the rest of the file are requested one after
-// the other on the same keep-alive connection (see fetchToFile). New
-// connections go through vodConnPacer.
-var vodCacheClient = &http.Client{
-	Transport: &http.Transport{
-		DialContext:           vodConnPacer.DialContext,
-		ResponseHeaderTimeout: 30 * time.Second,
-		IdleConnTimeout:       90 * time.Second,
-		DisableCompression:    true,
-	},
-}
-
-// vodConnPacer spaces new provider connections by at least a second after the
-// last one closed. Providers allowing a single connection per account track
-// connections lazily: one just closed still counts for a moment, and the limit
-// is enforced by cutting the oldest connection still open, so reconnecting at
-// once can get the new connection cut a few seconds later. Reusing a
-// keep-alive connection does not dial, so it is not delayed.
-var vodConnPacer = &connPacer{spacing: time.Second}
-
-// connPacer is a dialer that opens a connection only once spacing has passed
-// since the last connection it dialed was closed.
-type connPacer struct {
-	mu        sync.Mutex
-	spacing   time.Duration
-	lastClose time.Time
-	dialer    net.Dialer
-}
-
-func (p *connPacer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	for {
-		p.mu.Lock()
-		wait := time.Until(p.lastClose.Add(p.spacing))
-		p.mu.Unlock()
-		if wait <= 0 {
-			break
-		}
-		t := time.NewTimer(wait)
-		select {
-		case <-t.C:
-		case <-ctx.Done():
-			t.Stop()
-			return nil, ctx.Err()
-		}
-	}
-	c, err := p.dialer.DialContext(ctx, network, addr)
-	if err != nil {
-		return nil, err
-	}
-	return &pacedConn{Conn: c, p: p}, nil
-}
-
-// pacedConn records when it is closed in its pacer.
-type pacedConn struct {
-	net.Conn
-	p    *connPacer
-	once sync.Once
-}
-
-func (c *pacedConn) Close() error {
-	c.once.Do(func() {
-		c.p.mu.Lock()
-		c.p.lastClose = time.Now()
-		c.p.mu.Unlock()
-	})
-	return c.Conn.Close()
-}
-
-// vodHeadSize is how much the first request of a download asks for. It is a
-// bounded request so the connection can be reused for the container index at
-// the end of the file (vodTailSize) before the rest of the file follows; the
-// header is what a player reads first, so it is not delayed.
-var vodHeadSize int64 = 1 << 20
-
-// vodTailMin, vodTailMax and vodTailFraction size the end of the file fetched
-// right after the header: demuxers read a container index stored there
-// (matroska cues and tags, an MP4 moov written last) before playing. Cues are
-// typically well under 1 MiB, but a long movie's moov is several MiB, so the
-// tail is max(4 MiB, 0.5 % of the file), capped at 16 MiB. Its last
-// vodTailFirst bytes come first: that is where the index nearly always is, so
-// a player waiting for it is served after ~1 MiB rather than the whole tail.
-//
-// Files smaller than vodTailMinFile get no tail fetch: they download in
-// moments, and on-demand windows cover a read near their end.
-var (
-	vodTailMin      int64 = 4 << 20
-	vodTailMax      int64 = 16 << 20
-	vodTailFraction int64 = 200 // 1/200 = 0.5 %
-	vodTailFirst    int64 = 1 << 20
-	vodTailMinFile  int64 = 32 << 20
-)
-
-// vodTailSize returns how much of the end of a file of size total is fetched
-// ahead of the sequential download.
-func vodTailSize(total int64) int64 {
-	n := total / vodTailFraction
-	if n < vodTailMin {
-		n = vodTailMin
-	}
-	if n > vodTailMax {
-		n = vodTailMax
-	}
-	if n > total {
-		n = total
-	}
-	return n
-}
 
 // vodIndexAtEnd reports whether files with this extension commonly store
 // their index at the end, so fetching the tail early saves players a wait.
@@ -199,7 +85,6 @@ func (c *Config) fetchToFile(ctx context.Context, dl *vodDownload, upstream, des
 	defer func() { _ = f.Close() }()
 
 	var downloaded, total int64
-	lastUpdate := time.Now()
 	completed := false
 
 	// The provider connection is held through a slot (see provider.Arbiter):
@@ -307,6 +192,7 @@ func (c *Config) fetchToFile(ctx context.Context, dl *vodDownload, upstream, des
 			continue
 		}
 
+		retryStatus := false // an answer that is not the file: retried after the switch
 		switch resp.StatusCode {
 		case http.StatusOK:
 			bounded = false // the whole file: read it all
@@ -347,18 +233,14 @@ func (c *Config) fetchToFile(ctx context.Context, dl *vodDownload, upstream, des
 			// Nothing left past what we have: with the total unknown (the
 			// header was the whole file), the download is complete.
 			if downloaded > 0 && (total == 0 || downloaded >= total) {
-				cancelAttempt()
-				_ = resp.Body.Close()
 				completed = true
 			} else {
-				cancelAttempt()
-				_ = resp.Body.Close()
-				utils.WarnLog("Cache: upstream status %d (attempt %d)", resp.StatusCode, attempt)
-				attempt++
-				retrying = true
-				continue
+				retryStatus = true
 			}
 		default:
+			retryStatus = true
+		}
+		if retryStatus {
 			cancelAttempt()
 			_ = resp.Body.Close()
 			utils.WarnLog("Cache: upstream status %d (attempt %d)", resp.StatusCode, attempt)
@@ -368,6 +250,7 @@ func (c *Config) fetchToFile(ctx context.Context, dl *vodDownload, upstream, des
 		}
 		if completed {
 			cancelAttempt()
+			_ = resp.Body.Close()
 			break
 		}
 		dl.setTotal(total)
@@ -376,10 +259,11 @@ func (c *Config) fetchToFile(ctx context.Context, dl *vodDownload, upstream, des
 		watchDone := make(chan struct{})
 		go watchForPause(dl, lease.Preempted(), bounded, cancelAttempt, &preempted, watchDone)
 
-		ok, readErr := c.copyVODResponse(dl, f, resp, cancelAttempt, watchDone, streamID, &downloaded, total, &lastUpdate)
+		n, ok, readErr := c.copyVODResponse(dl, f, resp, cancelAttempt, watchDone, streamID, downloaded, total)
 		if !ok {
 			return
 		}
+		downloaded = n
 
 		if (total > 0 && downloaded >= total) || (readErr == io.EOF && !bounded) {
 			completed = true
@@ -517,14 +401,16 @@ func watchForPause(dl *vodDownload, slot <-chan struct{}, bounded bool, cancelAt
 
 // copyVODResponse copies resp's body into f at the current offset, reporting
 // progress, until the body ends or the attempt is cancelled. It closes
-// watchDone, the body and the attempt. ok is false after a write error, which
-// already marked the cache entry failed.
-func (c *Config) copyVODResponse(dl *vodDownload, f *os.File, resp *http.Response, cancelAttempt context.CancelFunc, watchDone chan struct{}, streamID string, downloaded *int64, total int64, lastUpdate *time.Time) (ok bool, readErr error) {
+// watchDone, the body and the attempt, and returns downloaded plus the bytes
+// written. ok is false after a write error, which already marked the cache
+// entry failed.
+func (c *Config) copyVODResponse(dl *vodDownload, f *os.File, resp *http.Response, cancelAttempt context.CancelFunc, watchDone chan struct{}, streamID string, downloaded int64, total int64) (newDownloaded int64, ok bool, readErr error) {
 	// Written straight to the file (no buffering) and published right
 	// after, so readers of the file see every counted byte.
 	buf := make([]byte, 256*1024)
 	stall := time.AfterFunc(vodCacheStallTimeout, cancelAttempt)
 	body := &stallReader{r: resp.Body, timer: stall, idle: vodCacheStallTimeout}
+	lastUpdate := time.Now() // the throttle restarting per attempt is invisible
 	for {
 		nr, er := body.Read(buf)
 		if nr > 0 {
@@ -535,15 +421,15 @@ func (c *Config) copyVODResponse(dl *vodDownload, f *os.File, resp *http.Respons
 				_ = resp.Body.Close()
 				utils.ErrorLog("Cache: write error: %v", ew)
 				c.cacheFail(streamID)
-				return false, nil
+				return downloaded, false, nil
 			}
-			*downloaded += int64(nr)
+			downloaded += int64(nr)
 			dl.advance(int64(nr))
-			if c.db != nil && time.Since(*lastUpdate) > vodProgressInterval {
+			if c.db != nil && time.Since(lastUpdate) > vodProgressInterval {
 				// Narrow update: only the counters move, so there is no need
 				// to rewrite the whole row on every tick.
-				_ = c.db.UpdateVODProgress(streamID, *downloaded, total)
-				*lastUpdate = time.Now()
+				_ = c.db.UpdateVODProgress(streamID, downloaded, total)
+				lastUpdate = time.Now()
 			}
 		}
 		if er != nil {
@@ -557,7 +443,7 @@ func (c *Config) copyVODResponse(dl *vodDownload, f *os.File, resp *http.Respons
 	// to the pool for the next request instead of being torn down.
 	_ = resp.Body.Close()
 	cancelAttempt()
-	return true, readErr
+	return downloaded, true, readErr
 }
 
 // commitVODDownload moves the completed download into place and records it as
@@ -603,167 +489,6 @@ func contentRangeEnd(cr string) int64 {
 	return v
 }
 
-// fetchTail fetches the end of the file (see vodTailSize) into f ahead of the
-// sequential download, as windows, once the header is in: players read a
-// container index there right after the header. The last vodTailFirst bytes
-// come first, then the rest of the tail. It returns false when the slot was
-// preempted meanwhile (the caller parks and tries again on resume); a failure
-// is counted like a failed window and the download goes on.
-func (c *Config) fetchTail(ctx context.Context, dl *vodDownload, f *os.File, upstream string, total int64, lease *provider.Lease) bool {
-	tailStart := total - vodTailSize(total)
-	firstStart := total - vodTailFirst
-	if firstStart < tailStart {
-		firstStart = tailStart
-	}
-	for _, w := range []byteSpan{{firstStart, total}, {tailStart, firstStart}} {
-		if w.end <= w.start || dl.readableEnd(w.start) >= w.end {
-			continue
-		}
-		if r := dl.readableEnd(w.start); r > w.start {
-			w.start = r
-		}
-		if !c.fetchTailPiece(ctx, dl, f, upstream, total, lease, w) {
-			return false
-		}
-	}
-	return true
-}
-
-// fetchTailPiece fetches one piece of the tail; see fetchTail.
-func (c *Config) fetchTailPiece(ctx context.Context, dl *vodDownload, f *os.File, upstream string, total int64, lease *provider.Lease, w byteSpan) bool {
-	if dl.windowsDisabled() {
-		return true
-	}
-	wctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		select {
-		case <-lease.Preempted():
-			cancel()
-		case <-stop:
-		}
-	}()
-	err := fetchWindow(wctx, dl, f, upstream, w, total)
-	if err != nil && lease.IsPreempted() {
-		return false
-	}
-	if err != nil {
-		utils.WarnLog("Cache: fetching the end of the file (bytes %d-%d) failed: %v", w.start, w.end-1, err)
-		dl.windowFailed(errors.Is(err, errRangeIgnored))
-		return true
-	}
-	utils.DebugLog("Cache: fetched the end of the file (bytes %d-%d) for %s", w.start, w.end-1, utils.MaskURL(upstream))
-	return true
-}
-
-// errRangeIgnored reports a provider answering a ranged request with the whole
-// file (200).
-var errRangeIgnored = errors.New("provider ignored the Range header")
-
-// fetchWindows fetches every window readers are waiting for (see
-// vodDownload.requestWindow), one ranged request at a time, into f at their
-// offsets. Readers are woken as the bytes land. A provider that ignores Range
-// disables windows for this download; other failures are counted and retried
-// on the readers' next request, up to vodWindowMaxFailures.
-//
-// A window being fetched when the slot is preempted is abandoned without
-// counting as a failure; readers ask for it again.
-func (c *Config) fetchWindows(ctx context.Context, dl *vodDownload, f *os.File, upstream string, total int64, lease *provider.Lease) {
-	wctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		select {
-		case <-lease.Preempted():
-			cancel()
-		case <-stop:
-		}
-	}()
-	for wctx.Err() == nil {
-		w, ok := dl.nextWindow()
-		if !ok {
-			return
-		}
-		err := fetchWindow(wctx, dl, f, upstream, w, total)
-		if err != nil && lease.IsPreempted() {
-			dl.requeueWindow(w) // fetched once the download has a slot again
-			return
-		}
-		if err != nil {
-			utils.WarnLog("Cache: out-of-order fetch of bytes %d-%d failed: %v", w.start, w.end-1, err)
-			dl.windowFailed(errors.Is(err, errRangeIgnored))
-			continue
-		}
-		utils.DebugLog("Cache: fetched bytes %d-%d ahead of the download for %s", w.start, w.end-1, utils.MaskURL(upstream))
-	}
-}
-
-// fetchWindow fetches w with a ranged request and writes it at its offset.
-func fetchWindow(ctx context.Context, dl *vodDownload, f *os.File, upstream string, w byteSpan, total int64) error {
-	reqCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, "GET", upstream, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("User-Agent", utils.GetIPTVUserAgent())
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", w.start, w.end-1))
-	resp, err := vodCacheClient.Do(req)
-	if err != nil {
-		return err
-	}
-	// Deferred after cancel, so it runs first: a body read to its end and
-	// closed hands its connection back for the next request.
-	defer func() { _ = resp.Body.Close() }()
-	switch resp.StatusCode {
-	case http.StatusPartialContent:
-	case http.StatusOK:
-		return errRangeIgnored
-	default:
-		return fmt.Errorf("status %d", resp.StatusCode)
-	}
-	// The answer must start where asked; anything else cannot be placed.
-	if cr := resp.Header.Get("Content-Range"); !strings.HasPrefix(cr, fmt.Sprintf("bytes %d-", w.start)) {
-		return fmt.Errorf("unexpected Content-Range %q", cr)
-	}
-
-	stall := time.AfterFunc(vodCacheStallTimeout, cancel)
-	defer stall.Stop()
-	body := &stallReader{r: resp.Body, timer: stall, idle: vodCacheStallTimeout}
-	buf := make([]byte, 256*1024)
-	off := w.start
-	for off < w.end {
-		n := int64(len(buf))
-		if rest := w.end - off; rest < n {
-			n = rest
-		}
-		nr, er := body.Read(buf[:n])
-		if nr > 0 {
-			if _, ew := f.WriteAt(buf[:nr], off); ew != nil {
-				return ew
-			}
-			dl.addWindow(w.start, off+int64(nr))
-			off += int64(nr)
-		}
-		if er != nil {
-			if er == io.EOF && off >= w.end {
-				break
-			}
-			if er == io.EOF && off >= total {
-				break
-			}
-			return er
-		}
-	}
-	// Reach the end of the body (nothing is left of a conforming answer), so
-	// the connection is reusable.
-	_, _ = io.Copy(io.Discard, io.LimitReader(body, 64<<10))
-	return nil
-}
-
 // vodTouchInterval throttles last_access updates for a cached VOD item.
 //
 // The column is only read by cleanupStaleVODFiles, which compares it against a
@@ -779,6 +504,28 @@ const vodTouchInterval = time.Minute
 const vodProgressInterval = 5 * time.Second
 
 var vodLastTouch sync.Map // streamID -> time.Time
+
+// regularFileExists reports whether path is a regular file (not a directory).
+func regularFileExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && !fi.IsDir()
+}
+
+// cachedVODEntry returns the cache row for a stream when its file is a regular
+// file on disk, else nil. Downloads rename into place on completion, so
+// existence means complete and the status column is not consulted. A row whose
+// file is gone logs a warning on every call while it stays stale.
+func (c *Config) cachedVODEntry(idRaw string) *types.VODCacheEntry {
+	entry, err := c.db.GetVODCache(idRaw)
+	if err != nil || entry == nil {
+		return nil
+	}
+	if !regularFileExists(entry.FilePath) {
+		utils.WarnLog("VOD cache: %s missing on disk at %s; not serving from cache", idRaw, entry.FilePath)
+		return nil
+	}
+	return entry
+}
 
 // touchVODCache marks a cached item as recently used, at most once per
 // vodTouchInterval per stream.

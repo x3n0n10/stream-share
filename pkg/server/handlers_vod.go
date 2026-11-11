@@ -391,13 +391,17 @@ func (c *Config) startCache(ctx *gin.Context) {
 		t = "movie"
 	}
 
+	// Keyed by the bare id players use, so a Discord download ("123.mkv") and
+	// a player request ("123") share one cache row and one download.
+	idOnly := strings.TrimSuffix(req.StreamID, path.Ext(req.StreamID))
+
 	// If already cached and valid, return it
 	if c.db != nil {
-		if entry, err := c.db.GetVODCache(req.StreamID); err == nil && entry != nil && entry.Status == "ready" {
-			c.touchVODCache(req.StreamID)
+		if entry := c.cachedVODEntry(idOnly); entry != nil {
+			c.touchVODCache(idOnly)
 			ctx.JSON(http.StatusOK, types.APIResponse{Success: true, Data: map[string]interface{}{
 				"cached":     true,
-				"stream_id":  entry.StreamID,
+				"stream_id":  req.StreamID,
 				"status":     entry.Status,
 				"expires_at": entry.ExpiresAt,
 			}})
@@ -423,7 +427,6 @@ func (c *Config) startCache(ctx *gin.Context) {
 	if ext == "" {
 		ext = defaultVODExt(basePath)
 	}
-	idOnly := strings.TrimSuffix(req.StreamID, path.Ext(req.StreamID))
 	filename := filepath.Join(baseDir, idOnly+ext)
 
 	// Best-effort title from what the caller already knows; the M3U lookup
@@ -433,7 +436,7 @@ func (c *Config) startCache(ctx *gin.Context) {
 	// Persist a pending entry
 	expires := time.Now().Add(time.Duration(req.Days) * 24 * time.Hour)
 	if c.db != nil {
-		_ = c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: req.StreamID, Type: t, Title: safeTitle, SeriesTitle: req.SeriesTitle, Season: req.Season, Episode: req.Episode, FilePath: filename, RequestedBy: req.Username, Status: "downloading", CreatedAt: time.Now(), ExpiresAt: expires})
+		_ = c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: idOnly, Type: t, Title: safeTitle, SeriesTitle: req.SeriesTitle, Season: req.Season, Episode: req.Episode, FilePath: filename, RequestedBy: req.Username, Status: "downloading", CreatedAt: time.Now(), ExpiresAt: expires})
 	}
 
 	// Spawn background download — explicit request, runs until completion regardless of viewer.
@@ -441,17 +444,17 @@ func (c *Config) startCache(ctx *gin.Context) {
 		// Off the request path, so a cold catalogue is worth waiting for: it
 		// gives the real extension instead of a guessed default.
 		if _, err := c.waitVODM3UCache(); err != nil {
-			utils.DebugLog("Cache: VOD M3U unavailable for %s, using defaults: %v", req.StreamID, err)
+			utils.DebugLog("Cache: VOD M3U unavailable for %s, using defaults: %v", idOnly, err)
 		}
 		upstream, filename, _ := c.resolveVODTarget(basePath, "", req.StreamID, true)
 		if c.db != nil {
-			_ = c.db.SetVODCachePath(req.StreamID, filename)
-			if tt := c.findVODTitleInCache(basePath, req.StreamID); strings.TrimSpace(tt) != "" {
-				_ = c.db.SetVODCacheTitle(req.StreamID, strings.TrimSpace(tt))
+			_ = c.db.SetVODCachePath(idOnly, filename)
+			if tt := c.findVODTitleInCache(basePath, idOnly); strings.TrimSpace(tt) != "" {
+				_ = c.db.SetVODCacheTitle(idOnly, strings.TrimSpace(tt))
 			}
 		}
 		// Shared with any playback of the same item already downloading it.
-		c.startBackgroundDownload(upstream, filename, req.StreamID, basePath, expires, nil)
+		c.startBackgroundDownload(upstream, filename, idOnly, basePath, expires, nil)
 	}()
 
 	ctx.JSON(http.StatusOK, types.APIResponse{Success: true, Data: map[string]interface{}{
@@ -485,7 +488,9 @@ func vodFallbackTitle(t, title, seriesTitle string, season, episode int) string 
 
 // getCacheByStream returns cache info for a stream id
 func (c *Config) getCacheByStream(ctx *gin.Context) {
+	// Callers pass the id they sent to /cache/start, extension included.
 	id := ctx.Param("streamid")
+	id = strings.TrimSuffix(id, path.Ext(id))
 	if id == "" || c.db == nil {
 		ctx.JSON(http.StatusNotFound, types.APIResponse{Success: false, Error: "not found"})
 		return
@@ -513,7 +518,9 @@ func (c *Config) getCacheByStream(ctx *gin.Context) {
 
 // getCacheProgress returns minimal progress info for a given stream id
 func (c *Config) getCacheProgress(ctx *gin.Context) {
+	// Callers pass the id they sent to /cache/start, extension included.
 	id := ctx.Param("streamid")
+	id = strings.TrimSuffix(id, path.Ext(id))
 	if id == "" || c.db == nil {
 		ctx.JSON(http.StatusNotFound, types.APIResponse{Success: false, Error: "not found"})
 		return
@@ -608,14 +615,15 @@ func (c *Config) handleTemporaryLink(ctx *gin.Context) {
 
 	// If cached locally, serve from disk (normalize ID without extension)
 	if c.db != nil && tempLink.StreamID != "" {
-		if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil && entry.Status == "ready" {
-			utils.InfoLog("Download via cache for %s -> %s", c.vodLabel(tempLink.StreamID), entry.FilePath)
-			ext := strings.ToLower(path.Ext(entry.FilePath))
+		if entry := c.cachedVODEntry(idRaw); entry != nil {
+			file := entry.FilePath
+			utils.InfoLog("Download via cache for %s -> %s", c.vodLabel(tempLink.StreamID), file)
+			ext := strings.ToLower(path.Ext(file))
 			if ext == "" {
 				ext = ".mp4"
 			}
 			c.touchVODCache(idRaw)
-			serveLocalFileRange(ctx, entry.FilePath, contentTypeForPath(entry.FilePath), sanitiseFilename(tempLink.Title)+ext, true)
+			serveLocalFileRange(ctx, file, contentTypeForPath(file), sanitiseFilename(tempLink.Title)+ext, true)
 			return
 		}
 

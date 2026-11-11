@@ -137,6 +137,14 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 	start := ctx.Param("start")
 	idRaw := ctx.Param("id")
 
+	// These become provider URL path segments; "/" or ".." would let a viewer
+	// steer the request to another provider endpoint.
+	if !isValidStreamID(duration) || !isValidStreamID(start) || !isValidStreamID(idRaw) {
+		utils.WarnLog("Timeshift: rejected request with invalid path segment")
+		ctx.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+
 	// Proxy upstream if catchup is disabled or the channel has native upstream support.
 	if c.catchupManager == nil || !c.catchupManager.IsEnabled() || c.catchupManager.HasUpstreamCatchup(idRaw) {
 		rpURL, err := url.Parse(c.providerStreamURL("timeshift", duration, start, idRaw))
@@ -360,19 +368,18 @@ func (c *Config) streamVODWithCache(ctx *gin.Context, basePath, defaultExt strin
 	defer c.registerVODView(c.resolveRequestUsername(ctx), idRaw, basePath, idRaw)()
 
 	if c.VODCacheEnabled && c.db != nil {
-		if entry, err := c.db.GetVODCache(idRaw); err == nil && entry != nil {
-			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
-				ct := contentTypeForPath(entry.FilePath)
-				c.touchVODCache(idRaw)
-				// Only the opening read gets an INFO line; seeks are DEBUG.
-				logServe := utils.DebugLog
-				if rng := ctx.GetHeader("Range"); rng == "" || strings.HasPrefix(rng, "bytes=0-") {
-					logServe = utils.InfoLog
-				}
-				logServe("Serving cached %s for %s from %s", basePath, c.vodLabel(idRaw), entry.FilePath)
-				serveLocalFileRange(ctx, entry.FilePath, ct, "", false)
-				return
+		if entry := c.cachedVODEntry(idRaw); entry != nil {
+			file := entry.FilePath
+			ct := contentTypeForPath(file)
+			c.touchVODCache(idRaw)
+			// Only the opening read gets an INFO line; seeks are DEBUG.
+			logServe := utils.DebugLog
+			if rng := ctx.GetHeader("Range"); rng == "" || strings.HasPrefix(rng, "bytes=0-") {
+				logServe = utils.InfoLog
 			}
+			logServe("Serving cached %s for %s from %s", basePath, c.vodLabel(idRaw), file)
+			serveLocalFileRange(ctx, file, ct, "", false)
+			return
 		}
 
 		// Not cached yet: auto-start 7-day caching in the background (or join
@@ -465,12 +472,6 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 		return
 	}
 
-	if c.sessionManager == nil {
-		utils.ErrorLog("Multiplex: sessionManager is NIL, falling back to direct streaming")
-		c.stream(ctx, targetURL)
-		return
-	}
-
 	label := c.streamLabel(streamID)
 	dataChan, doneChan, clientKey, ok := c.joinStreamSession(ctx, username, streamID, streamType, streamTitle, targetURL, label)
 	if !ok {
@@ -496,15 +497,13 @@ func (c *Config) multiplexedStream(ctx *gin.Context, targetURL *url.URL) {
 // /:user/:pass/:id route) would be invisible.
 func (c *Config) serveCachedVOD(ctx *gin.Context, username, streamIDRaw, streamType, streamTitle string) bool {
 	if c.db != nil && (streamType == "movie" || streamType == "series") {
-		if entry, err := c.db.GetVODCache(streamIDRaw); err == nil && entry != nil && entry.Status == "ready" {
-			if fi, statErr := os.Stat(entry.FilePath); statErr == nil && !fi.IsDir() {
-				utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, c.streamLabel(streamIDRaw), entry.FilePath)
-				defer c.registerVODView(username, streamIDRaw, streamType, streamTitle)()
-				c.touchVODCache(streamIDRaw)
-				serveLocalFileRange(ctx, entry.FilePath, contentTypeForPath(entry.FilePath), "", false)
-				return true
-			}
-			utils.WarnLog("Multiplex: cached %s missing on disk for %s at %s; falling back to upstream", streamType, c.streamLabel(streamIDRaw), entry.FilePath)
+		if entry := c.cachedVODEntry(streamIDRaw); entry != nil {
+			file := entry.FilePath
+			utils.InfoLog("Multiplex: serving cached %s for %s from %s", streamType, c.streamLabel(streamIDRaw), file)
+			defer c.registerVODView(username, streamIDRaw, streamType, streamTitle)()
+			c.touchVODCache(streamIDRaw)
+			serveLocalFileRange(ctx, file, contentTypeForPath(file), "", false)
+			return true
 		}
 	}
 	return false
@@ -532,6 +531,7 @@ func (c *Config) joinStreamSession(ctx *gin.Context, username, streamID, streamT
 	dataChan, exists := c.sessionManager.GetClientChannel(streamID, clientKey)
 	if !exists {
 		utils.ErrorLog("Failed to get client channel for user=%s, %s", username, label)
+		c.sessionManager.RemoveClient(streamID, username, clientKey)
 		ctx.AbortWithStatus(http.StatusInternalServerError)
 		return nil, nil, "", false
 	}

@@ -471,13 +471,13 @@ func (c *Config) Serve() error {
 	// always served from cache instead of waiting on the provider.
 	providerInfoStop := make(chan struct{})
 	c.startProviderInfoRefresher(providerInfoStop)
+	defer close(providerInfoStop)
 
 	// Share links: load them, and cut viewers of links that end or are revoked.
 	c.loadLiveShares()
 	shareSweepStop := make(chan struct{})
 	c.startLiveShareSweeper(shareSweepStop)
 	defer close(shareSweepStop)
-	defer close(providerInfoStop)
 
 	if c.LDAPEnabled && c.ldapCacheTTL() > 0 {
 		ldapSweepStop := make(chan struct{})
@@ -558,6 +558,9 @@ func (c *Config) newRouter() (*gin.Engine, error) {
 
 	// Add direct streaming routes with proxy credentials
 	c.addProxyCredentialRoutes(router)
+	if c.CustomEndpoint != "" { // links the server hands out carry the prefix
+		c.addProxyCredentialRoutes(router.Group(c.CustomEndpoint))
+	}
 
 	// Add temporary link download route
 	router.GET("/download/:token", c.handleTemporaryLink)

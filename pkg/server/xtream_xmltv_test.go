@@ -31,6 +31,7 @@ import (
 // them forwarded to the provider: xmltv.php has to swap in the Xtream ones.
 func TestXMLTVUsesProviderCredentialsUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	t.Setenv("CACHE_FOLDER", t.TempDir()) // a guide cached by an earlier run would skip the upstream
 
 	var gotUser, gotPass string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

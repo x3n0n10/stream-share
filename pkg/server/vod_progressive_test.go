@@ -222,6 +222,7 @@ func progressiveTestServer(t *testing.T, provider http.Handler, cacheEnabled boo
 		ProxyConfig: &config.ProxyConfig{XtreamBaseURL: up.URL, XtreamUser: "user", XtreamPassword: "pass", VODCacheEnabled: cacheEnabled},
 		db:          &database.DBManager{},
 	}
+	t.Cleanup(func() { waitDownloadsIdle(c) })
 	r := gin.New()
 	h := func(ctx *gin.Context) { c.streamVODWithCache(ctx, "series", ".mkv") }
 	r.GET("/series/:id", h)
@@ -244,6 +245,21 @@ func getRange(t *testing.T, url, rng string) (*http.Response, []byte, error) {
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	return resp, body, err
+}
+
+// waitDownloadsIdle gives running downloads (up to 10 s) time to finish. Run
+// before the provider closes, it stops a leaked download from retrying into
+// the next test's globals (vodCacheRetryBackoff).
+func waitDownloadsIdle(c *Config) {
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		busy := false
+		c.inProgressDownloads.Range(func(_, _ interface{}) bool { busy = true; return false })
+		if !busy {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // waitDownloadDone waits for the item's download to leave the registry.
@@ -575,5 +591,37 @@ func TestVODResponsesAreNotStoredByIntermediaries(t *testing.T) {
 	}
 	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
 		t.Fatalf("direct-proxy response Cache-Control = %q, want no-store", got)
+	}
+}
+
+// A provider answering 503 twice before serving: the download makes exactly
+// three requests and caches the complete file.
+func TestFetchToFileRetryCount(t *testing.T) {
+	prevBackoff := vodCacheRetryBackoff
+	vodCacheRetryBackoff = 5 * time.Millisecond
+	defer func() { vodCacheRetryBackoff = prevBackoff }()
+
+	p := &fakeVODProvider{data: randomBytes(t, 1<<20), chunk: 64 << 10}
+	var fileRequests int32
+	flaky := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/series/") && atomic.AddInt32(&fileRequests, 1) <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		p.ServeHTTP(w, r)
+	})
+	c, _, front := progressiveTestServer(t, flaky, true)
+
+	_, body, err := getRange(t, front.URL+"/series/108.mkv", "")
+	if err != nil || !bytes.Equal(body, p.data) {
+		t.Fatalf("body after retries: err=%v len=%d", err, len(body))
+	}
+	waitDownloadDone(t, c, "108")
+	if n := atomic.LoadInt32(&fileRequests); n != 3 {
+		t.Fatalf("provider requests = %d, want 3 (two 503s, then served)", n)
+	}
+	got, err := os.ReadFile(filepath.Join(os.Getenv("CACHE_FOLDER"), "vod", "108.mkv"))
+	if err != nil || !bytes.Equal(got, p.data) {
+		t.Fatalf("cached file wrong: %v", err)
 	}
 }

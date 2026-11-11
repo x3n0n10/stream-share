@@ -114,6 +114,12 @@ func (closeNotifyRecorder) CloseNotify() <-chan bool { return nil }
 // viewerRouteFixture serves newRouter over a fake provider and returns the
 // front URL plus a func reporting the provider paths seen so far.
 func viewerRouteFixture(t *testing.T, endpoint string) (string, func() []string) {
+	return viewerRouteFixtureWith(t, endpoint, nil)
+}
+
+// viewerRouteFixtureWith is viewerRouteFixture with a hook to adjust the Config
+// before the router is built.
+func viewerRouteFixtureWith(t *testing.T, endpoint string, tweak func(*Config)) (string, func() []string) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	var mu sync.Mutex
@@ -135,6 +141,9 @@ func viewerRouteFixture(t *testing.T, endpoint string) (string, func() []string)
 		sessionManager: sm,
 		imageKey:       testImageKey,
 		playlist:       &m3u.Playlist{},
+	}
+	if tweak != nil {
+		tweak(c)
 	}
 	r, err := c.newRouter()
 	if err != nil {

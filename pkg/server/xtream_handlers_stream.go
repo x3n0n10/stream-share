@@ -147,7 +147,7 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 
 	// Proxy upstream if catchup is disabled or the channel has native upstream support.
 	if c.catchupManager == nil || !c.catchupManager.IsEnabled() || c.catchupManager.HasUpstreamCatchup(idRaw) {
-		rpURL, err := url.Parse(c.providerStreamURL("timeshift", duration, start, idRaw))
+		rpURL, err := url.Parse(c.providerStreamURL("timeshift", duration, providerTimeshiftStart(start, c.providerLocation()), idRaw))
 		if err != nil {
 			_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
 			return
@@ -215,7 +215,7 @@ func parseTimeshiftStart(start string) (time.Time, error) {
 	if n, err := strconv.ParseInt(start, 10, 64); err == nil {
 		return time.Unix(n, 0), nil
 	}
-	return time.ParseInLocation("2006-01-02:15-04", start, time.UTC)
+	return time.ParseInLocation(timeshiftLayout, start, time.UTC)
 }
 
 // alignToTSPacket seeks f to startOffset then scans forward (up to 3 packet-widths) for

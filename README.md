@@ -574,6 +574,8 @@ At 10 Mbps a 4-hour buffer is approximately **18 GB per active channel**. Only c
 
 Timeshift start times are read as UTC, matching the time zone the login reports, so `TZ` is not needed for catchup. Leave your player's time adjustment at +0.
 
+When catchup is proxied to the provider, the start time is converted to the zone the provider expects: `CATCHUP_PROVIDER_TIMEZONE` (an IANA name such as `Europe/Amsterdam`) if set, else the zone the provider reports at login, else the offset of the provider's clock, else UTC. The chosen zone and its source are logged. Set it when your provider reports a wrong zone and catchup lands at the wrong hour.
+
 ---
 
 ## On-Screen Error Slates

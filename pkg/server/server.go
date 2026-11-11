@@ -93,6 +93,9 @@ type Config struct {
 	// apply to this deployment (plain M3U) and the endpoint reports so.
 	providerInfo *providerInfoState
 
+	// tz memoises provider time-zone lookups for catchup (see timeshift_tz.go).
+	tz tzState
+
 	// inProgressDownloads holds the running VOD cache downloads (stream ID ->
 	// *vodDownload): one per item, shared by every request served from it.
 	inProgressDownloads sync.Map
@@ -159,6 +162,11 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 		return nil, err
 	}
 	serverConfig.setupCatchup()
+	if v := strings.TrimSpace(config.CatchupProviderTimezone); v != "" {
+		if loc, _ := serverConfig.tz.zone(v); loc == nil {
+			utils.WarnLog("Catchup: CATCHUP_PROVIDER_TIMEZONE %q is not a known time zone; ignoring it", v)
+		}
+	}
 	serverConfig.setupErrorSlate()
 	serverConfig.logLDAPAuthCache()
 	serverConfig.applySessionTimeouts()

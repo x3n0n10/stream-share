@@ -87,7 +87,7 @@ func (c *Config) resolveProviderLocation() (*time.Location, string) {
 			return loc, "provider timezone"
 		}
 		if first {
-			utils.WarnLog("Catchup: provider reports unknown time zone %q; falling back to its clock", name)
+			utils.WarnLog("Catchup: provider reports unknown time zone %q; falling back to its clock or UTC", name)
 		}
 	}
 	if info.ServerTime != "" && info.ServerTimestamp != 0 {

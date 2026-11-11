@@ -572,9 +572,11 @@ At 10 Mbps a 4-hour buffer is approximately **18 GB per active channel**. Only c
 | `CATCHUP_DURATION_HOURS` | `4` | Hours of catchup to buffer and advertise to clients |
 | `CATCHUP_PAUSE_GRACE_MINUTES` | `5` | Minutes to keep recording after the last viewer leaves (for pause/resume); channel switches bypass this |
 
-Timeshift start times are read as UTC, matching the time zone the login reports, so `TZ` is not needed for catchup. Leave your player's time adjustment at +0.
+**Upgrading:** if you set a time adjustment in your player (e.g. +1 or +2 in TiviMate) to make catchup line up, reset it to +0. StreamShare now handles the time zone for both the local buffer and provider catchup.
 
-When catchup is proxied to the provider, the start time is converted to the zone the provider expects: `CATCHUP_PROVIDER_TIMEZONE` (an IANA name such as `Europe/Amsterdam`) if set, else the zone the provider reports at login, else the offset of the provider's clock, else UTC. The chosen zone and its source are logged. Set it when your provider reports a wrong zone and catchup lands at the wrong hour.
+Timeshift start times are read as UTC, matching the time zone the login reports, so `TZ` is not needed for catchup.
+
+Even with the buffer disabled, when catchup is proxied to the provider, the start time is converted to the zone the provider expects: `CATCHUP_PROVIDER_TIMEZONE` (an IANA name such as `Europe/Amsterdam`) if set, else the zone the provider reports at login, else the offset of the provider's clock, else UTC. The chosen zone and its source are logged. Set it when your provider reports a wrong zone and catchup lands at the wrong hour. The conversion assumes players fill in timeshift/catchup start times in UTC, which is what StreamShare's login reports; if a provider's catchup lands off by its UTC offset for M3U users, please report it.
 
 ---
 

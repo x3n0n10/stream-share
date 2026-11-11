@@ -165,6 +165,10 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	if v := strings.TrimSpace(config.CatchupProviderTimezone); v != "" {
 		if loc, _ := serverConfig.tz.zone(v); loc == nil {
 			utils.WarnLog("Catchup: CATCHUP_PROVIDER_TIMEZONE %q is not a known time zone; ignoring it", v)
+		} else {
+			utils.InfoLog("Catchup: provider catchup times in %s (from setting)", v)
+			// Seed so the first request does not log the same line again.
+			serverConfig.tz.lastZone, serverConfig.tz.lastSource = loc.String(), "setting"
 		}
 	}
 	serverConfig.setupErrorSlate()

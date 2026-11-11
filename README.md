@@ -571,7 +571,8 @@ At 10 Mbps a 4-hour buffer is approximately **18 GB per active channel**. Only c
 | `CATCHUP_ENABLED` | `false` | Set to `true` to enable |
 | `CATCHUP_DURATION_HOURS` | `4` | Hours of catchup to buffer and advertise to clients |
 | `CATCHUP_PAUSE_GRACE_MINUTES` | `5` | Minutes to keep recording after the last viewer leaves (for pause/resume); channel switches bypass this |
-| `TZ` | — | **Required.** Must match the timezone of your IPTV clients — TiviMate sends local time in timeshift URLs (e.g. `TZ=Europe/Amsterdam`) |
+
+Timeshift start times are read as UTC, matching the time zone the login reports, so `TZ` is not needed for catchup. Leave your player's time adjustment at +0.
 
 ---
 

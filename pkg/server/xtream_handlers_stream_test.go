@@ -257,3 +257,25 @@ func TestViewerCredentialRoutesUseStreamHandlers(t *testing.T) {
 		t.Fatalf("provider saw %q (status %d), want %q", seen, resp.StatusCode, want)
 	}
 }
+
+func TestParseTimeshiftStartIsUTC(t *testing.T) {
+	ams, err := time.LoadLocation("Europe/Amsterdam")
+	if err != nil {
+		t.Skip("Europe/Amsterdam zone data unavailable")
+	}
+	orig := time.Local
+	time.Local = ams
+	t.Cleanup(func() { time.Local = orig })
+
+	got, err := parseTimeshiftStart("2026-11-10:19-00")
+	if err != nil || !got.Equal(time.Date(2026, 11, 10, 19, 0, 0, 0, time.UTC)) {
+		t.Fatalf("got %v, %v; want 2026-11-10T19:00:00Z", got, err)
+	}
+	got, err = parseTimeshiftStart("1762801200")
+	if err != nil || !got.Equal(time.Unix(1762801200, 0)) {
+		t.Fatalf("unix: got %v, %v", got, err)
+	}
+	if _, err := parseTimeshiftStart("bad"); err == nil {
+		t.Fatal("expected error for bad input")
+	}
+}

@@ -208,15 +208,14 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 }
 
 // parseTimeshiftStart parses a timeshift start parameter.
-// TiviMate sends "YYYY-MM-DD:HH-MM" in local time; time.Local is used, which Go
-// initialises from the TZ environment variable at startup. Set TZ in the container
-// (e.g. TZ=Europe/Amsterdam) so that local timestamps are interpreted correctly.
-// Unix timestamp integers are also accepted and are always timezone-independent.
+// The Xtream login reports the server time zone as UTC, so players send
+// "YYYY-MM-DD:HH-MM" in UTC; it is read as UTC regardless of TZ.
+// Unix timestamp integers are also accepted.
 func parseTimeshiftStart(start string) (time.Time, error) {
 	if n, err := strconv.ParseInt(start, 10, 64); err == nil {
 		return time.Unix(n, 0), nil
 	}
-	return time.ParseInLocation("2006-01-02:15-04", start, time.Local)
+	return time.ParseInLocation("2006-01-02:15-04", start, time.UTC)
 }
 
 // alignToTSPacket seeks f to startOffset then scans forward (up to 3 packet-widths) for

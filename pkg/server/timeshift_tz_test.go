@@ -203,6 +203,7 @@ func TestTimeshiftBeforeBuffer(t *testing.T) {
 		{"connection freed on the second try", []int{456, 200}, true, 200, "x", 2},
 		// Some providers (behind a CDN) say "no recording" with an empty page.
 		{"provider answers an empty page", []int{statusEmptyPage}, true, 200, "SLATE", 1},
+		{"provider answers an empty page of unknown length", []int{statusEmptyPageNoLength}, true, 200, "SLATE", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
@@ -214,6 +215,12 @@ func TestTimeshiftBeforeBuffer(t *testing.T) {
 				mu.Unlock()
 				if status == statusEmptyPage {
 					emptyPage(w)
+					return
+				}
+				if status == statusEmptyPageNoLength {
+					w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+					w.WriteHeader(http.StatusOK)
+					w.(http.Flusher).Flush() // headers out without a length: chunked
 					return
 				}
 				w.Header().Set("Content-Type", "video/mp2t")
@@ -251,8 +258,12 @@ func TestTimeshiftBeforeBuffer(t *testing.T) {
 }
 
 // statusEmptyPage marks a fake provider answer of 200 with an empty HTML page,
-// how some providers say they have no recording.
-const statusEmptyPage = -1
+// how some providers say they have no recording; statusEmptyPageNoLength is the
+// same page sent without a Content-Length, as they do in practice.
+const (
+	statusEmptyPage         = -1
+	statusEmptyPageNoLength = -2
+)
 
 func emptyPage(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=UTF-8")
@@ -288,6 +299,32 @@ func TestEmptyCatchupAnswer(t *testing.T) {
 		resp.Header.Set("Content-Type", tc.ctype)
 		if got := emptyCatchupAnswer(resp); got != tc.empty {
 			t.Errorf("%s: empty = %v, want %v", tc.name, got, tc.empty)
+		}
+	}
+}
+
+// Reading ahead in an answer of unknown length tells a short page from a
+// recording without losing or changing a byte of either.
+func TestMeasureUnknownLength(t *testing.T) {
+	big := strings.Repeat("v", 1<<20+100)
+	for _, tc := range []struct {
+		name, ctype, body string
+		wantLength        int64
+	}{
+		{"empty page", "text/html", "", 0},
+		{"short page", "text/html", "<html>no</html>", 15},
+		{"long text stays unknown", "text/html", big, -1},
+		{"empty video", "video/mp2t", "", 0},
+		{"video stays unknown", "video/mp2t", "GGGG", -1},
+	} {
+		resp := &http.Response{StatusCode: 200, ContentLength: -1, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(tc.body))}
+		resp.Header.Set("Content-Type", tc.ctype)
+		measureUnknownLength(resp)
+		if resp.ContentLength != tc.wantLength {
+			t.Errorf("%s: length %d, want %d", tc.name, resp.ContentLength, tc.wantLength)
+		}
+		if got, _ := io.ReadAll(resp.Body); string(got) != tc.body {
+			t.Errorf("%s: body changed (%d bytes, want %d)", tc.name, len(got), len(tc.body))
 		}
 	}
 }

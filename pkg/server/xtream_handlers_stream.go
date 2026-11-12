@@ -20,6 +20,7 @@
 package server
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"log"
@@ -239,6 +240,7 @@ func (c *Config) proxyTimeshift(ctx *gin.Context, duration, start, idRaw string)
 	if err == nil {
 		defer func() { _ = resp.Body.Close() }()
 		status = resp.StatusCode
+		measureUnknownLength(resp)
 		if emptyCatchupAnswer(resp) {
 			status = http.StatusNotFound // a "success" without a recording
 		} else if status == http.StatusOK || status == http.StatusPartialContent {
@@ -286,6 +288,29 @@ func emptyCatchupAnswer(resp *http.Response) bool {
 		return resp.ContentLength == 0 || (isText && resp.ContentLength >= 0 && resp.ContentLength < 1<<20)
 	}
 	return false
+}
+
+// measureUnknownLength learns the length of a provider answer sent without one
+// (Go reports -1) when that answer is short: up to 1 MiB of a text page, or a
+// single byte of anything else, to catch an empty answer. Providers that say
+// "no recording" with an empty page often send no length at all. Whatever is
+// read ahead stays in resp.Body, so a recording reaches the player intact.
+func measureUnknownLength(resp *http.Response) {
+	if resp.ContentLength >= 0 || (resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent) {
+		return
+	}
+	limit := 1
+	if strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/") {
+		limit = 1 << 20
+	}
+	br := bufio.NewReaderSize(resp.Body, limit)
+	if peeked, err := br.Peek(limit); err != nil {
+		resp.ContentLength = int64(len(peeked)) // it ended within the limit
+	}
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{br, resp.Body}
 }
 
 // serveCatchupSlate shows the viewer a slate for a catchup request the provider

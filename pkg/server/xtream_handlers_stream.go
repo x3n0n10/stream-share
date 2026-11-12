@@ -233,6 +233,25 @@ func insideProviderArchive(start string) bool {
 	return err == nil && age >= 10*time.Minute && age <= 24*time.Hour
 }
 
+// flushRest sends f from its position to EOF. It reports whether the client
+// took all of it.
+func flushRest(ctx *gin.Context, f *os.File, readBuf []byte) bool {
+	for {
+		n, err := f.Read(readBuf)
+		if n > 0 {
+			if _, werr := ctx.Writer.Write(readBuf[:n]); werr != nil {
+				return false
+			}
+			if flusher, ok := ctx.Writer.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			return err == io.EOF
+		}
+	}
+}
+
 // parseTimeshiftStart parses a timeshift start parameter.
 // The Xtream login reports the server time zone as UTC, so players send
 // "YYYY-MM-DD:HH-MM" in UTC; it is read as UTC regardless of TZ.
@@ -282,7 +301,7 @@ func (c *Config) serveFromCatchupBuffer(ctx *gin.Context, buf *catchup.DiskBuffe
 		// "no more data to wait for" — the prev file is complete.
 		closedCh := make(chan struct{})
 		close(closedCh)
-		c.streamFileSegment(ctx, filePath, startOffset, closedCh)
+		c.streamFileSegment(ctx, filePath, startOffset, closedCh, nil)
 		if ctx.Request.Context().Err() != nil || ctx.IsAborted() {
 			return
 		}
@@ -291,13 +310,18 @@ func (c *Config) serveFromCatchupBuffer(ctx *gin.Context, buf *catchup.DiskBuffe
 		startOffset = 0
 	}
 
-	c.streamFileSegment(ctx, filePath, startOffset, buf.DrainDone())
+	// Tail the current file; when the buffer rotates, carry on in the new one.
+	for c.streamFileSegment(ctx, filePath, startOffset, buf.DrainDone(), buf.FilePath) {
+		filePath, startOffset = buf.FilePath(), 0
+	}
 }
 
 // streamFileSegment serves bytes from filePath starting at startOffset, flushing to the
 // client as they arrive. It blocks until drainDone closes (all data written), polling
-// every 200 ms when EOF is hit before that point.
-func (c *Config) streamFileSegment(ctx *gin.Context, filePath string, startOffset int64, drainDone <-chan struct{}) {
+// every 200 ms when EOF is hit before that point. With current set, it also stops at
+// EOF once the buffer has rotated away from filePath, and reports true: the caller
+// continues in the new file.
+func (c *Config) streamFileSegment(ctx *gin.Context, filePath string, startOffset int64, drainDone <-chan struct{}, current func() string) (rotated bool) {
 	f, err := os.Open(filePath)
 	if err != nil {
 		utils.ErrorLog("Catchup: failed to open buffer file %s: %v", filePath, err)
@@ -328,6 +352,11 @@ func (c *Config) streamFileSegment(ctx *gin.Context, filePath string, startOffse
 			}
 		}
 		if rerr == io.EOF {
+			if current != nil && current() != filePath {
+				// The buffer moved on to a new file, so this one is complete:
+				// send what was written since the last read, then switch.
+				return flushRest(ctx, f, readBuf)
+			}
 			if !pollTimer.Stop() {
 				select {
 				case <-pollTimer.C:
@@ -339,21 +368,8 @@ func (c *Config) streamFileSegment(ctx *gin.Context, filePath string, startOffse
 			case <-drainDone:
 				// All writes are on disk. Flush any bytes written between our last
 				// read and drain completion, then exit.
-				drainDone = nil // nil channel blocks forever — prevent re-entry
-				for {
-					n2, err2 := f.Read(readBuf)
-					if n2 > 0 {
-						if _, werr := ctx.Writer.Write(readBuf[:n2]); werr != nil {
-							return
-						}
-						if flusher, ok := ctx.Writer.(http.Flusher); ok {
-							flusher.Flush()
-						}
-					}
-					if err2 != nil {
-						return
-					}
-				}
+				flushRest(ctx, f, readBuf)
+				return
 			case <-clientGone:
 				return
 			case <-pollTimer.C:

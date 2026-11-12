@@ -19,6 +19,7 @@
 package server
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -30,6 +31,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lucasduport/stream-share/pkg/catchup"
 	"github.com/lucasduport/stream-share/pkg/config"
 	"github.com/lucasduport/stream-share/pkg/session"
 )
@@ -277,5 +279,49 @@ func TestParseTimeshiftStartIsUTC(t *testing.T) {
 	}
 	if _, err := parseTimeshiftStart("bad"); err == nil {
 		t.Fatal("expected error for bad input")
+	}
+}
+
+// A catchup viewer tailing the buffer's current file follows it when the
+// buffer rotates to a new file, instead of waiting on the old one.
+func TestCatchupReaderFollowsRotation(t *testing.T) {
+	const limit = 1 << 20 // rotation happens once a file holds this much
+	start := time.Now()
+	buf, err := catchup.NewDiskBuffer(t.TempDir(), "5", start, limit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitBuffered := func(n int64) {
+		t.Helper()
+		for deadline := time.Now().Add(3 * time.Second); buf.BytesBuffered() < n; time.Sleep(5 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("buffer stuck at %d bytes, want %d", buf.BytesBuffered(), n)
+			}
+		}
+	}
+	buf.Write(bytes.Repeat([]byte{'a'}, limit/2))
+	waitBuffered(limit / 2)
+
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		(&Config{}).serveFromCatchupBuffer(ctx, buf, start)
+	}()
+	time.Sleep(500 * time.Millisecond) // the reader is now tailing the first file
+
+	buf.Write(bytes.Repeat([]byte{'b'}, limit/2)) // fills the first file: rotation
+	buf.Write(bytes.Repeat([]byte{'c'}, limit/4)) // lands in the new file
+	time.Sleep(300 * time.Millisecond)
+	buf.Stop()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reader did not finish after the buffer stopped")
+	}
+	if got, want := w.Body.Len(), limit+limit/4; got != want {
+		t.Fatalf("reader got %d bytes, want %d (data after the rotation lost)", got, want)
 	}
 }

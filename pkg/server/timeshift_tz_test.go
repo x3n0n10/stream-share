@@ -20,6 +20,7 @@
 package server
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -203,6 +204,7 @@ func TestTimeshiftBeforeBuffer(t *testing.T) {
 		{"connection freed on the second try", []int{456, 200}, true, 200, "x", 2},
 		// Some providers (behind a CDN) say "no recording" with an empty page.
 		{"provider answers an empty page", []int{statusEmptyPage}, true, 200, "SLATE", 1},
+		{"provider answers an empty page of unknown length", []int{statusEmptyPageNoLength}, true, 200, "SLATE", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
@@ -214,6 +216,12 @@ func TestTimeshiftBeforeBuffer(t *testing.T) {
 				mu.Unlock()
 				if status == statusEmptyPage {
 					emptyPage(w)
+					return
+				}
+				if status == statusEmptyPageNoLength {
+					w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+					w.WriteHeader(http.StatusOK)
+					w.(http.Flusher).Flush() // headers out without a length: chunked
 					return
 				}
 				w.Header().Set("Content-Type", "video/mp2t")
@@ -251,8 +259,12 @@ func TestTimeshiftBeforeBuffer(t *testing.T) {
 }
 
 // statusEmptyPage marks a fake provider answer of 200 with an empty HTML page,
-// how some providers say they have no recording.
-const statusEmptyPage = -1
+// how some providers say they have no recording; statusEmptyPageNoLength is the
+// same page sent without a Content-Length, as they do in practice.
+const (
+	statusEmptyPage         = -1
+	statusEmptyPageNoLength = -2
+)
 
 func emptyPage(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=UTF-8")
@@ -291,6 +303,69 @@ func TestEmptyCatchupAnswer(t *testing.T) {
 		}
 	}
 }
+
+// Reading ahead in an answer of unknown length tells a short page from a
+// recording without losing or changing a byte of either, and never mistakes a
+// broken connection for an empty page.
+func TestMeasureUnknownLength(t *testing.T) {
+	big := strings.Repeat("v", 1<<20+100)
+	broken := errors.New("connection reset")
+	for _, tc := range []struct {
+		name, ctype, body string
+		status            int
+		length            int64 // the provider's Content-Length
+		failAfter         bool  // the connection breaks after body
+		wantLength        int64
+	}{
+		{"empty page", "text/html", "", 200, -1, false, 0},
+		{"short page", "text/html", "<html>no</html>", 200, -1, false, 15},
+		{"text of exactly 1 MiB stays unknown", "text/html", big[:1<<20], 200, -1, false, -1},
+		{"long text stays unknown", "text/html", big, 200, -1, false, -1},
+		{"empty video", "video/mp2t", "", 200, -1, false, 0},
+		{"video stays unknown", "video/mp2t", "GGGG", 200, -1, false, -1},
+		{"empty range answer", "text/html", "", 206, -1, false, 0},
+		{"small text range stays unknown", "text/html", "<html>", 206, -1, false, -1},
+		{"broken before any byte", "text/html", "", 200, -1, true, -1},
+		{"broken mid page", "text/html", "<html>", 200, -1, true, -1},
+		{"known length untouched", "text/html", "", 200, 0, false, 0},
+		{"not a success untouched", "text/html", "", 404, -1, false, -1},
+	} {
+		var r io.Reader = strings.NewReader(tc.body)
+		if tc.failAfter {
+			r = io.MultiReader(r, errReader{broken})
+		}
+		closed := false
+		resp := &http.Response{StatusCode: tc.status, ContentLength: tc.length, Header: http.Header{},
+			Body: readCloser{r, func() { closed = true }}}
+		resp.Header.Set("Content-Type", tc.ctype)
+		measureUnknownLength(resp)
+		if resp.ContentLength != tc.wantLength {
+			t.Errorf("%s: length %d, want %d", tc.name, resp.ContentLength, tc.wantLength)
+		}
+		got, err := io.ReadAll(resp.Body)
+		if string(got) != tc.body {
+			t.Errorf("%s: body changed (%d bytes, want %d)", tc.name, len(got), len(tc.body))
+		}
+		if tc.failAfter && !errors.Is(err, broken) {
+			t.Errorf("%s: read error %v, want the connection error", tc.name, err)
+		}
+		_ = resp.Body.Close()
+		if !closed {
+			t.Errorf("%s: Close did not reach the provider's body", tc.name)
+		}
+	}
+}
+
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
+
+type readCloser struct {
+	io.Reader
+	close func()
+}
+
+func (r readCloser) Close() error { r.close(); return nil }
 
 // A start counts as covered when any of its minute is buffered, also for
 // second-precision (unix) starts.

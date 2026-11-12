@@ -305,8 +305,8 @@ func measureUnknownLength(resp *http.Response) {
 	}
 	br := bufio.NewReaderSize(resp.Body, limit)
 	// Only a clean end counts: a broken connection must not pass for an
-	// empty page (and mark the channel as unarchived). Its error resurfaces
-	// when the body is read.
+	// empty page (and mark the channel as unarchived). The HTTP body repeats
+	// its error, so it resurfaces when the body is read.
 	if peeked, err := br.Peek(limit); err == io.EOF {
 		resp.ContentLength = int64(len(peeked)) // it ended within the limit
 	}

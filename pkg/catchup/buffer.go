@@ -90,6 +90,9 @@ func NewDiskBuffer(dir, streamID string, start time.Time, maxBytes int64) (*Disk
 
 // drainLoop runs in its own goroutine and is the ONLY writer to the file.
 func (b *DiskBuffer) drainLoop() {
+	// Every exit, failed open and rotation included, tells readers waiting on
+	// DrainDone that no more data is coming.
+	defer close(b.drainDone)
 	b.indexMu.RLock()
 	path := b.current.filePath
 	b.indexMu.RUnlock()
@@ -142,7 +145,6 @@ func (b *DiskBuffer) drainLoop() {
 	b.indexMu.Lock()
 	b.current.total = written
 	b.indexMu.Unlock()
-	close(b.drainDone)
 }
 
 // rotate closes oldFile, promotes current → prev, opens a new current file, and

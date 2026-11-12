@@ -17,6 +17,7 @@
 package catchup
 
 import (
+	"os"
 	"testing"
 	"time"
 )
@@ -66,4 +67,24 @@ func TestWriteRacingStop(t *testing.T) {
 	<-started
 	b.Stop()
 	<-done
+}
+
+// A buffer whose file cannot be opened still signals DrainDone once stopped,
+// so a catchup viewer reading it does not wait forever.
+func TestDrainDoneAfterFailedOpen(t *testing.T) {
+	dir, start := t.TempDir(), time.Now()
+	// A directory where the buffer file should go makes opening it fail.
+	if err := os.Mkdir(newFilePath(dir, "9", start), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewDiskBuffer(dir, "9", start, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Stop()
+	select {
+	case <-b.DrainDone():
+	case <-time.After(2 * time.Second):
+		t.Fatal("DrainDone never closed after a failed open")
+	}
 }

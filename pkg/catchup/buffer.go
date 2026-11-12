@@ -63,6 +63,7 @@ type DiskBuffer struct {
 	writeCh   chan []byte   // pump goroutine sends slices here
 	drainDone chan struct{} // closed by drainLoop when all writes are flushed to disk
 	stopped   int32         // accessed via atomic
+	sendMu    sync.Mutex    // orders Write's send before Stop's close
 
 	indexMu sync.RWMutex // guards current and prev
 	current segment      // actively-written file
@@ -180,6 +181,8 @@ func (b *DiskBuffer) rotate(oldFile *os.File) *os.File {
 // (the drain goroutine reads it asynchronously). The pump already allocates a
 // fresh chunk per read, so no copy is needed here.
 func (b *DiskBuffer) Write(p []byte) {
+	b.sendMu.Lock()
+	defer b.sendMu.Unlock()
 	if atomic.LoadInt32(&b.stopped) != 0 {
 		return
 	}
@@ -192,6 +195,8 @@ func (b *DiskBuffer) Write(p []byte) {
 
 // Stop signals the drain goroutine to finish. Safe to call multiple times.
 func (b *DiskBuffer) Stop() {
+	b.sendMu.Lock()
+	defer b.sendMu.Unlock()
 	if atomic.CompareAndSwapInt32(&b.stopped, 0, 1) {
 		close(b.writeCh)
 	}

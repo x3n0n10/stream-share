@@ -45,3 +45,25 @@ func TestNoUpstreamArchiveMark(t *testing.T) {
 		t.Fatalf("unflagged channel was marked: %v", m.noArchive)
 	}
 }
+
+// The stream pump writes while a viewer leaving stops the buffer: a write
+// racing the stop must be dropped, never sent on the closed channel.
+func TestWriteRacingStop(t *testing.T) {
+	b, err := NewDiskBuffer(t.TempDir(), "9", time.Now(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100000; i++ {
+			if i == 100 {
+				close(started)
+			}
+			b.Write([]byte("x"))
+		}
+	}()
+	<-started
+	b.Stop()
+	<-done
+}

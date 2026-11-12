@@ -131,12 +131,12 @@ func (sm *SessionManager) ProbeUpstream(ctx context.Context, target *url.URL) *U
 }
 
 // slateViewFor resolves what the slate should say for a failure.
-func (sm *SessionManager) slateViewFor(buffer *StreamBuffer, uerr *UpstreamError) slate.View {
+func (sm *SessionManager) slateViewFor(streamID string, uerr *UpstreamError) slate.View {
 	code, meaning, message := sm.errorCatalog.Lookup(uerr)
 
 	channel := ""
 	if sm.nameResolver != nil {
-		if name, ok := sm.nameResolver(buffer.streamID); ok {
+		if name, ok := sm.nameResolver(streamID); ok {
 			channel = name
 		}
 	}
@@ -157,7 +157,7 @@ func (sm *SessionManager) serveSlateAndRetry(
 	uerr *UpstreamError,
 ) *http.Response {
 
-	clipPath, err := sm.slateProvider.Clip(sm.slateViewFor(buffer, uerr))
+	clipPath, err := sm.slateProvider.Clip(sm.slateViewFor(buffer.streamID, uerr))
 	if err != nil {
 		utils.WarnLog("Error slate: cannot render for %s: %v; dropping stream as before",
 			sm.streamLabel(buffer.streamID), err)
@@ -216,6 +216,20 @@ func (sm *SessionManager) serveSlateAndRetry(
 // playSlateOnce fans one pass of the clip out to all viewers, paced in real
 // time. It reports false when the stream was stopped mid-pass.
 func (sm *SessionManager) playSlateOnce(ctx context.Context, buffer *StreamBuffer, clipPath string) bool {
+	return playClip(ctx, buffer.stopChan, clipPath, func(chunk []byte) bool {
+		if sm.stopRequested(ctx, buffer) {
+			return false
+		}
+		sm.fanOut(buffer, chunk)
+		return true
+	})
+}
+
+// playClip hands one pass of the clip to write, paced at the clip's mux rate so
+// the player receives it at playback speed rather than as fast as the disk can
+// serve it. It reports false when ctx or stop ends it, write refuses a chunk, or
+// the clip cannot be read.
+func playClip(ctx context.Context, stop <-chan struct{}, clipPath string, write func([]byte) bool) bool {
 	f, err := os.Open(clipPath)
 	if err != nil {
 		utils.WarnLog("Error slate: cannot open %s: %v", clipPath, err)
@@ -225,22 +239,17 @@ func (sm *SessionManager) playSlateOnce(ctx context.Context, buffer *StreamBuffe
 
 	buf := make([]byte, streamChunkSize)
 	for {
-		if sm.stopRequested(ctx, buffer) {
-			return false
-		}
-
 		n, rerr := f.Read(buf)
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
-			sm.fanOut(buffer, chunk)
-
-			// Pace against the clip's mux rate so the player receives it at
-			// playback speed rather than as fast as the disk can serve it.
+			if !write(chunk) {
+				return false
+			}
 			delay := time.Duration(float64(n) / float64(slateBytesPerSec) * float64(time.Second))
 			select {
 			case <-time.After(delay):
-			case <-buffer.stopChan:
+			case <-stop:
 				return false
 			case <-ctx.Done():
 				return false
@@ -252,6 +261,49 @@ func (sm *SessionManager) playSlateOnce(ctx context.Context, buffer *StreamBuffe
 		if rerr != nil {
 			utils.WarnLog("Error slate: read error on %s: %v", clipPath, rerr)
 			return false
+		}
+	}
+}
+
+// CatchupSlateClip renders the slate for a catchup request the provider could
+// not serve: status is its HTTP answer, err a transport failure. A 404 means it
+// has no recording for that time; anything else keeps its usual wording. ok is
+// false when slates are off or the clip cannot be rendered: answer as before.
+func (sm *SessionManager) CatchupSlateClip(streamID string, status int, err error) (clipPath string, ok bool) {
+	if sm.slateRetryMax <= 0 || sm.slateProvider == nil || !sm.slateProvider.Available() {
+		return "", false
+	}
+	uerr := classifyUpstream(err, status)
+	if err == nil && status == http.StatusNotFound {
+		uerr = &UpstreamError{Key: KeyNoRecording}
+	}
+	clipPath, cerr := sm.slateProvider.Clip(sm.slateViewFor(streamID, uerr))
+	if cerr != nil {
+		utils.WarnLog("Error slate: cannot render the catchup slate for %s: %v", sm.streamLabel(streamID), cerr)
+		return "", false
+	}
+	return clipPath, true
+}
+
+// PlayCatchupSlate repeats the clip to one catchup viewer until they leave
+// (ctx) or the slate retry budget runs out.
+func (sm *SessionManager) PlayCatchupSlate(ctx context.Context, w io.Writer, clipPath string) {
+	wrote := 0
+	write := func(chunk []byte) bool {
+		if _, err := w.Write(chunk); err != nil {
+			return false
+		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		wrote += len(chunk)
+		return true
+	}
+	deadline := time.Now().Add(sm.slateRetryMax)
+	for time.Now().Before(deadline) {
+		before := wrote
+		if !playClip(ctx, nil, clipPath, write) || wrote == before {
+			return // viewer gone, or an empty clip that would spin
 		}
 	}
 }

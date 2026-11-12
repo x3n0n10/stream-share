@@ -32,6 +32,9 @@ const (
 	KeyTimeout     = "TIMEOUT"
 	KeyDNS         = "DNS"
 	KeyTLS         = "TLS"
+	// KeyNoRecording: a catchup request for a time neither the local buffer
+	// nor the provider has a recording of.
+	KeyNoRecording = "NO_RECORDING"
 )
 
 // UpstreamError describes why an upstream stream could not be started. Key is

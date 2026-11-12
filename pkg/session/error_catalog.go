@@ -68,6 +68,9 @@ func builtinCatalog() map[string]ErrorInfo {
 		KeyTimeout:     {Meaning: "Timed Out", Message: "The provider did not respond in time."},
 		KeyDNS:         {Meaning: "DNS Failure", Message: "Could not resolve the provider address."},
 		KeyTLS:         {Meaning: "TLS Failure", Message: "Could not establish a secure connection to the provider."},
+
+		// Catchup for a time no recording exists of.
+		KeyNoRecording: {Meaning: "No Recording", Message: "No recording is available for this time."},
 	}
 }
 

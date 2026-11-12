@@ -1097,6 +1097,24 @@ func (sm *SessionManager) cancelPendingStop(streamID string) bool {
 	return false
 }
 
+// ReleasePausedStream stops the live stream of channel id (with or without an
+// extension) when it has no viewers and is only kept for the pause grace. A
+// viewer who left it for catchup the buffer cannot serve needs the provider
+// connection it holds. It reports whether a stream was stopped.
+func (sm *SessionManager) ReleasePausedStream(id string) bool {
+	bare := strings.TrimSuffix(id, path.Ext(id))
+	sm.streamLock.Lock()
+	defer sm.streamLock.Unlock()
+	for streamID := range sm.pendingStops {
+		if strings.TrimSuffix(streamID, path.Ext(streamID)) == bare {
+			utils.InfoLog("Catchup: closing paused %s to free the provider connection", sm.streamLabel(streamID))
+			sm.stopStream(streamID) // also cancels the pending stop
+			return true
+		}
+	}
+	return false
+}
+
 // NotifyCatchupActivity cancels any pending stop for streamID, keeping the
 // upstream connection and disk recording alive while a client is actively
 // reading from its catchup buffer (e.g. rewinding). Safe to call whether or

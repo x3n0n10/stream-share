@@ -246,6 +246,16 @@ func (b *DiskBuffer) StartTime() time.Time {
 	return b.current.startTime
 }
 
+// OldestTime is when the oldest recording still in the buffer began.
+func (b *DiskBuffer) OldestTime() time.Time {
+	b.indexMu.RLock()
+	defer b.indexMu.RUnlock()
+	if b.prev.filePath != "" {
+		return b.prev.startTime
+	}
+	return b.current.startTime
+}
+
 func (b *DiskBuffer) BytesBuffered() int64 {
 	b.indexMu.RLock()
 	defer b.indexMu.RUnlock()

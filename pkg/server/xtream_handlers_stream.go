@@ -174,6 +174,9 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 	if c.sessionManager != nil {
 		c.sessionManager.NotifyCatchupActivity(idRaw)
 	}
+	// Reading the buffer of a channel learned to lack provider recordings keeps
+	// it learned, so its catchup does not bounce off the provider once a day.
+	c.catchupManager.MarkNoUpstreamArchive(idRaw)
 	utils.DebugLog("Catchup: buffer for %s started at %s (unix=%d), buffered=%d bytes", c.streamLabel(idRaw), buf.StartTime().Format(time.RFC3339), buf.StartTime().Unix(), buf.BytesBuffered())
 
 	// Set response headers before the first write so they reach the client.

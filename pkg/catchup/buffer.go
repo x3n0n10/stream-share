@@ -54,8 +54,9 @@ type segment struct {
 //
 // When maxBytes > 0 and the current file reaches that size it is rotated: current
 // becomes prev (still seekable), a new file is opened, and the file that was in prev
-// is deleted after rotationGracePeriod so in-flight readers can finish. At most two
-// files exist on disk at once (≤ 2×maxBytes), always covering a full window of history.
+// is deleted after rotationGracePeriod so in-flight readers can finish. Two files
+// (≤ 2×maxBytes) cover a full window of history; on disk that is up to 3×maxBytes
+// while rotation is failing, plus an evicted file during its grace period.
 type DiskBuffer struct {
 	streamID string
 	maxBytes int64 // 0 = unlimited
@@ -73,7 +74,7 @@ type DiskBuffer struct {
 	prev    segment      // previous file after a rotation; empty filePath means none
 }
 
-// NewDiskBuffer creates a buffer that writes to dir/<streamID>_<unix>.ts.
+// NewDiskBuffer creates a buffer that writes to dir/<streamID>_<unix nanoseconds>.ts.
 // maxBytes == 0 means unlimited; otherwise the file rotates when it fills,
 // keeping the previous segment available for seeking.
 func NewDiskBuffer(dir, streamID string, start time.Time, maxBytes int64) (*DiskBuffer, error) {
@@ -128,7 +129,10 @@ func (b *DiskBuffer) drainLoop() {
 			sinceLastSample = 0
 
 			if b.maxBytes > 0 && written >= b.maxBytes {
-				if written >= 2*b.maxBytes {
+				if newF := b.rotate(f); newF != f {
+					f = newF
+					written = 0
+				} else if written >= 2*b.maxBytes {
 					// Rotation keeps failing: stop recording rather than let one
 					// file grow without bound.
 					utils.ErrorLog("Catchup: stopped recording stream %s: buffer file cannot rotate", b.streamID)
@@ -136,10 +140,6 @@ func (b *DiskBuffer) drainLoop() {
 					for range b.writeCh {
 					}
 					return
-				}
-				if newF := b.rotate(f); newF != f {
-					f = newF
-					written = 0
 				}
 			}
 		} else {

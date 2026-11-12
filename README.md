@@ -551,7 +551,7 @@ StreamShare can buffer every active live stream to disk as it plays, giving all 
 
 ### How It Works
 
-1. When a viewer starts watching a live channel, a `.ts` file is opened in the configured buffer directory and the stream is written to it in real time.
+1. When a viewer starts watching a live channel the provider does not archive itself, a `.ts` file is opened in the configured buffer directory and the stream is written to it in real time. Channels the provider's channel list flags as archived are not recorded: their catchup comes from the provider.
 2. A time-to-offset index is maintained in memory so any point in the stream can be found quickly.
 3. `get_live_streams` responses are patched to set `tv_archive=1` on all channels, so TiviMate (and other Xtream-compatible players) show the rewind UI everywhere.
 4. When a timeshift request arrives, stream-share checks whether the channel has **native** provider catchup:

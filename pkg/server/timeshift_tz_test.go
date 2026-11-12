@@ -148,7 +148,7 @@ func TestTimeshiftWithoutBufferAsksProvider(t *testing.T) {
 func TestTimeshiftInBufferFirstMinuteStaysLocal(t *testing.T) {
 	front, seen := viewerRouteFixtureWith(t, "", func(c *Config) {
 		c.catchupManager = catchup.New(true, t.TempDir(), 3)
-		c.catchupManager.StartBuffer("42").Stop() // stopped: serving it ends at EOF
+		stopBuffer(t, c.catchupManager.StartBuffer("42")) // stopped: serving it ends at EOF
 	})
 	start := time.Now().UTC().Truncate(time.Minute).Format(timeshiftLayout)
 	getStatus(t, front+"/timeshift/me/pw/60/"+start+"/42.ts")
@@ -156,6 +156,18 @@ func TestTimeshiftInBufferFirstMinuteStaysLocal(t *testing.T) {
 		if strings.HasPrefix(p, "/timeshift/") {
 			t.Fatalf("provider asked for a time the buffer covers: %v", seen())
 		}
+	}
+}
+
+// stopBuffer stops buf and waits for its writer, so the writer cannot create
+// its file while the test's temporary folder is being removed.
+func stopBuffer(t *testing.T, buf *catchup.DiskBuffer) {
+	t.Helper()
+	buf.Stop()
+	select {
+	case <-buf.DrainDone():
+	case <-time.After(5 * time.Second):
+		t.Fatal("buffer writer did not finish")
 	}
 }
 
@@ -212,7 +224,8 @@ func TestTimeshiftBeforeBuffer(t *testing.T) {
 			front, _ := viewerRouteFixtureWith(t, "", func(c *Config) {
 				c.XtreamBaseURL = up.URL
 				c.catchupManager = catchup.New(true, t.TempDir(), 3)
-				c.catchupManager.StartBuffer("42") // started now: 20 hours ago is before it
+				buf := c.catchupManager.StartBuffer("42") // started now: 20 hours ago is before it
+				t.Cleanup(func() { stopBuffer(t, buf) })
 				if tc.slates {
 					c.sessionManager.SetErrorCatalog(session.LoadCatalog(""))
 					c.sessionManager.SetSlateProvider(catchupSlate{clip})
@@ -262,6 +275,11 @@ func TestEmptyCatchupAnswer(t *testing.T) {
 		{"small error page", 200, "text/html", 512, true},
 		{"recording", 200, "video/mp2t", 736096256, false},
 		{"recording of unknown length", 200, "video/mp2t", -1, false},
+		{"page just under 1 MiB", 200, "text/html", 1<<20 - 1, true},
+		{"text of 1 MiB or more", 200, "text/html", 1 << 20, false},
+		{"upper-case type", 200, "TEXT/HTML", 512, true},
+		{"small range of a mislabelled recording", 206, "text/html", 1024, false},
+		{"empty range answer", 206, "video/mp2t", 0, true},
 		{"recording mislabelled as html", 200, "text/html", 736096256, false},
 		{"html of unknown length", 200, "text/html", -1, false},
 		{"not a success", 404, "text/html", 0, false},
@@ -282,7 +300,7 @@ func TestBufferCoversWholeMinutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer buf.Stop()
+	stopBuffer(t, buf)
 	for start, want := range map[string]bool{
 		"20:00:00": true,  // its minute reaches into the buffer
 		"20:00:59": true,  // inside the buffer
@@ -308,15 +326,16 @@ func TestProviderArchiveMissLearned(t *testing.T) {
 	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { emptyPage(w) }))
 	defer empty.Close()
 	for _, tc := range []struct {
-		name     string
-		provider string
-		age      time.Duration
-		learns   bool
+		name       string
+		provider   string
+		age        time.Duration
+		learns     bool
+		wantStatus int // slates off: the provider's answer, passed through
 	}{
-		{"an hour ago", notFound.URL, time.Hour, true},
-		{"two minutes ago", notFound.URL, 2 * time.Minute, false},
-		{"three days ago", notFound.URL, 72 * time.Hour, false},
-		{"an hour ago, empty page", empty.URL, time.Hour, true},
+		{"an hour ago", notFound.URL, time.Hour, true, 404},
+		{"two minutes ago", notFound.URL, 2 * time.Minute, false, 404},
+		{"three days ago", notFound.URL, 72 * time.Hour, false, 404},
+		{"an hour ago, empty page", empty.URL, time.Hour, true, 200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cm := catchup.New(true, t.TempDir(), 3)
@@ -326,7 +345,9 @@ func TestProviderArchiveMissLearned(t *testing.T) {
 				c.XtreamBaseURL = tc.provider
 			})
 			start := time.Now().UTC().Add(-tc.age).Format(timeshiftLayout)
-			getStatus(t, front+"/timeshift/me/pw/60/"+start+"/42.ts") // slates off: the provider's answer
+			if s := getStatus(t, front+"/timeshift/me/pw/60/"+start+"/42.ts"); s != tc.wantStatus {
+				t.Fatalf("status %d, want the provider's %d", s, tc.wantStatus)
+			}
 			if learned := !cm.HasUpstreamCatchup("42"); learned != tc.learns {
 				t.Fatalf("learned = %v, want %v", learned, tc.learns)
 			}

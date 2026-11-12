@@ -275,13 +275,17 @@ func catchupRetryWorth(status int) bool {
 // carries no recording: some providers (behind a CDN) answer a missing one with
 // an empty or small HTML page instead of 404. A text type alone is not enough:
 // a panel serving recordings from PHP may label real video text/html, but a
-// recording is far larger than a page.
+// recording is far larger than a page. A range answer (206) is small by design,
+// so only an empty one counts.
 func emptyCatchupAnswer(resp *http.Response) bool {
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return false
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+		return resp.ContentLength == 0
+	case http.StatusOK:
+		isText := strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/")
+		return resp.ContentLength == 0 || (isText && resp.ContentLength >= 0 && resp.ContentLength < 1<<20)
 	}
-	isText := strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/")
-	return resp.ContentLength == 0 || (isText && resp.ContentLength > 0 && resp.ContentLength < 1<<20)
+	return false
 }
 
 // serveCatchupSlate shows the viewer a slate for a catchup request the provider

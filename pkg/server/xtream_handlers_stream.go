@@ -299,12 +299,15 @@ func measureUnknownLength(resp *http.Response) {
 	if resp.ContentLength >= 0 || (resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent) {
 		return
 	}
-	limit := 1
-	if strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/") {
+	limit := 1 // only an empty range answer counts, so a 206 needs one byte
+	if resp.StatusCode == http.StatusOK && strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/") {
 		limit = 1 << 20
 	}
 	br := bufio.NewReaderSize(resp.Body, limit)
-	if peeked, err := br.Peek(limit); err != nil {
+	// Only a clean end counts: a broken connection must not pass for an
+	// empty page (and mark the channel as unarchived). Its error resurfaces
+	// when the body is read.
+	if peeked, err := br.Peek(limit); err == io.EOF {
 		resp.ContentLength = int64(len(peeked)) // it ended within the limit
 	}
 	resp.Body = struct {

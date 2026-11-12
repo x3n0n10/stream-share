@@ -20,14 +20,19 @@
 package server
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/lucasduport/stream-share/pkg/catchup"
 	"github.com/lucasduport/stream-share/pkg/config"
+	"github.com/lucasduport/stream-share/pkg/session"
+	"github.com/lucasduport/stream-share/pkg/slate"
 	xtreamapi "github.com/lucasduport/stream-share/pkg/xtream"
 )
 
@@ -137,18 +142,78 @@ func TestTimeshiftWithoutBufferAsksProvider(t *testing.T) {
 	}
 }
 
-// A buffer that starts after the requested time still serves the request:
-// channels without provider recordings keep their partial replay.
-func TestTimeshiftWithLateBufferStaysLocal(t *testing.T) {
+// A start in the buffer's first minute is served from the buffer: players send
+// whole minutes, so a pause right after tuning in resumes locally.
+func TestTimeshiftInBufferFirstMinuteStaysLocal(t *testing.T) {
 	front, seen := viewerRouteFixtureWith(t, "", func(c *Config) {
 		c.catchupManager = catchup.New(true, t.TempDir(), 3)
 		c.catchupManager.StartBuffer("42").Stop() // stopped: serving it ends at EOF
 	})
-	getStatus(t, front+"/timeshift/me/pw/60/2026-11-10:19-00/42.ts")
+	start := time.Now().UTC().Truncate(time.Minute).Format(timeshiftLayout)
+	getStatus(t, front+"/timeshift/me/pw/60/"+start+"/42.ts")
 	for _, p := range seen() {
 		if strings.HasPrefix(p, "/timeshift/") {
-			t.Fatalf("provider asked for catchup despite a local buffer: %v", seen())
+			t.Fatalf("provider asked for a time the buffer covers: %v", seen())
 		}
+	}
+}
+
+// catchupSlate stands in for the ffmpeg slate renderer.
+type catchupSlate struct{ path string }
+
+func (s catchupSlate) Available() bool                 { return true }
+func (s catchupSlate) Clip(slate.View) (string, error) { return s.path, nil }
+
+// A time before the local buffer goes to the provider: its recording plays when
+// it has one, its 404 becomes the "no recording" slate, and without slates the
+// player gets the 404 as before.
+func TestTimeshiftBeforeBuffer(t *testing.T) {
+	clip := filepath.Join(t.TempDir(), "slate.ts")
+	if err := os.WriteFile(clip, []byte("SLATE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name       string
+		provider   int
+		slates     bool
+		wantStatus int
+		wantBody   string
+	}{
+		{"provider has it", 200, true, 200, "x"},
+		{"provider has nothing", 404, true, 200, "SLATE"},
+		{"provider has nothing, slates off", 404, false, 404, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var asked []string
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				asked = append(asked, r.URL.Path)
+				w.WriteHeader(tc.provider)
+				_, _ = w.Write([]byte("x"))
+			}))
+			defer up.Close()
+			front, _ := viewerRouteFixtureWith(t, "", func(c *Config) {
+				c.XtreamBaseURL = up.URL
+				c.catchupManager = catchup.New(true, t.TempDir(), 3)
+				c.catchupManager.StartBuffer("42") // started now: yesterday is before it
+				if tc.slates {
+					c.sessionManager.SetErrorCatalog(session.LoadCatalog(""))
+					c.sessionManager.SetSlateProvider(catchupSlate{clip})
+					c.sessionManager.SetSlateRetryMax(300 * time.Millisecond)
+				}
+			})
+			resp, err := http.Get(front + "/timeshift/me/pw/60/" + time.Now().UTC().Add(-20*time.Hour).Format(timeshiftLayout) + "/42.ts")
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode != tc.wantStatus || !strings.HasPrefix(string(body), tc.wantBody) {
+				t.Fatalf("got %d %q, want %d %q", resp.StatusCode, body, tc.wantStatus, tc.wantBody)
+			}
+			if len(asked) != 1 || !strings.HasPrefix(asked[0], "/timeshift/") {
+				t.Fatalf("provider asked %v", asked)
+			}
+		})
 	}
 }
 

@@ -225,24 +225,31 @@ func writeUpstreamResponse(ctx *gin.Context, resp *http.Response, isVOD bool) {
 // stream proxies the content from upstream to the client, preserving status
 // and most headers, while normalizing VOD header sets for stricter providers.
 func (c *Config) stream(ctx *gin.Context, oriURL *url.URL) {
+	resp, err := c.openUpstream(ctx, oriURL)
+	if err != nil {
+		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	writeUpstreamResponse(ctx, resp, isVODPath(oriURL.Path))
+}
+
+// openUpstream sends the client's request on to oriURL and returns the
+// provider's response, whatever its status. The body is the caller's to close.
+func (c *Config) openUpstream(ctx *gin.Context, oriURL *url.URL) (*http.Response, error) {
 	utils.DebugLog("-> Streaming request URL: %s", c.redactRequestURI(ctx.Request.URL, ctx.FullPath()))
 	utils.DebugLog("-> Proxying to upstream URL: %s", utils.MaskURL(oriURL.String()))
 
 	req, err := c.buildUpstreamRequest(ctx, oriURL)
 	if err != nil {
 		utils.ErrorLog("Failed to create request: %v", err)
-		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
-		return
+		return nil, err
 	}
-
 	resp, err := streamHTTPClient.Do(req)
 	if err != nil {
 		utils.DebugLog("-> Upstream request error: %v", err)
-		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
-		return
+		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
-
 	utils.DebugLog("-> Upstream response status: %d", resp.StatusCode)
-	writeUpstreamResponse(ctx, resp, isVODPath(oriURL.Path))
+	return resp, nil
 }

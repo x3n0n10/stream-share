@@ -160,10 +160,15 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 	utils.DebugLog("Catchup: timeshift start raw=%q parsed=%s (unix=%d)", start, startTime.Format(time.RFC3339), startTime.Unix())
 
 	buf := c.catchupManager.GetBuffer(idRaw)
-	if buf == nil {
+	if buf == nil || !bufferCovers(buf, startTime) {
 		// Some providers keep recordings for channels their list does not flag
-		// as archived; asking costs nothing when the alternative is a 404.
-		utils.DebugLog("Catchup: no buffer for %s (never watched or already cleaned up); asking the provider", c.streamLabel(idRaw))
+		// as archived, so ask; it answers with the recording or a slate. The
+		// paused live stream of this channel, if any, holds the provider
+		// connection the request needs.
+		utils.DebugLog("Catchup: local buffer for %s does not reach back to %s; asking the provider", c.streamLabel(idRaw), startTime.Format(time.RFC3339))
+		if c.sessionManager != nil {
+			c.sessionManager.ReleasePausedStream(idRaw)
+		}
 		c.proxyTimeshift(ctx, duration, start, idRaw)
 		return
 	}
@@ -208,19 +213,63 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 }
 
 // proxyTimeshift streams the provider's own catchup recording, with the start
-// time converted to the provider's time zone.
+// time converted to the provider's time zone. When the provider has none (404)
+// or fails, the viewer gets a slate saying so, if slates are on; otherwise its
+// answer is passed through as before.
 func (c *Config) proxyTimeshift(ctx *gin.Context, duration, start, idRaw string) {
 	rpURL, err := url.Parse(c.providerStreamURL("timeshift", duration, providerTimeshiftStart(start, c.providerLocation()), idRaw))
 	if err != nil {
 		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
 		return
 	}
-	c.stream(ctx, rpURL)
+	resp, err := c.openUpstream(ctx, rpURL)
+	status := 0
+	if err == nil {
+		defer func() { _ = resp.Body.Close() }()
+		status = resp.StatusCode
+		if status == http.StatusOK || status == http.StatusPartialContent {
+			writeUpstreamResponse(ctx, resp, false)
+			return
+		}
+	}
 	// A 404 for a time the provider should have means its archive flag is
 	// wrong for this channel: record it locally from now on.
-	if ctx.Writer.Status() == http.StatusNotFound && c.catchupManager != nil && insideProviderArchive(start) {
+	if status == http.StatusNotFound && c.catchupManager != nil && insideProviderArchive(start) {
 		c.catchupManager.MarkNoUpstreamArchive(idRaw)
 	}
+	if c.serveCatchupSlate(ctx, idRaw, status, err) {
+		return
+	}
+	if err != nil {
+		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+		return
+	}
+	writeUpstreamResponse(ctx, resp, false)
+}
+
+// serveCatchupSlate shows the viewer a slate for a catchup request the provider
+// could not serve. It reports false when slates are unavailable.
+func (c *Config) serveCatchupSlate(ctx *gin.Context, idRaw string, status int, err error) bool {
+	if c.sessionManager == nil {
+		return false
+	}
+	clip, ok := c.sessionManager.CatchupSlateClip(idRaw, status, err)
+	if !ok {
+		return false
+	}
+	utils.InfoLog("Catchup: provider could not serve %s (status %d, err %v); showing a slate", c.streamLabel(idRaw), status, err)
+	ctx.Header("Content-Type", "video/mp2t")
+	ctx.Header("Cache-Control", "no-cache")
+	ctx.Status(http.StatusOK)
+	c.sessionManager.PlayCatchupSlate(ctx.Request.Context(), ctx.Writer, clip)
+	return true
+}
+
+// bufferCovers tells whether the buffer holds start. Players send whole
+// minutes, so a start counts as covered when any of its minute is buffered: a
+// pause right after tuning in must resume locally.
+func bufferCovers(buf *catchup.DiskBuffer, start time.Time) bool {
+	return start.Add(time.Minute).After(buf.OldestTime())
 }
 
 // insideProviderArchive tells whether a timeshift start is old enough for the

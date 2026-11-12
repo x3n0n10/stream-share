@@ -558,7 +558,7 @@ StreamShare can buffer every active live stream to disk as it plays, giving all 
    - **Yes** → the request is proxied to the provider's own timeshift endpoint (zero change from before).
    - **No** → the request is served from the local disk buffer at the requested timestamp offset.
    - **Yes, but the provider answers 404 for a time between 10 minutes and a day ago** → its archive flag is wrong for that channel (seen in practice). For the next 24 hours stream-share treats the channel as not archived: watching it records a local buffer, and catchup reads that buffer.
-   - **No, and there is no local buffer** (nobody watched the channel recently) → the request still goes to the provider, which may keep recordings for channels its list does not flag. If the provider has none, the player gets its 404 as before.
+   - **No, and the local buffer does not reach back to the requested time** (nobody watched the channel then) → the request goes to the provider, which may keep recordings for channels its list does not flag. A paused live stream of that channel is closed first, so it does not hold the provider connection. If the provider has no recording, the viewer gets a "No recording" slate (see [On-Screen Error Slates](#on-screen-error-slates)); without slates, the player gets the provider's 404 as before. Players send whole minutes, so a start within the buffer's first minute still plays from the buffer.
 5. When all viewers leave, the buffer keeps recording for a configurable grace period (`CATCHUP_PAUSE_GRACE_MINUTES`) so that a TiviMate "pause" (which looks like a disconnect at the protocol level) can resume seamlessly via timeshift. A genuine channel switch is detected separately and stops recording immediately.
 6. Query-style catchup templates (`/streaming/timeshift.php?username=..&password=..&stream=..&start=..&duration=..`) are served like the path-style `/timeshift/...` URLs, also under `CUSTOM_ENDPOINT`. The viewer stream routes (`/live`, `/movie`, `/series`, `/timeshift`, query catchup) likewise work under the custom endpoint prefix, while root paths keep working for Xtream players.
 
@@ -602,6 +602,7 @@ The slate shows three things: the error code, its official meaning, and a messag
 4. If the provider comes back, live video resumes. If it does not come back within the retry budget, the stream stops as it did before.
 
 Behavior:
+- Catchup the provider cannot serve gets a slate too: `NO_RECORDING` when it has no recording for that time (its 404), otherwise the slate for its error. The slate repeats until the viewer leaves or the retry budget runs out; there is nothing to retry.
 - Applies to **live and timeshift** streams only. Movies and series are served over HTTP byte ranges, where injecting a clip would corrupt the response, so they are untouched.
 - Requires `ffmpeg` and the DejaVu font, both present in the Docker image. If either is missing the feature quietly disables itself and streams drop exactly as before — so upgrading is safe and downgrading loses nothing.
 - Resuming live video after a slate is a stream discontinuity. Most players re-sync on it, but behavior varies by player.
@@ -645,6 +646,7 @@ The file is a single object mapping an error key to the text for that error:
 | `TIMEOUT` | The provider accepted the connection but did not respond in time |
 | `DNS` | The provider's hostname could not be resolved |
 | `TLS` | The provider's certificate could not be verified |
+| `NO_RECORDING` | Catchup for a time neither the local buffer nor the provider has a recording of |
 
 **The fields** are both optional, and each falls back independently — so overriding one does not blank the other:
 

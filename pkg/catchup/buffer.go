@@ -64,6 +64,9 @@ type DiskBuffer struct {
 	drainDone chan struct{} // closed by drainLoop when all writes are flushed to disk
 	stopped   int32         // accessed via atomic
 	sendMu    sync.Mutex    // orders Write's send before Stop's close
+	// rotateFailing is set while the next file cannot be created; only the
+	// drain goroutine touches it.
+	rotateFailing bool
 
 	indexMu sync.RWMutex // guards current and prev
 	current segment      // actively-written file
@@ -125,14 +128,19 @@ func (b *DiskBuffer) drainLoop() {
 			sinceLastSample = 0
 
 			if b.maxBytes > 0 && written >= b.maxBytes {
-				newF := b.rotate(f)
-				if newF == nil {
+				if written >= 2*b.maxBytes {
+					// Rotation keeps failing: stop recording rather than let one
+					// file grow without bound.
+					utils.ErrorLog("Catchup: stopped recording stream %s: buffer file cannot rotate", b.streamID)
+					_ = f.Close()
 					for range b.writeCh {
 					}
 					return
 				}
-				f = newF
-				written = 0
+				if newF := b.rotate(f); newF != f {
+					f = newF
+					written = 0
+				}
 			}
 		} else {
 			b.indexMu.Lock()
@@ -150,13 +158,28 @@ func (b *DiskBuffer) drainLoop() {
 // rotate closes oldFile, promotes current → prev, opens a new current file, and
 // schedules deletion of the file evicted from prev. The caller must not hold indexMu.
 func (b *DiskBuffer) rotate(oldFile *os.File) *os.File {
+	b.indexMu.RLock()
+	dir := filepath.Dir(b.current.filePath)
+	b.indexMu.RUnlock()
+	newTime := time.Now()
+	newPath := newFilePath(dir, b.streamID, newTime)
+
+	// Create the new file before switching to it: if that fails, recording
+	// carries on in the current file and the next size check tries again.
+	f, err := os.OpenFile(newPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		if !b.rotateFailing {
+			utils.ErrorLog("Catchup: failed to open rotated buffer file %s: %v; still recording into the current file", newPath, err)
+			b.rotateFailing = true
+		}
+		return oldFile
+	}
+	b.rotateFailing = false
 	_ = oldFile.Close()
 
 	b.indexMu.Lock()
 	evictPath := b.prev.filePath // evict the file that was already in prev
 	b.prev = b.current           // promote current to prev
-	newTime := time.Now()
-	newPath := newFilePath(filepath.Dir(b.current.filePath), b.streamID, newTime)
 	b.current = segment{filePath: newPath, startTime: newTime}
 	b.indexMu.Unlock()
 
@@ -167,12 +190,6 @@ func (b *DiskBuffer) rotate(oldFile *os.File) *os.File {
 				utils.WarnLog("Catchup: failed to remove evicted buffer file %s: %v", evictPath, err)
 			}
 		}()
-	}
-
-	f, err := os.OpenFile(newPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		utils.ErrorLog("Catchup: failed to open rotated buffer file %s: %v", newPath, err)
-		return nil
 	}
 	utils.DebugLog("Catchup: rotated buffer for stream %s → %s", b.streamID, newPath)
 	return f
@@ -269,7 +286,7 @@ func searchIndex(idx []indexEntry, t time.Time) int64 {
 }
 
 func newFilePath(dir, streamID string, t time.Time) string {
-	return filepath.Join(dir, fmt.Sprintf("%s_%d.ts", sanitizeID(streamID), t.Unix()))
+	return filepath.Join(dir, fmt.Sprintf("%s_%d.ts", sanitizeID(streamID), t.UnixNano()))
 }
 
 func sanitizeID(id string) string {

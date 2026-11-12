@@ -88,3 +88,44 @@ func TestDrainDoneAfterFailedOpen(t *testing.T) {
 		t.Fatal("DrainDone never closed after a failed open")
 	}
 }
+
+// When the next buffer file cannot be created, recording carries on in the
+// current file instead of switching to a file that does not exist, up to
+// twice the size limit.
+func TestRotateFailureKeepsRecording(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the read-only folder this test relies on")
+	}
+	dir := t.TempDir()
+	b, err := NewDiskBuffer(dir, "9", time.Now(), indexSampleInterval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(b.FilePath()); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first buffer file never appeared")
+		}
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(dir, 0o755) }()
+
+	for i := 0; i < 4; i++ {
+		b.Write(make([]byte, indexSampleInterval)) // each crosses the size limit
+	}
+	b.Stop()
+	<-b.DrainDone()
+
+	if _, err := os.Stat(b.FilePath()); err != nil {
+		t.Fatalf("buffer points at a file that does not exist: %v", err)
+	}
+	// Recording went on past the failed rotation (more than 1 MB) and stopped
+	// at twice the size limit rather than growing without bound (not 4 MB).
+	if got := b.BytesBuffered(); got != 2*indexSampleInterval {
+		t.Fatalf("buffered %d bytes, want %d", got, 2*indexSampleInterval)
+	}
+}

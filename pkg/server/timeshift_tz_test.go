@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lucasduport/stream-share/pkg/catchup"
 	"github.com/lucasduport/stream-share/pkg/config"
 	xtreamapi "github.com/lucasduport/stream-share/pkg/xtream"
 )
@@ -118,6 +119,20 @@ func TestTimeshiftProxyConvertsStart(t *testing.T) {
 		t.Fatalf("status %d", s)
 	}
 	if got := seen(); len(got) != 1 || got[0] != "/timeshift/user/prov/60/2026-11-10:20-00/42.ts" {
+		t.Fatalf("provider saw %v", got)
+	}
+}
+
+// A channel the provider's list does not flag as archived, but that has no
+// local buffer either, still asks the provider: its EPG may list recordings.
+func TestTimeshiftWithoutBufferAsksProvider(t *testing.T) {
+	front, seen := viewerRouteFixtureWith(t, "", func(c *Config) {
+		c.catchupManager = catchup.New(true, t.TempDir(), 3)
+	})
+	if s := getStatus(t, front+"/timeshift/me/pw/60/2026-11-10:19-00/42.ts"); s != 200 {
+		t.Fatalf("status %d", s)
+	}
+	if got := seen(); len(got) != 1 || got[0] != "/timeshift/user/prov/60/2026-11-10:19-00/42.ts" {
 		t.Fatalf("provider saw %v", got)
 	}
 }

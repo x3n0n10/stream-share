@@ -557,6 +557,7 @@ StreamShare can buffer every active live stream to disk as it plays, giving all 
 4. When a timeshift request arrives, stream-share checks whether the channel has **native** provider catchup:
    - **Yes** → the request is proxied to the provider's own timeshift endpoint (zero change from before).
    - **No** → the request is served from the local disk buffer at the requested timestamp offset.
+   - **No, and there is no local buffer** (nobody watched the channel recently) → the request still goes to the provider, which may keep recordings for channels its list does not flag. If the provider has none, the player gets its 404 as before.
 5. When all viewers leave, the buffer keeps recording for a configurable grace period (`CATCHUP_PAUSE_GRACE_MINUTES`) so that a TiviMate "pause" (which looks like a disconnect at the protocol level) can resume seamlessly via timeshift. A genuine channel switch is detected separately and stops recording immediately.
 6. Query-style catchup templates (`/streaming/timeshift.php?username=..&password=..&stream=..&start=..&duration=..`) are served like the path-style `/timeshift/...` URLs, also under `CUSTOM_ENDPOINT`. The viewer stream routes (`/live`, `/movie`, `/series`, `/timeshift`, query catchup) likewise work under the custom endpoint prefix, while root paths keep working for Xtream players.
 

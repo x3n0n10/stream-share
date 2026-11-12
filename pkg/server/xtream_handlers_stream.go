@@ -147,12 +147,7 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 
 	// Proxy upstream if catchup is disabled or the channel has native upstream support.
 	if c.catchupManager == nil || !c.catchupManager.IsEnabled() || c.catchupManager.HasUpstreamCatchup(idRaw) {
-		rpURL, err := url.Parse(c.providerStreamURL("timeshift", duration, providerTimeshiftStart(start, c.providerLocation()), idRaw))
-		if err != nil {
-			_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
-			return
-		}
-		c.stream(ctx, rpURL)
+		c.proxyTimeshift(ctx, duration, start, idRaw)
 		return
 	}
 
@@ -173,8 +168,10 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 
 	buf := c.catchupManager.GetBuffer(idRaw)
 	if buf == nil {
-		utils.DebugLog("Catchup: no buffer for %s (never watched or already cleaned up)", c.streamLabel(idRaw))
-		ctx.AbortWithStatus(http.StatusNotFound)
+		// Some providers keep recordings for channels their list does not flag
+		// as archived; asking costs nothing when the alternative is a 404.
+		utils.DebugLog("Catchup: no buffer for %s (never watched or already cleaned up); asking the provider", c.streamLabel(idRaw))
+		c.proxyTimeshift(ctx, duration, start, idRaw)
 		return
 	}
 	utils.DebugLog("Catchup: buffer for %s started at %s (unix=%d), buffered=%d bytes", c.streamLabel(idRaw), buf.StartTime().Format(time.RFC3339), buf.StartTime().Unix(), buf.BytesBuffered())
@@ -205,6 +202,17 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 	}
 	utils.DebugLog("Catchup: buffer exhausted for %s, transitioning to live upstream", c.streamLabel(idRaw))
 	c.stream(ctx, liveURL)
+}
+
+// proxyTimeshift streams the provider's own catchup recording, with the start
+// time converted to the provider's time zone.
+func (c *Config) proxyTimeshift(ctx *gin.Context, duration, start, idRaw string) {
+	rpURL, err := url.Parse(c.providerStreamURL("timeshift", duration, providerTimeshiftStart(start, c.providerLocation()), idRaw))
+	if err != nil {
+		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+		return
+	}
+	c.stream(ctx, rpURL)
 }
 
 // parseTimeshiftStart parses a timeshift start parameter.

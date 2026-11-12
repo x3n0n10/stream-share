@@ -634,10 +634,13 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		slateOK:     slateEligible(streamType),
 	}
 
-	// Start local disk buffer for live streams when catchup is enabled
+	// Start a local disk buffer for live streams when catchup is enabled, unless
+	// the provider archives the channel itself: its catchup goes to the provider.
 	if sm.catchupManager != nil && sm.catchupManager.IsEnabled() && streamType == "live" {
 		bareID := strings.TrimSuffix(path.Base(upstreamURL.Path), path.Ext(upstreamURL.Path))
-		streamBuffer.diskBuffer = sm.catchupManager.StartBuffer(bareID)
+		if !sm.catchupManager.HasUpstreamCatchup(bareID) {
+			streamBuffer.diskBuffer = sm.catchupManager.StartBuffer(bareID)
+		}
 	}
 
 	sm.streamBuffers[streamID] = streamBuffer

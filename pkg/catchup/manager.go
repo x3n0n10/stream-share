@@ -40,7 +40,12 @@ type Manager struct {
 	buffers         map[string]*DiskBuffer   // streamID → buffer (active or in grace period)
 	graceCancels    map[string]chan struct{} // streamID → cancel chan for grace goroutine
 	upstreamCatchup map[string]bool          // streamID → has native tv_archive=1
+	noArchive       map[string]time.Time     // streamID → when the provider had no recording despite tv_archive=1
 }
+
+// noArchiveFor is how long a provider's missing recording overrules its
+// channel list's archive flag; after that the provider gets another chance.
+const noArchiveFor = 24 * time.Hour
 
 // New creates a Manager. If !enabled, all methods are no-ops.
 func New(enabled bool, dir string, duration int) *Manager {
@@ -54,6 +59,7 @@ func New(enabled bool, dir string, duration int) *Manager {
 		buffers:         make(map[string]*DiskBuffer),
 		graceCancels:    make(map[string]chan struct{}),
 		upstreamCatchup: make(map[string]bool),
+		noArchive:       make(map[string]time.Time),
 	}
 	return m
 }
@@ -235,5 +241,30 @@ func (m *Manager) HasUpstreamCatchup(id string) bool {
 	bare := strings.TrimSuffix(id, filepath.Ext(id))
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if at, ok := m.noArchive[bare]; ok {
+		if time.Since(at) < noArchiveFor {
+			return false
+		}
+		delete(m.noArchive, bare)
+	}
 	return m.upstreamCatchup[bare]
+}
+
+// MarkNoUpstreamArchive records that the provider had no recording for a
+// channel its list flags as archived. For noArchiveFor the channel counts as
+// unarchived: watching it records a local buffer and catchup reads that.
+func (m *Manager) MarkNoUpstreamArchive(id string) {
+	if !m.enabled {
+		return
+	}
+	bare := strings.TrimSuffix(id, filepath.Ext(id))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.upstreamCatchup[bare] {
+		return
+	}
+	if _, ok := m.noArchive[bare]; !ok {
+		utils.InfoLog("Catchup: provider has no recording for stream %s although its channel list says archived; recording it locally for %s", bare, noArchiveFor)
+	}
+	m.noArchive[bare] = time.Now()
 }

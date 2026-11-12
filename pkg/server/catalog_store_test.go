@@ -24,6 +24,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/lucasduport/stream-share/pkg/catchup"
 	"github.com/lucasduport/stream-share/pkg/filter"
 )
 
@@ -130,5 +131,21 @@ func TestFailedCatalogReadIsNotMemoised(t *testing.T) {
 	}
 	if buildLiveNumIndex(failingStore{}) != nil {
 		t.Fatal("buildLiveNumIndex must return nil on a failed read")
+	}
+}
+
+// Providers send tv_archive as a number or a string; both must count, or a
+// provider-archived channel gets recorded locally and its catchup misrouted.
+func TestCatchupFlaggedReadsStringArchiveFlag(t *testing.T) {
+	c := &Config{catchupManager: catchup.New(true, t.TempDir(), 3)}
+	upstream := map[string]bool{}
+	for id, v := range map[string]interface{}{"1": "1", "2": json.Number("1"), "3": "0", "4": float64(1)} {
+		c.catchupFlagged(map[string]interface{}{"stream_id": id, "tv_archive": v}, upstream)
+	}
+	want := map[string]bool{"1": true, "2": true, "3": false, "4": true}
+	for id, w := range want {
+		if upstream[id] != w {
+			t.Errorf("stream %s: archived = %v, want %v", id, upstream[id], w)
+		}
 	}
 }

@@ -551,12 +551,14 @@ StreamShare can buffer every active live stream to disk as it plays, giving all 
 
 ### How It Works
 
-1. When a viewer starts watching a live channel, a `.ts` file is opened in the configured buffer directory and the stream is written to it in real time.
+1. When a viewer starts watching a live channel the provider does not archive itself, a `.ts` file is opened in the configured buffer directory and the stream is written to it in real time. Channels the provider's channel list flags as archived are not recorded: their catchup comes from the provider.
 2. A time-to-offset index is maintained in memory so any point in the stream can be found quickly.
 3. `get_live_streams` responses are patched to set `tv_archive=1` on all channels, so TiviMate (and other Xtream-compatible players) show the rewind UI everywhere.
 4. When a timeshift request arrives, stream-share checks whether the channel has **native** provider catchup:
    - **Yes** → the request is proxied to the provider's own timeshift endpoint (zero change from before).
    - **No** → the request is served from the local disk buffer at the requested timestamp offset.
+   - **Yes, but the provider answers 404 for a time between 10 minutes and a day ago** → its archive flag is wrong for that channel (seen in practice). For the next 24 hours stream-share treats the channel as not archived: watching it records a local buffer, and catchup reads that buffer.
+   - **No, and there is no local buffer** (nobody watched the channel recently) → the request still goes to the provider, which may keep recordings for channels its list does not flag. If the provider has none, the player gets its 404 as before.
 5. When all viewers leave, the buffer keeps recording for a configurable grace period (`CATCHUP_PAUSE_GRACE_MINUTES`) so that a TiviMate "pause" (which looks like a disconnect at the protocol level) can resume seamlessly via timeshift. A genuine channel switch is detected separately and stops recording immediately.
 6. Query-style catchup templates (`/streaming/timeshift.php?username=..&password=..&stream=..&start=..&duration=..`) are served like the path-style `/timeshift/...` URLs, also under `CUSTOM_ENDPOINT`. The viewer stream routes (`/live`, `/movie`, `/series`, `/timeshift`, query catchup) likewise work under the custom endpoint prefix, while root paths keep working for Xtream players.
 
@@ -571,7 +573,12 @@ At 10 Mbps a 4-hour buffer is approximately **18 GB per active channel**. Only c
 | `CATCHUP_ENABLED` | `false` | Set to `true` to enable |
 | `CATCHUP_DURATION_HOURS` | `4` | Hours of catchup to buffer and advertise to clients |
 | `CATCHUP_PAUSE_GRACE_MINUTES` | `5` | Minutes to keep recording after the last viewer leaves (for pause/resume); channel switches bypass this |
-| `TZ` | — | **Required.** Must match the timezone of your IPTV clients — TiviMate sends local time in timeshift URLs (e.g. `TZ=Europe/Amsterdam`) |
+
+**Upgrading:** if you set a time adjustment in your player (e.g. +1 or +2 in TiviMate) to make catchup line up, reset it to +0. StreamShare now handles the time zone for both the local buffer and provider catchup.
+
+Timeshift start times are read as UTC, matching the time zone the login reports, so `TZ` is not needed for catchup.
+
+Even with the buffer disabled, when catchup is proxied to the provider, the start time is converted to the zone the provider expects: `CATCHUP_PROVIDER_TIMEZONE` (an IANA name such as `Europe/Amsterdam`) if set, else the zone the provider reports at login, else the offset of the provider's clock, else UTC. The chosen zone and its source are logged. Set it when your provider reports a wrong zone and catchup lands at the wrong hour. The conversion assumes players fill in timeshift/catchup start times in UTC, which is what StreamShare's login reports; if a provider's catchup lands off by its UTC offset for M3U users, please report it.
 
 ---
 

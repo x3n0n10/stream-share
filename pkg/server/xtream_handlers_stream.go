@@ -147,12 +147,7 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 
 	// Proxy upstream if catchup is disabled or the channel has native upstream support.
 	if c.catchupManager == nil || !c.catchupManager.IsEnabled() || c.catchupManager.HasUpstreamCatchup(idRaw) {
-		rpURL, err := url.Parse(c.providerStreamURL("timeshift", duration, start, idRaw))
-		if err != nil {
-			_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
-			return
-		}
-		c.stream(ctx, rpURL)
+		c.proxyTimeshift(ctx, duration, start, idRaw)
 		return
 	}
 
@@ -164,19 +159,24 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 	}
 	utils.DebugLog("Catchup: timeshift start raw=%q parsed=%s (unix=%d)", start, startTime.Format(time.RFC3339), startTime.Unix())
 
+	buf := c.catchupManager.GetBuffer(idRaw)
+	if buf == nil {
+		// Some providers keep recordings for channels their list does not flag
+		// as archived; asking costs nothing when the alternative is a 404.
+		utils.DebugLog("Catchup: no buffer for %s (never watched or already cleaned up); asking the provider", c.streamLabel(idRaw))
+		c.proxyTimeshift(ctx, duration, start, idRaw)
+		return
+	}
+
 	// A client is actively reading the catchup buffer (e.g. resuming after a
 	// pause) — cancel any pending pause-grace stop so recording continues
 	// uninterrupted and there's no gap once the buffer catches up to live.
 	if c.sessionManager != nil {
 		c.sessionManager.NotifyCatchupActivity(idRaw)
 	}
-
-	buf := c.catchupManager.GetBuffer(idRaw)
-	if buf == nil {
-		utils.DebugLog("Catchup: no buffer for %s (never watched or already cleaned up)", c.streamLabel(idRaw))
-		ctx.AbortWithStatus(http.StatusNotFound)
-		return
-	}
+	// Reading the buffer of a channel learned to lack provider recordings keeps
+	// it learned, so its catchup does not bounce off the provider once a day.
+	c.catchupManager.MarkNoUpstreamArchive(idRaw)
 	utils.DebugLog("Catchup: buffer for %s started at %s (unix=%d), buffered=%d bytes", c.streamLabel(idRaw), buf.StartTime().Format(time.RFC3339), buf.StartTime().Unix(), buf.BytesBuffered())
 
 	// Set response headers before the first write so they reach the client.
@@ -207,16 +207,60 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 	c.stream(ctx, liveURL)
 }
 
+// proxyTimeshift streams the provider's own catchup recording, with the start
+// time converted to the provider's time zone.
+func (c *Config) proxyTimeshift(ctx *gin.Context, duration, start, idRaw string) {
+	rpURL, err := url.Parse(c.providerStreamURL("timeshift", duration, providerTimeshiftStart(start, c.providerLocation()), idRaw))
+	if err != nil {
+		_ = ctx.AbortWithError(http.StatusInternalServerError, utils.PrintErrorAndReturn(err))
+		return
+	}
+	c.stream(ctx, rpURL)
+	// A 404 for a time the provider should have means its archive flag is
+	// wrong for this channel: record it locally from now on.
+	if ctx.Writer.Status() == http.StatusNotFound && c.catchupManager != nil && insideProviderArchive(start) {
+		c.catchupManager.MarkNoUpstreamArchive(idRaw)
+	}
+}
+
+// insideProviderArchive tells whether a timeshift start is old enough for the
+// provider to have finished recording it and recent enough to still keep it.
+// shortcut: assumes every archive holds at least a day (the provider's per-channel
+// tv_archive_duration is not kept); use it if a provider keeps less.
+func insideProviderArchive(start string) bool {
+	t, err := parseTimeshiftStart(start)
+	age := time.Since(t)
+	return err == nil && age >= 10*time.Minute && age <= 24*time.Hour
+}
+
+// flushRest sends f from its position to EOF. It reports whether the client
+// took all of it.
+func flushRest(ctx *gin.Context, f *os.File, readBuf []byte) bool {
+	for {
+		n, err := f.Read(readBuf)
+		if n > 0 {
+			if _, werr := ctx.Writer.Write(readBuf[:n]); werr != nil {
+				return false
+			}
+			if flusher, ok := ctx.Writer.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			return err == io.EOF
+		}
+	}
+}
+
 // parseTimeshiftStart parses a timeshift start parameter.
-// TiviMate sends "YYYY-MM-DD:HH-MM" in local time; time.Local is used, which Go
-// initialises from the TZ environment variable at startup. Set TZ in the container
-// (e.g. TZ=Europe/Amsterdam) so that local timestamps are interpreted correctly.
-// Unix timestamp integers are also accepted and are always timezone-independent.
+// The Xtream login reports the server time zone as UTC, so players send
+// "YYYY-MM-DD:HH-MM" in UTC; it is read as UTC regardless of TZ.
+// Unix timestamp integers are also accepted.
 func parseTimeshiftStart(start string) (time.Time, error) {
 	if n, err := strconv.ParseInt(start, 10, 64); err == nil {
 		return time.Unix(n, 0), nil
 	}
-	return time.ParseInLocation("2006-01-02:15-04", start, time.Local)
+	return time.ParseInLocation(timeshiftLayout, start, time.UTC)
 }
 
 // alignToTSPacket seeks f to startOffset then scans forward (up to 3 packet-widths) for
@@ -257,7 +301,7 @@ func (c *Config) serveFromCatchupBuffer(ctx *gin.Context, buf *catchup.DiskBuffe
 		// "no more data to wait for" — the prev file is complete.
 		closedCh := make(chan struct{})
 		close(closedCh)
-		c.streamFileSegment(ctx, filePath, startOffset, closedCh)
+		c.streamFileSegment(ctx, filePath, startOffset, closedCh, nil)
 		if ctx.Request.Context().Err() != nil || ctx.IsAborted() {
 			return
 		}
@@ -266,13 +310,18 @@ func (c *Config) serveFromCatchupBuffer(ctx *gin.Context, buf *catchup.DiskBuffe
 		startOffset = 0
 	}
 
-	c.streamFileSegment(ctx, filePath, startOffset, buf.DrainDone())
+	// Tail the current file; when the buffer rotates, carry on in the new one.
+	for c.streamFileSegment(ctx, filePath, startOffset, buf.DrainDone(), buf.FilePath) {
+		filePath, startOffset = buf.FilePath(), 0
+	}
 }
 
 // streamFileSegment serves bytes from filePath starting at startOffset, flushing to the
 // client as they arrive. It blocks until drainDone closes (all data written), polling
-// every 200 ms when EOF is hit before that point.
-func (c *Config) streamFileSegment(ctx *gin.Context, filePath string, startOffset int64, drainDone <-chan struct{}) {
+// every 200 ms when EOF is hit before that point. With current set, it also stops at
+// EOF once the buffer has rotated away from filePath, and reports true: the caller
+// continues in the new file.
+func (c *Config) streamFileSegment(ctx *gin.Context, filePath string, startOffset int64, drainDone <-chan struct{}, current func() string) (rotated bool) {
 	f, err := os.Open(filePath)
 	if err != nil {
 		utils.ErrorLog("Catchup: failed to open buffer file %s: %v", filePath, err)
@@ -281,7 +330,11 @@ func (c *Config) streamFileSegment(ctx *gin.Context, filePath string, startOffse
 	}
 	defer func() { _ = f.Close() }()
 
-	alignToTSPacket(f, startOffset)
+	// Offset 0 continues the previous file byte for byte (a rotation can split a
+	// TS packet across files); only a seek into the middle needs aligning.
+	if startOffset > 0 {
+		alignToTSPacket(f, startOffset)
+	}
 
 	readBuf := make([]byte, 64*1024)
 	clientGone := ctx.Request.Context().Done()
@@ -303,6 +356,11 @@ func (c *Config) streamFileSegment(ctx *gin.Context, filePath string, startOffse
 			}
 		}
 		if rerr == io.EOF {
+			if current != nil && current() != filePath {
+				// The buffer moved on to a new file, so this one is complete:
+				// send what was written since the last read, then switch.
+				return flushRest(ctx, f, readBuf)
+			}
 			if !pollTimer.Stop() {
 				select {
 				case <-pollTimer.C:
@@ -314,21 +372,8 @@ func (c *Config) streamFileSegment(ctx *gin.Context, filePath string, startOffse
 			case <-drainDone:
 				// All writes are on disk. Flush any bytes written between our last
 				// read and drain completion, then exit.
-				drainDone = nil // nil channel blocks forever — prevent re-entry
-				for {
-					n2, err2 := f.Read(readBuf)
-					if n2 > 0 {
-						if _, werr := ctx.Writer.Write(readBuf[:n2]); werr != nil {
-							return
-						}
-						if flusher, ok := ctx.Writer.(http.Flusher); ok {
-							flusher.Flush()
-						}
-					}
-					if err2 != nil {
-						return
-					}
-				}
+				flushRest(ctx, f, readBuf)
+				return
 			case <-clientGone:
 				return
 			case <-pollTimer.C:

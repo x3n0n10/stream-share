@@ -136,3 +136,18 @@ func TestTimeshiftWithoutBufferAsksProvider(t *testing.T) {
 		t.Fatalf("provider saw %v", got)
 	}
 }
+
+// A buffer that starts after the requested time still serves the request:
+// channels without provider recordings keep their partial replay.
+func TestTimeshiftWithLateBufferStaysLocal(t *testing.T) {
+	front, seen := viewerRouteFixtureWith(t, "", func(c *Config) {
+		c.catchupManager = catchup.New(true, t.TempDir(), 3)
+		c.catchupManager.StartBuffer("42").Stop() // stopped: serving it ends at EOF
+	})
+	getStatus(t, front+"/timeshift/me/pw/60/2026-11-10:19-00/42.ts")
+	for _, p := range seen() {
+		if strings.HasPrefix(p, "/timeshift/") {
+			t.Fatalf("provider asked for catchup despite a local buffer: %v", seen())
+		}
+	}
+}

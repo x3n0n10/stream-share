@@ -330,7 +330,11 @@ func (c *Config) streamFileSegment(ctx *gin.Context, filePath string, startOffse
 	}
 	defer func() { _ = f.Close() }()
 
-	alignToTSPacket(f, startOffset)
+	// Offset 0 continues the previous file byte for byte (a rotation can split a
+	// TS packet across files); only a seek into the middle needs aligning.
+	if startOffset > 0 {
+		alignToTSPacket(f, startOffset)
+	}
 
 	readBuf := make([]byte, 64*1024)
 	clientGone := ctx.Request.Context().Done()

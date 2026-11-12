@@ -1107,9 +1107,8 @@ func (sm *SessionManager) ReleasePausedStream(id string) bool {
 	defer sm.streamLock.Unlock()
 	for streamID := range sm.pendingStops {
 		if strings.TrimSuffix(streamID, path.Ext(streamID)) == bare {
-			sm.cancelPendingStop(streamID)
 			utils.InfoLog("Catchup: closing paused %s to free the provider connection", sm.streamLabel(streamID))
-			sm.stopStream(streamID)
+			sm.stopStream(streamID) // also cancels the pending stop
 			return true
 		}
 	}

@@ -288,6 +288,7 @@ func (sm *SessionManager) CatchupSlateClip(streamID string, status int, err erro
 // PlayCatchupSlate repeats the clip to one catchup viewer until they leave
 // (ctx) or the slate retry budget runs out.
 func (sm *SessionManager) PlayCatchupSlate(ctx context.Context, w io.Writer, clipPath string) {
+	wrote := 0
 	write := func(chunk []byte) bool {
 		if _, err := w.Write(chunk); err != nil {
 			return false
@@ -295,10 +296,15 @@ func (sm *SessionManager) PlayCatchupSlate(ctx context.Context, w io.Writer, cli
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
+		wrote += len(chunk)
 		return true
 	}
 	deadline := time.Now().Add(sm.slateRetryMax)
-	for time.Now().Before(deadline) && playClip(ctx, nil, clipPath, write) {
+	for time.Now().Before(deadline) {
+		before := wrote
+		if !playClip(ctx, nil, clipPath, write) || wrote == before {
+			return // viewer gone, or an empty clip that would spin
+		}
 	}
 }
 

@@ -223,6 +223,18 @@ func (c *Config) proxyTimeshift(ctx *gin.Context, duration, start, idRaw string)
 		return
 	}
 	resp, err := c.openUpstream(ctx, rpURL)
+	if err == nil && catchupRetryWorth(resp.StatusCode) {
+		// Panels count a just-closed connection (the paused live stream, or the
+		// player's own live request) for a few seconds: ask once more.
+		_ = resp.Body.Close()
+		utils.DebugLog("Catchup: provider answered %d for %s; asking again in %s", resp.StatusCode, c.streamLabel(idRaw), catchupRetryDelay)
+		select {
+		case <-time.After(catchupRetryDelay):
+		case <-ctx.Request.Context().Done():
+			return
+		}
+		resp, err = c.openUpstream(ctx, rpURL)
+	}
 	status := 0
 	if err == nil {
 		defer func() { _ = resp.Body.Close() }()
@@ -237,7 +249,7 @@ func (c *Config) proxyTimeshift(ctx *gin.Context, duration, start, idRaw string)
 	if status == http.StatusNotFound && c.catchupManager != nil && insideProviderArchive(start) {
 		c.catchupManager.MarkNoUpstreamArchive(idRaw)
 	}
-	if c.serveCatchupSlate(ctx, idRaw, status, err) {
+	if c.serveCatchupSlate(ctx, idRaw, status, err, resp) {
 		return
 	}
 	if err != nil {
@@ -247,15 +259,29 @@ func (c *Config) proxyTimeshift(ctx *gin.Context, duration, start, idRaw string)
 	writeUpstreamResponse(ctx, resp, false)
 }
 
+// catchupRetryDelay is how long to wait before asking the provider again after
+// an answer that may only mean a connection was still counted.
+var catchupRetryDelay = 2 * time.Second
+
+// catchupRetryWorth tells whether a provider answer to a catchup request is
+// worth one more try: not a recording, and not a plain "no recording" (404).
+func catchupRetryWorth(status int) bool {
+	return status != http.StatusOK && status != http.StatusPartialContent && status != http.StatusNotFound
+}
+
 // serveCatchupSlate shows the viewer a slate for a catchup request the provider
-// could not serve. It reports false when slates are unavailable.
-func (c *Config) serveCatchupSlate(ctx *gin.Context, idRaw string, status int, err error) bool {
+// could not serve, closing the provider's answer (resp, nil on a transport
+// failure) first. It reports false when slates are unavailable.
+func (c *Config) serveCatchupSlate(ctx *gin.Context, idRaw string, status int, err error, resp *http.Response) bool {
 	if c.sessionManager == nil {
 		return false
 	}
 	clip, ok := c.sessionManager.CatchupSlateClip(idRaw, status, err)
 	if !ok {
 		return false
+	}
+	if resp != nil {
+		_ = resp.Body.Close() // don't hold a provider socket for the slate's minutes
 	}
 	utils.InfoLog("Catchup: provider could not serve %s (status %d, err %v); showing a slate", c.streamLabel(idRaw), status, err)
 	ctx.Header("Content-Type", "video/mp2t")
@@ -269,7 +295,7 @@ func (c *Config) serveCatchupSlate(ctx *gin.Context, idRaw string, status int, e
 // minutes, so a start counts as covered when any of its minute is buffered: a
 // pause right after tuning in must resume locally.
 func bufferCovers(buf *catchup.DiskBuffer, start time.Time) bool {
-	return start.Add(time.Minute).After(buf.OldestTime())
+	return start.Truncate(time.Minute).Add(time.Minute).After(buf.OldestTime())
 }
 
 // insideProviderArchive tells whether a timeshift start is old enough for the

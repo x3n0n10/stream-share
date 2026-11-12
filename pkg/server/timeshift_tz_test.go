@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -165,36 +166,46 @@ func (s catchupSlate) Available() bool                 { return true }
 func (s catchupSlate) Clip(slate.View) (string, error) { return s.path, nil }
 
 // A time before the local buffer goes to the provider: its recording plays when
-// it has one, its 404 becomes the "no recording" slate, and without slates the
+// it has one, its 404 becomes the "no recording" slate, other answers are asked
+// once more (a just-closed connection may still count), and without slates the
 // player gets the 404 as before.
 func TestTimeshiftBeforeBuffer(t *testing.T) {
 	clip := filepath.Join(t.TempDir(), "slate.ts")
 	if err := os.WriteFile(clip, []byte("SLATE"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	defer func(d time.Duration) { catchupRetryDelay = d }(catchupRetryDelay)
+	catchupRetryDelay = 10 * time.Millisecond
 	for _, tc := range []struct {
 		name       string
-		provider   int
+		provider   []int // answers in order; the last one repeats
 		slates     bool
 		wantStatus int
 		wantBody   string
+		wantAsked  int
 	}{
-		{"provider has it", 200, true, 200, "x"},
-		{"provider has nothing", 404, true, 200, "SLATE"},
-		{"provider has nothing, slates off", 404, false, 404, ""},
+		{"provider has it", []int{200}, true, 200, "x", 1},
+		{"provider has nothing", []int{404}, true, 200, "SLATE", 1},
+		{"provider has nothing, slates off", []int{404}, false, 404, "", 1},
+		{"connection limit", []int{456}, true, 200, "SLATE", 2},
+		{"connection freed on the second try", []int{456, 200}, true, 200, "x", 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
 			var asked []string
 			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
 				asked = append(asked, r.URL.Path)
-				w.WriteHeader(tc.provider)
+				status := tc.provider[min(len(asked), len(tc.provider))-1]
+				mu.Unlock()
+				w.WriteHeader(status)
 				_, _ = w.Write([]byte("x"))
 			}))
 			defer up.Close()
 			front, _ := viewerRouteFixtureWith(t, "", func(c *Config) {
 				c.XtreamBaseURL = up.URL
 				c.catchupManager = catchup.New(true, t.TempDir(), 3)
-				c.catchupManager.StartBuffer("42") // started now: yesterday is before it
+				c.catchupManager.StartBuffer("42") // started now: 20 hours ago is before it
 				if tc.slates {
 					c.sessionManager.SetErrorCatalog(session.LoadCatalog(""))
 					c.sessionManager.SetSlateProvider(catchupSlate{clip})
@@ -210,10 +221,35 @@ func TestTimeshiftBeforeBuffer(t *testing.T) {
 			if resp.StatusCode != tc.wantStatus || !strings.HasPrefix(string(body), tc.wantBody) {
 				t.Fatalf("got %d %q, want %d %q", resp.StatusCode, body, tc.wantStatus, tc.wantBody)
 			}
-			if len(asked) != 1 || !strings.HasPrefix(asked[0], "/timeshift/") {
-				t.Fatalf("provider asked %v", asked)
+			mu.Lock()
+			defer mu.Unlock()
+			if len(asked) != tc.wantAsked || !strings.HasPrefix(asked[0], "/timeshift/") {
+				t.Fatalf("provider asked %v, want %d timeshift request(s)", asked, tc.wantAsked)
 			}
 		})
+	}
+}
+
+// A start counts as covered when any of its minute is buffered, also for
+// second-precision (unix) starts.
+func TestBufferCoversWholeMinutes(t *testing.T) {
+	oldest := time.Date(2026, 11, 12, 20, 0, 40, 0, time.UTC)
+	buf, err := catchup.NewDiskBuffer(t.TempDir(), "7", oldest, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer buf.Stop()
+	for start, want := range map[string]bool{
+		"20:00:00": true,  // its minute reaches into the buffer
+		"20:00:59": true,  // inside the buffer
+		"19:59:00": false, // whole minute before the buffer
+		"19:59:50": false, // unix start in that same minute
+	} {
+		at, _ := time.Parse("15:04:05", start)
+		ts := time.Date(2026, 11, 12, at.Hour(), at.Minute(), at.Second(), 0, time.UTC)
+		if got := bufferCovers(buf, ts); got != want {
+			t.Errorf("start %s: covered = %v, want %v", start, got, want)
+		}
 	}
 }
 

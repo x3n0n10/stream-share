@@ -213,6 +213,21 @@ func (c *Config) proxyTimeshift(ctx *gin.Context, duration, start, idRaw string)
 		return
 	}
 	c.stream(ctx, rpURL)
+	// A 404 for a time the provider should have means its archive flag is
+	// wrong for this channel: record it locally from now on.
+	if ctx.Writer.Status() == http.StatusNotFound && c.catchupManager != nil && insideProviderArchive(start) {
+		c.catchupManager.MarkNoUpstreamArchive(idRaw)
+	}
+}
+
+// insideProviderArchive tells whether a timeshift start is old enough for the
+// provider to have finished recording it and recent enough to still keep it.
+// shortcut: assumes every archive holds at least a day (the provider's per-channel
+// tv_archive_duration is not kept); use it if a provider keeps less.
+func insideProviderArchive(start string) bool {
+	t, err := parseTimeshiftStart(start)
+	age := time.Since(t)
+	return err == nil && age >= 10*time.Minute && age <= 24*time.Hour
 }
 
 // parseTimeshiftStart parses a timeshift start parameter.

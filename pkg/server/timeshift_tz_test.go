@@ -151,3 +151,38 @@ func TestTimeshiftWithLateBufferStaysLocal(t *testing.T) {
 		}
 	}
 }
+
+// A provider 404 for a time well inside its archive means the channel list's
+// archive flag is wrong for that channel; a 404 for a time it may simply not
+// have (too recent, too old) teaches nothing.
+func TestProviderArchiveMissLearned(t *testing.T) {
+	notFound := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer notFound.Close()
+	for _, tc := range []struct {
+		name   string
+		age    time.Duration
+		learns bool
+	}{
+		{"an hour ago", time.Hour, true},
+		{"two minutes ago", 2 * time.Minute, false},
+		{"three days ago", 72 * time.Hour, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cm := catchup.New(true, t.TempDir(), 3)
+			cm.SetUpstreamCatchup(map[string]bool{"42": true})
+			front, _ := viewerRouteFixtureWith(t, "", func(c *Config) {
+				c.catchupManager = cm
+				c.XtreamBaseURL = notFound.URL
+			})
+			start := time.Now().UTC().Add(-tc.age).Format(timeshiftLayout)
+			if s := getStatus(t, front+"/timeshift/me/pw/60/"+start+"/42.ts"); s != 404 {
+				t.Fatalf("status %d, want the provider's 404", s)
+			}
+			if learned := !cm.HasUpstreamCatchup("42"); learned != tc.learns {
+				t.Fatalf("learned = %v, want %v", learned, tc.learns)
+			}
+		})
+	}
+}

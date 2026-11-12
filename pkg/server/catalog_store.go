@@ -20,7 +20,6 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"slices"
@@ -242,13 +241,7 @@ func (c *Config) catchupFlagged(m map[string]interface{}, upstream map[string]bo
 	}
 	streamID := fmt.Sprintf("%v", out["stream_id"])
 	if v, exists := out["tv_archive"]; exists {
-		switch vv := v.(type) {
-		case json.Number:
-			n, _ := vv.Int64()
-			upstream[streamID] = n == 1
-		case float64:
-			upstream[streamID] = vv == 1
-		}
+		upstream[streamID] = catalogFlag(v)
 	}
 	out["tv_archive"] = 1
 	out["tv_archive_duration"] = c.catchupManager.AdvertisedHours()

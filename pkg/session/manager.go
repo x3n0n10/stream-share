@@ -85,6 +85,9 @@ type SessionManager struct {
 	failoverTargets     func(streamID string) []FailoverTarget
 	failoverOwnTimeout  time.Duration
 	failoverPeerTimeout time.Duration
+	// limitRetryWait is the pause before the own provider is asked again
+	// after a connection limit answer, inside failoverOwnTimeout (see dialOwn).
+	limitRetryWait time.Duration
 
 	// pauseGrace controls how long a catchup-enabled live stream keeps its
 	// upstream connection (and disk recording) alive after its last viewer
@@ -287,6 +290,7 @@ func NewSessionManager(db *database.DBManager) *SessionManager {
 		slotWait:            1 * time.Second,
 		failoverOwnTimeout:  3 * time.Second,
 		failoverPeerTimeout: 3 * time.Second,
+		limitRetryWait:      1500 * time.Millisecond,
 		pendingStops:        make(map[string]chan struct{}),
 		vodViewTimers:       make(map[string]*time.Timer),
 		vodHistoryIDs:       make(map[string]int64),

@@ -108,6 +108,32 @@ func (sm *SessionManager) acquirePolite(ctx context.Context, buffer *StreamBuffe
 	return lease, nil
 }
 
+// dialOwn dials the own provider within budget (0: no limit). A connection
+// limit answer gets one more try after limitRetryWait, still within budget: a
+// panel can keep counting the connection just closed (a channel switch, a VOD
+// that stopped) for a moment, and a fallback should not get the channel for it.
+func (sm *SessionManager) dialOwn(ctx context.Context, budget time.Duration, u *url.URL) (*http.Response, *UpstreamError) {
+	start := time.Now()
+	resp, uerr := sm.dialWithin(ctx, budget, u, nil)
+	if uerr == nil || (uerr.StatusCode != 456 && uerr.StatusCode != 461) {
+		return resp, uerr
+	}
+	var left time.Duration
+	if budget > 0 {
+		if left = budget - time.Since(start) - sm.limitRetryWait; left <= 0 {
+			return nil, uerr
+		}
+	}
+	t := time.NewTimer(sm.limitRetryWait)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+		return nil, uerr
+	}
+	return sm.dialWithin(ctx, left, u, nil)
+}
+
 // FailoverTarget is a fallback instance asked to serve a live channel this
 // instance cannot start on its own provider.
 type FailoverTarget struct {
@@ -143,7 +169,7 @@ func (sm *SessionManager) failoverAttempt(ctx context.Context, buffer *StreamBuf
 		// Watch from the grant: a preemption during the dial (unbounded on a
 		// slate retry) stops the stream, which cancels the dial.
 		stopWatch := sm.watchPreemption(ctx, buffer, lease)
-		resp, uerr := sm.dialWithin(ctx, ownTimeout, upstreamURL, nil)
+		resp, uerr := sm.dialOwn(ctx, ownTimeout, upstreamURL)
 		if uerr == nil {
 			return resp, lease, nil
 		}

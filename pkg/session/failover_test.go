@@ -470,6 +470,7 @@ func failoverRig(t *testing.T, fake *fakeSlate, targets ...FailoverTarget) (*Ses
 	}
 	sm.failoverOwnTimeout = 300 * time.Millisecond
 	sm.failoverPeerTimeout = 300 * time.Millisecond
+	sm.limitRetryWait = 100 * time.Millisecond
 	if targets != nil {
 		sm.SetFailoverTargets(func(string) []FailoverTarget { return targets })
 	}
@@ -578,6 +579,70 @@ func TestFailoverOnOwnUpstreamError(t *testing.T) {
 	if !slots.WouldGrant(provider.Foreground) {
 		t.Fatal("a stream served by a fallback must not hold the own slot")
 	}
+}
+
+// A provider panel can still count the connection a channel switch just
+// closed: a connection limit answer is asked again once, inside the own
+// budget, before a fallback gets the channel.
+func TestOwnConnectionLimitRetriedBeforeFallback(t *testing.T) {
+	newOwn := func() (*httptest.Server, *atomic.Int32) {
+		var n atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if n.Add(1) == 1 {
+				w.WriteHeader(456)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			fl, _ := w.(http.Flusher)
+			for r.Context().Err() == nil {
+				if _, err := w.Write(bytes.Repeat([]byte{'O'}, 4096)); err != nil {
+					return
+				}
+				fl.Flush()
+				time.Sleep(2 * time.Millisecond)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		return srv, &n
+	}
+
+	t.Run("own provider frees up", func(t *testing.T) {
+		own, ownHits := newOwn()
+		spare := newFakeUpstream(t, 'F', 0)
+		sm, _ := failoverRig(t, nil, target(t, "Spare", spare.URL))
+
+		buffer, bob := watch(t, sm, "bob", "ch2", "live", own.URL)
+		if uerr := waitReady(t, buffer); uerr != nil {
+			t.Fatalf("StartError = %+v, want served by the own provider", uerr)
+		}
+		if !served(sm, "ch2", bob, 'O', 3*time.Second) {
+			t.Fatal("bob should receive the own provider's bytes")
+		}
+		if got := ownHits.Load(); got != 2 {
+			t.Fatalf("own provider asked %d times, want 2", got)
+		}
+		if got := spare.requests.Load(); got != 0 {
+			t.Fatalf("fallback got %d requests, want 0", got)
+		}
+	})
+
+	t.Run("no budget left for a retry", func(t *testing.T) {
+		own, ownHits := newOwn()
+		spare := newFakeUpstream(t, 'F', 0)
+		sm, _ := failoverRig(t, nil, target(t, "Spare", spare.URL))
+		sm.limitRetryWait = 400 * time.Millisecond // more than the 300 ms own budget
+
+		buffer, bob := watch(t, sm, "bob", "ch2", "live", own.URL)
+		if uerr := waitReady(t, buffer); uerr != nil {
+			t.Fatalf("StartError = %+v, want served via the fallback", uerr)
+		}
+		if !served(sm, "ch2", bob, 'F', 3*time.Second) {
+			t.Fatal("bob should receive the fallback's bytes")
+		}
+		if got := ownHits.Load(); got != 1 {
+			t.Fatalf("own provider asked %d times, want 1", got)
+		}
+	})
 }
 
 // lockedBuffer is a log sink safe to read while pumps write to it.
@@ -847,7 +912,7 @@ func TestSlateRetryOwnDialYieldsToPreemption(t *testing.T) {
 	var ownRequests atomic.Int64
 	own := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if ownRequests.Add(1) == 1 {
-			w.WriteHeader(456)
+			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
 		select {

@@ -29,10 +29,10 @@ import (
 // getVersion GET /api/internal/version — the release this instance is running,
 // so a dashboard managing several instances can show it without having to
 // inspect the container image. A build made without a stamped version reports
-// "dev".
+// "dev". "failover" tells the dashboard this build can be a fallback target.
 func (c *Config) getVersion(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, types.APIResponse{
 		Success: true,
-		Data:    map[string]interface{}{"version": version.Version},
+		Data:    map[string]interface{}{"version": version.Version, "failover": true},
 	})
 }

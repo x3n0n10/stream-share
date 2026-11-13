@@ -647,6 +647,7 @@ The file is a single object mapping an error key to the text for that error:
 | `DNS` | The provider's hostname could not be resolved |
 | `TLS` | The provider's certificate could not be verified |
 | `NO_RECORDING` | Catchup for a time neither the local buffer nor the provider has a recording of |
+| `IN_USE` | The provider is in use by this instance's own household and the channel could not be started elsewhere |
 
 **The fields** are both optional, and each falls back independently — so overriding one does not blank the other:
 
@@ -664,6 +665,21 @@ Notes:
 - Long messages wrap to two lines and are then truncated — aim for something short enough to read at a glance from the sofa.
 
 ---
+
+## Failover between instances
+
+When a live channel cannot start on this instance's provider (connection limit, error, timeout), it can ask other StreamShare instances, in order, to lend the same channel from their provider connection. The first one that answers with a stream serves the viewer; if none does, the viewer gets the same slate or error as without failover.
+
+- Live channels only, and only at channel start. Catchup, movies and series, and switching mid-stream behave as before.
+- Channels are matched by EPG ID, then by name.
+- Set on the instance that asks (the primary): `FAILOVER_INSTANCES`, an ordered JSON list such as `[{"name":"Spare","url":"http://spare.example.test:8080","key":"test-key"}]`. Set on the instance that lends: `FAILOVER_KEY`, the same key. An instance without `FAILOVER_KEY` never lends. If `FAILOVER_INSTANCES` is not valid JSON, or an entry lacks a field or has a non-http(s) URL, failover stays off and a warning is logged.
+- The Suite sets both variables for you.
+
+Limits:
+- The same viewer asking again gets today's channel switch, not a second connection.
+- A lent stream is cut when the lender's own household starts watching and needs the connection.
+- A provider that takes longer than 3 s to answer is treated as failed and the next instance is tried.
+- Each additional fallback can add up to 3 s to a channel start, so with two or more fallbacks a channel may run past the player's start window when earlier fallbacks hang.
 
 ## Container Health & Startup Ordering
 

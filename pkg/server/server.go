@@ -107,6 +107,9 @@ type Config struct {
 	// shares holds the live share links (see live_shares.go).
 	shares *shareStore
 
+	// failoverPeers are the fallback instances in order, prepared at startup.
+	failoverPeers []failoverPeer
+
 	// catalogFilter is the compiled catalogue filter; nil keeps everything, and
 	// every filtering path checks for nil first so it costs nothing when unset.
 	catalogFilter *filter.Set
@@ -161,6 +164,7 @@ func NewServer(config *config.ProxyConfig) (*Config, error) {
 	if err := serverConfig.setupDatabaseAndSessions(); err != nil {
 		return nil, err
 	}
+	serverConfig.setupFailover()
 	serverConfig.setupCatchup()
 	if v := strings.TrimSpace(config.CatchupProviderTimezone); v != "" {
 		if loc, _ := serverConfig.tz.zone(v); loc == nil {

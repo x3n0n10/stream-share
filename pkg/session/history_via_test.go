@@ -21,6 +21,7 @@
 package session
 
 import (
+	"fmt"
 	"net/url"
 	"os"
 	"testing"
@@ -91,43 +92,57 @@ func waitHistoryRow(t *testing.T, sm *SessionManager, user, streamID string) {
 }
 
 // Both orders of the race between the history insert and the pump naming the
-// fallback end with the row carrying it.
+// fallback end with the row carrying it. Names are unique per run, so no row
+// of an earlier run can satisfy a check.
 func TestHistoryViaBothOrders(t *testing.T) {
 	db := viaTestDB(t)
+	run := fmt.Sprint(time.Now().UnixNano())
 
 	t.Run("insert first, pump second", func(t *testing.T) {
 		sm := newTestManager()
 		defer sm.Stop()
 		sm.db = db
-		sm.recordLiveHistory("via-a", "via-ch-a", "live", "T", "", "")
-		waitHistoryRow(t, sm, "via-a", "via-ch-a")
-		historyVia(t, db, "via-a", "")
-		sm.recordHistoryVia("via-ch-a", "Spare") // what the pump calls
-		historyVia(t, db, "via-a", "Spare")
+		user, ch := "via-a"+run, "via-ch-a"+run
+		sm.recordLiveHistory(user, ch, "live", "T", "", "")
+		waitHistoryRow(t, sm, user, ch)
+		historyVia(t, db, user, "")
+		sm.recordHistoryVia(ch, "Spare")
+		historyVia(t, db, user, "Spare")
 	})
 
 	t.Run("via set before the insert", func(t *testing.T) {
 		sm := newTestManager()
 		defer sm.Stop()
 		sm.db = db
-		ss := &types.StreamSession{StreamID: "via-ch-b", StreamType: "live", Viewers: map[string]time.Time{}}
+		user, ch := "via-b"+run, "via-ch-b"+run
+		ss := &types.StreamSession{StreamID: ch, StreamType: "live", Viewers: map[string]time.Time{}}
 		ss.SetVia("Spare")
 		sm.streamLock.Lock()
-		sm.streamSessions["via-ch-b"] = ss
+		sm.streamSessions[ch] = ss
 		sm.streamLock.Unlock()
-		sm.recordLiveHistory("via-b", "via-ch-b", "live", "T", "", "")
-		historyVia(t, db, "via-b", "Spare")
+		sm.recordLiveHistory(user, ch, "live", "T", "", "")
+		waitHistoryRow(t, sm, user, ch)
+		historyVia(t, db, user, "Spare")
 	})
 
-	t.Run("real pump", func(t *testing.T) {
+	// The pump's own UPDATE must fill a row that already exists: another
+	// viewer's open row is inserted first, so the insert-side hook (which
+	// only covers the watcher's own row) cannot be what fills it.
+	t.Run("real pump fills an existing row", func(t *testing.T) {
 		own := newFakeUpstream(t, 'O', 456)
 		spare := newFakeUpstream(t, 'F', 0)
 		sm, _ := failoverRig(t, nil, target(t, "Spare", spare.URL))
 		sm.db = db
-		buffer, _ := watch(t, sm, "via-c", "via-ch-c", "live", own.URL)
+		pre, ch := "via-pre"+run, "via-ch-c"+run
+		if _, err := db.AddStreamHistory(pre, ch, "live", "T", "", ""); err != nil {
+			t.Fatal(err)
+		}
+		buffer, _ := watch(t, sm, "via-c"+run, ch, "live", own.URL)
 		if uerr := waitReady(t, buffer); uerr != nil {
 			t.Fatalf("StartError = %+v", uerr)
 		}
-		historyVia(t, db, "via-c", "Spare")
+		historyVia(t, db, pre, "Spare")
+		waitHistoryRow(t, sm, "via-c"+run, ch)
+		historyVia(t, db, "via-c"+run, "Spare")
 	})
 }

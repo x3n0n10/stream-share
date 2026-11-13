@@ -64,6 +64,11 @@ func (m *DBManager) initSchema() error {
 		return fmt.Errorf("failed to create stream_history table: %w", err)
 	}
 
+	// Migration: the fallback instance that served a live view ("" = own provider).
+	if _, err := m.db.Exec(`ALTER TABLE stream_history ADD COLUMN IF NOT EXISTS via TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("failed to add via to stream_history: %w", err)
+	}
+
 	if _, err := m.db.Exec(`
         CREATE TABLE IF NOT EXISTS temporary_links (
             token TEXT PRIMARY KEY,

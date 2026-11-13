@@ -276,6 +276,16 @@ func (sm *SessionManager) recordLiveHistory(username, streamID, streamType, titl
 		if v, ok := sm.liveHistoryIDs[key]; ok && v == 0 {
 			sm.liveHistoryIDs[key] = id
 			sm.liveHistoryMu.Unlock()
+			// A viewer joining later (or an insert racing the pump) missed the
+			// pump's own update.
+			sm.streamLock.RLock()
+			ss := sm.streamSessions[streamID]
+			sm.streamLock.RUnlock()
+			if ss != nil {
+				if via := ss.GetVia(); via != "" {
+					sm.recordHistoryVia(streamID, via)
+				}
+			}
 			return
 		}
 		// The viewer already left before the insert completed (slot was deleted):
@@ -283,6 +293,19 @@ func (sm *SessionManager) recordLiveHistory(username, streamID, streamType, titl
 		sm.liveHistoryMu.Unlock()
 		if err := sm.db.CloseStreamHistory(id); err != nil {
 			utils.WarnLog("Failed to close orphaned live stream history %d: %v", id, err)
+		}
+	}()
+}
+
+// recordHistoryVia stores the serving fallback on the stream's open history
+// rows, off the caller's goroutine (the pump must not wait on the database).
+func (sm *SessionManager) recordHistoryVia(streamID, via string) {
+	if sm.db == nil {
+		return
+	}
+	go func() {
+		if err := sm.db.SetStreamHistoryVia(streamID, via); err != nil {
+			utils.WarnLog("Failed to record failover instance in stream history: %v", err)
 		}
 	}()
 }

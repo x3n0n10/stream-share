@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/lucasduport/stream-share/pkg/provider"
+	"github.com/lucasduport/stream-share/pkg/utils"
 )
 
 // FailoverIdentityPrefix starts the internal username of a viewer another
@@ -104,4 +105,68 @@ func (sm *SessionManager) acquirePolite(ctx context.Context, buffer *StreamBuffe
 		return nil, &UpstreamError{Key: KeyAllInUse}
 	}
 	return lease, nil
+}
+
+// FailoverTarget is a fallback instance asked to serve a live channel this
+// instance cannot start on its own provider.
+type FailoverTarget struct {
+	Name   string // display name, the only way logs refer to it
+	URL    *url.URL
+	Header http.Header
+}
+
+// SetFailoverTargets sets the fallback instances for a live stream, in order;
+// fn gets the stream key and must do no I/O. nil disables failover.
+func (sm *SessionManager) SetFailoverTargets(fn func(streamID string) []FailoverTarget) {
+	sm.failoverTargets = fn
+}
+
+// failoverReason describes a failed dial for logs without uerr.Err, which
+// names the address dialled: "<code> <meaning>" or the meaning alone.
+func (sm *SessionManager) failoverReason(uerr *UpstreamError) string {
+	code, meaning, _ := sm.errorCatalog.Lookup(uerr)
+	if r := strings.TrimSpace(code + " " + strings.ToLower(meaning)); r != "" {
+		return r
+	}
+	return strings.ToLower(uerr.Key)
+}
+
+// failoverAttempt is one start of a failover stream: the own provider when it
+// grants a slot politely and answers within ownTimeout (0: no limit), else
+// each fallback in order. It returns the own lease when the own provider
+// serves. When all fail, the error is the own provider's: the slate shows it.
+func (sm *SessionManager) failoverAttempt(ctx context.Context, buffer *StreamBuffer, upstreamURL *url.URL, ownTimeout time.Duration) (*http.Response, *provider.Lease, *UpstreamError) {
+	lease, ownErr := sm.acquirePolite(ctx, buffer)
+	if ownErr == nil {
+		buffer.ownSlot.Store(true)
+		resp, uerr := sm.dialWithin(ctx, ownTimeout, upstreamURL, nil)
+		if uerr == nil {
+			sm.watchPreemption(ctx, buffer, lease)
+			return resp, lease, nil
+		}
+		// A failed or slating stream holds no slot.
+		buffer.ownSlot.Store(false)
+		lease.Release()
+		ownErr = uerr
+	}
+	label := sm.streamLabel(buffer.streamID)
+	for _, target := range sm.failoverTargets(buffer.streamID) {
+		if sm.stopRequested(ctx, buffer) {
+			break
+		}
+		resp, err := sm.dialWithin(ctx, sm.failoverPeerTimeout, target.URL, target.Header)
+		if err != nil {
+			utils.WarnLog("Failover: %s not served by %s (%s)", label, target.Name, sm.failoverReason(err))
+			continue
+		}
+		sm.streamLock.RLock()
+		ss := sm.streamSessions[buffer.streamID]
+		sm.streamLock.RUnlock()
+		if ss != nil {
+			ss.SetVia(target.Name)
+		}
+		utils.InfoLog("Failover: %s served via %s (own provider: %s)", label, target.Name, sm.failoverReason(ownErr))
+		return resp, nil, nil
+	}
+	return nil, nil, ownErr
 }

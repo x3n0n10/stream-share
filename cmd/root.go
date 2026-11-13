@@ -139,6 +139,7 @@ It supports:
 			// Reverse proxy / public URL
 			ReverseProxyEnabled: viper.GetBool("reverse-proxy-enabled"),
 			PublicBaseURL:       viper.GetString("public-base-url"),
+			FailoverKey:         viper.GetString("failover-key"),
 
 			// VOD caching
 			VODCacheEnabled:    viper.GetBool("vod-cache-enabled"),
@@ -286,6 +287,8 @@ func init() {
 	// Reverse proxy / public URL configuration
 	rootCmd.Flags().Bool("reverse-proxy-enabled", false, "Behind a reverse proxy: drop the port in generated public URLs")
 	rootCmd.Flags().String("public-base-url", "", "Public base URL used for generated download links (e.g. https://example.com)")
+
+	rootCmd.Flags().String("failover-key", "", "Key other StreamShare instances present to borrow a provider connection for a live channel; empty = this instance never lends")
 
 	// VOD caching configuration
 	rootCmd.Flags().Bool("vod-cache-enabled", false, "Enable local caching of VOD/series streams")

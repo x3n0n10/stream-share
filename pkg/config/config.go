@@ -102,6 +102,10 @@ type ProxyConfig struct {
 	ReverseProxyEnabled bool
 	PublicBaseURL       string
 
+	// FailoverKey is the key other StreamShare instances present to borrow a
+	// provider connection for a live channel; empty = this instance never lends.
+	FailoverKey string
+
 	// VOD caching configuration
 	VODCacheEnabled    bool
 	VODCacheStaleHours int

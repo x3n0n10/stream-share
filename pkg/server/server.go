@@ -114,7 +114,7 @@ type Config struct {
 
 // NewServer initializes a new server configuration with all necessary components.
 func NewServer(config *config.ProxyConfig) (*Config, error) {
-	utils.RegisterSecrets(config.XtreamUser.String(), config.XtreamPassword.String(), config.User.String(), config.Password.String())
+	utils.RegisterSecrets(config.XtreamUser.String(), config.XtreamPassword.String(), config.User.String(), config.Password.String(), config.FailoverKey)
 	config.CatalogStorage = parseCatalogStorage(config.CatalogStorage)
 	applyCatalogMemoryLimit(config.CatalogStorage)
 
@@ -575,6 +575,9 @@ func (c *Config) newRouter() (*gin.Engine, error) {
 	// Live share links: the token is the credential (see live_shares.go).
 	router.GET("/share/:token", c.handleSharePlaylist)
 	router.GET("/share/:token/live.ts", c.handleShareStream)
+	if c.FailoverKey != "" {
+		router.GET("/api/failover/live", c.handleFailoverLive)
+	}
 
 	// Container readiness endpoint for the Docker HEALTHCHECK. Reports whether
 	// THIS service has finished starting (see the ready flag set in Serve), never

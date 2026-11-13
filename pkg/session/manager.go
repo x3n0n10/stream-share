@@ -75,6 +75,9 @@ type SessionManager struct {
 	providerSlots *provider.Arbiter
 	errorCatalog  *Catalog
 	slateRetryMax time.Duration
+	// slotWait bounds how long a lent stream waits for a slot held by a
+	// guest that is leaving (see acquirePolite).
+	slotWait time.Duration
 
 	// pauseGrace controls how long a catchup-enabled live stream keeps its
 	// upstream connection (and disk recording) alive after its last viewer
@@ -181,6 +184,12 @@ type StreamBuffer struct {
 	startErrMu sync.Mutex
 	startErr   *UpstreamError
 	slateOK    bool
+
+	// forwarded marks a stream lent to another instance (created by a
+	// failover identity): it never slates and asks politely for its slot.
+	forwarded bool
+	// slating is true while the pump serves the error slate.
+	slating atomic.Bool
 }
 
 // markReady records the upstream outcome and releases anyone waiting on Ready.
@@ -260,6 +269,7 @@ func NewSessionManager(db *database.DBManager) *SessionManager {
 		tempLinkTimeout:    24 * time.Hour,
 		vodCacheStaleAge:   24 * time.Hour,
 		clientStallTimeout: defaultClientStallTimeout,
+		slotWait:           1 * time.Second,
 		pendingStops:       make(map[string]chan struct{}),
 		vodViewTimers:      make(map[string]*time.Timer),
 		vodHistoryIDs:      make(map[string]int64),
@@ -631,7 +641,8 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		clients:     map[string]*streamClient{client.key: client},
 		stopChan:    make(chan struct{}),
 		ready:       make(chan struct{}),
-		slateOK:     slateEligible(streamType),
+		slateOK:     slateEligible(streamType) && !IsFailoverIdentity(username),
+		forwarded:   IsFailoverIdentity(username),
 	}
 
 	// Start a local disk buffer for live streams when catchup is enabled, unless
@@ -685,14 +696,14 @@ func IsShareIdentity(username string) bool {
 }
 
 // audienceClass is the provider-slot priority of this stream: Foreground while
-// any household client watches, Share while only share-link clients do,
-// Background when nobody does.
+// any household client watches, Share while only guests (share-link or
+// forwarded clients) do, Background when nobody does.
 func (b *StreamBuffer) audienceClass() provider.Class {
 	b.clientsLock.RLock()
 	defer b.clientsLock.RUnlock()
 	class := provider.Background
 	for _, cl := range b.clients {
-		if !IsShareIdentity(cl.user) {
+		if !IsShareIdentity(cl.user) && !IsFailoverIdentity(cl.user) {
 			return provider.Foreground
 		}
 		class = provider.Share
@@ -788,10 +799,22 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 	// the provider's only connection is paused to make room. If the slot is
 	// taken back for another watched stream (the provider cannot serve both),
 	// this stream stops; its players reconnect if they still want it.
-	lease, slotErr := sm.providerSlots.AcquireClass(ctx, "live "+sm.streamLabel(buffer.streamID),
-		func() provider.Class { return buffer.audienceClass() }, provider.Fresh)
+	// A lent stream never takes a slot from a same-class holder (see
+	// acquirePolite).
+	var lease *provider.Lease
+	var slotErr *UpstreamError
+	if buffer.forwarded {
+		lease, slotErr = sm.acquirePolite(ctx, buffer)
+	} else {
+		var err error
+		lease, err = sm.providerSlots.AcquireClass(ctx, "live "+sm.streamLabel(buffer.streamID),
+			func() provider.Class { return buffer.audienceClass() }, provider.Fresh)
+		if err != nil {
+			slotErr = classifyUpstream(err, 0)
+		}
+	}
 	if slotErr != nil {
-		buffer.markReady(classifyUpstream(slotErr, 0))
+		buffer.markReady(slotErr)
 		sm.stopStreamLocking(buffer.streamID)
 		return
 	}
@@ -812,6 +835,10 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 	// some providers return 206 unconditionally.
 	resp, uerr := sm.dialUpstream(ctx, upstreamURL)
 
+	// Raise slating before Ready so whoever wakes on Ready already sees it.
+	slating := uerr != nil && sm.slateEnabled(buffer)
+	buffer.slating.Store(slating)
+
 	// Release the HTTP handler waiting to learn whether this stream came up, so
 	// it can choose a response before committing to a 200.
 	buffer.markReady(uerr)
@@ -819,13 +846,15 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 	if uerr != nil {
 		utils.ErrorLog("Upstream failed for %s: %s", sm.streamLabel(buffer.streamID), uerr.Error())
 
-		if !sm.slateEnabled(buffer) {
+		if !slating {
 			sm.stopStreamLocking(buffer.streamID)
 			return
 		}
 		// Show the viewer what went wrong and keep retrying the provider. This
 		// returns a live response only if the upstream came back.
-		if resp = sm.serveSlateAndRetry(ctx, buffer, upstreamURL, uerr); resp == nil {
+		resp = sm.serveSlateAndRetry(ctx, buffer, upstreamURL, uerr)
+		buffer.slating.Store(false)
+		if resp == nil {
 			sm.stopStreamLocking(buffer.streamID)
 			return
 		}
@@ -1035,7 +1064,8 @@ func (sm *SessionManager) RemoveClient(streamID, username, clientKey string) {
 		// real, so a TiviMate "pause" (which looks like a disconnect to us)
 		// followed by a resume keeps recording with no gap. A genuine channel
 		// switch is detected and stopped immediately in RequestStream instead.
-		if buffer.diskBuffer != nil && sm.pauseGrace > 0 {
+		// A lent stream stops at once so its slot frees for the next request.
+		if buffer.diskBuffer != nil && sm.pauseGrace > 0 && !IsFailoverIdentity(username) {
 			sm.schedulePendingStop(streamID)
 		} else {
 			sm.stopStream(streamID)

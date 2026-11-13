@@ -91,6 +91,11 @@ func (sm *SessionManager) ServesSlateFor(streamID string) bool {
 // dialUpstream performs one upstream attempt, returning either a live response
 // or a classified failure. The response body is the caller's to close.
 func (sm *SessionManager) dialUpstream(ctx context.Context, upstreamURL *url.URL) (*http.Response, *UpstreamError) {
+	return sm.dial(ctx, upstreamURL, nil)
+}
+
+// dial is dialUpstream with extra request headers.
+func (sm *SessionManager) dial(ctx context.Context, upstreamURL *url.URL, header http.Header) (*http.Response, *UpstreamError) {
 	req, err := http.NewRequestWithContext(ctx, "GET", upstreamURL.String(), nil)
 	if err != nil {
 		return nil, classifyUpstream(err, 0)
@@ -103,6 +108,11 @@ func (sm *SessionManager) dialUpstream(ctx context.Context, upstreamURL *url.URL
 	req.Header.Set("Accept-Language", utils.GetLanguageHeader())
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("Connection", "keep-alive")
+	for k, vs := range header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
 
 	resp, err := sm.httpClient.Do(req)
 	if err != nil {

@@ -574,7 +574,7 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		// another user, or another device of this user (a second live
 		// connection besides the one switching away). Stalled connections (a
 		// reconnect's half-open socket) don't count.
-		if !hasBuffer || !prevBuffer.active || !prevBuffer.watchedBeyond(username) {
+		if !hasBuffer || !prevBuffer.active || !prevBuffer.watchedBeyond(username, true) {
 			if hasBuffer && prevBuffer.active {
 				takeover = prevBuffer.ownSlot.Load()
 				sm.stopStream(prevStreamID)
@@ -588,6 +588,10 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 			// Close the departing viewer's history row for the previous stream.
 			sm.closeLiveHistory(username, prevStreamID)
 		} else {
+			// Kept only for guests: still wait for the slot, which the new
+			// channel takes once this viewer's old connection leaves and the
+			// previous stream drops to Share class.
+			takeover = prevBuffer.ownSlot.Load() && !prevBuffer.watchedBeyond(username, false)
 			sm.streamLock.Unlock()
 		}
 	}
@@ -753,11 +757,15 @@ func (b *StreamBuffer) userClientKeysLocked(username string) []string {
 // watchedBeyond reports whether this buffer is still watched once username's
 // switching device leaves it: another user has a client, or username has at
 // least two live (non-stalled) connections, i.e. another device of theirs stays.
-func (b *StreamBuffer) watchedBeyond(username string) bool {
+// Guest clients (share-link, forwarded) count only when guests is true.
+func (b *StreamBuffer) watchedBeyond(username string, guests bool) bool {
 	b.clientsLock.RLock()
 	defer b.clientsLock.RUnlock()
 	live := 0
 	for _, cl := range b.clients {
+		if !guests && (IsShareIdentity(cl.user) || IsFailoverIdentity(cl.user)) {
+			continue
+		}
 		if cl.user != username {
 			return true
 		}
@@ -956,7 +964,15 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 		}
 		if rerr != nil {
 			if rerr != io.EOF && ctx.Err() == nil {
-				utils.ErrorLog("Error reading from upstream: %v", rerr)
+				sm.streamLock.RLock()
+				ss := sm.streamSessions[buffer.streamID]
+				sm.streamLock.RUnlock()
+				if ss != nil && ss.GetVia() != "" {
+					// rerr names the fallback's address: log its name only.
+					utils.ErrorLog("Error reading from upstream: %s via %s", sm.streamLabel(buffer.streamID), ss.GetVia())
+				} else {
+					utils.ErrorLog("Error reading from upstream: %v", rerr)
+				}
 			}
 			sm.stopStreamLocking(buffer.streamID)
 			return

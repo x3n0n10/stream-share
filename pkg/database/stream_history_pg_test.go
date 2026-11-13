@@ -76,13 +76,14 @@ func TestSetStreamHistoryVia(t *testing.T) {
 	open2, _ := m.AddStreamHistory("bob", "10", "live", "T", "", "")
 	closed, _ := m.AddStreamHistory("carol", "10", "live", "T", "", "")
 	other, _ := m.AddStreamHistory("dave", "11", "live", "T", "", "")
+	nonLive, _ := m.AddStreamHistory("erin", "10", "movie", "T", "", "")
 	if err := m.CloseStreamHistory(closed); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.SetStreamHistoryVia("10", "Spare"); err != nil {
 		t.Fatal(err)
 	}
-	want := map[int64]string{open1: "Spare", open2: "Spare", closed: "", other: ""}
+	want := map[int64]string{open1: "Spare", open2: "Spare", closed: "", other: "", nonLive: ""}
 	for id, via := range want {
 		var got string
 		if err := m.db.QueryRow("SELECT via FROM stream_history WHERE id=$1", id).Scan(&got); err != nil || got != via {
@@ -94,7 +95,7 @@ func TestSetStreamHistoryVia(t *testing.T) {
 		t.Fatalf("user history = %+v (%v)", u, err)
 	}
 	r, err := m.GetRecentHistory(time.Time{}, 10, 0)
-	if err != nil || len(r) != 4 {
+	if err != nil || len(r) != 5 {
 		t.Fatalf("recent = %+v (%v)", r, err)
 	}
 	for _, e := range r {

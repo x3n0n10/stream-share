@@ -377,12 +377,15 @@ func TestForwardedLastClientStopsAtOnce(t *testing.T) {
 	sm.SetCatchupManager(catchup.New(true, t.TempDir(), 1))
 	sm.SetPauseGrace(time.Minute)
 
-	_, key, err := sm.RequestStream(lentViewer, "42.ts", "live", "Live 42", mustURL(t, srv.URL+"/live/u/p/42.ts"))
+	buffer, key, err := sm.RequestStream(lentViewer, "42.ts", "live", "Live 42", mustURL(t, srv.URL+"/live/u/p/42.ts"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !receiving(sm, "42.ts", key, 3*time.Second) {
 		t.Fatal("stream should play")
+	}
+	if buffer.diskBuffer == nil {
+		t.Fatal("the stream needs a disk buffer, else pause grace never applies")
 	}
 	removeKey(sm, "42.ts", key)
 	if streamActive(sm, "42.ts") {
@@ -884,5 +887,75 @@ func TestSlateRetryOwnDialYieldsToPreemption(t *testing.T) {
 	}
 	if n := len(slots.Snapshot().Held); n != 1 {
 		t.Fatalf("%d slots held, want 1 (the preempted lease released)", n)
+	}
+}
+
+// A guest left on the old channel must not keep the household viewer's slot:
+// the new channel waits while the viewer's old connection is still attached,
+// then takes the slot once that connection leaves.
+func TestSwitchAwayFromGuestKeepsOwnSlot(t *testing.T) {
+	own := newFakeUpstream(t, 'O', 0)
+	spare := newFakeUpstream(t, 'F', 0)
+	sm, _ := failoverRig(t, nil, target(t, "Spare", spare.URL))
+	sm.slotWait = time.Second
+
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	_, old := watch(t, sm, "alice", "ch1", "live", own.URL)
+	if !receiving(sm, "ch1", old, 3*time.Second) {
+		t.Fatal("alice's stream should play")
+	}
+	_, guest := watch(t, sm, lentViewer, "ch1", "live", own.URL)
+	go keepDraining(sm, "ch1", guest, stop)
+
+	buffer, key := watch(t, sm, "alice", "ch2", "live", own.URL)
+	time.Sleep(100 * time.Millisecond)
+	removeKey(sm, "ch1", old)
+	if uerr := waitReady(t, buffer); uerr != nil {
+		t.Fatalf("StartError = %+v, want served by the own upstream", uerr)
+	}
+	if !served(sm, "ch2", key, 'O', 3*time.Second) {
+		t.Fatal("alice's new channel should come from the own upstream")
+	}
+	if n := spare.requests.Load(); n != 0 {
+		t.Fatalf("the fallback got %d requests, want 0", n)
+	}
+	if !waitStopped(sm, "ch1", 3*time.Second) {
+		t.Fatal("the guest-only channel should give up the slot")
+	}
+}
+
+// A fallback stream that breaks mid-stream is logged by its name, never by the
+// address its read error carries.
+func TestFallbackReadErrorLogsName(t *testing.T) {
+	var logs lockedBuffer
+	prev := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	own := newFakeUpstream(t, 'O', 456)
+	spare := newFakeUpstream(t, 'F', 0)
+	sm, _ := failoverRig(t, nil, target(t, "Spare", spare.URL))
+
+	buffer, bob := watch(t, sm, "bob", "ch2", "live", own.URL)
+	if uerr := waitReady(t, buffer); uerr != nil {
+		t.Fatalf("StartError = %+v, want served via the fallback", uerr)
+	}
+	if !served(sm, "ch2", bob, 'F', 3*time.Second) {
+		t.Fatal("bob should receive the fallback's bytes")
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	go keepDraining(sm, "ch2", bob, stop)
+	spare.CloseClientConnections()
+	if !waitStopped(sm, "ch2", 3*time.Second) {
+		t.Fatal("the broken stream should stop")
+	}
+	out := logs.String()
+	if !strings.Contains(out, "Error reading from upstream: Stream ch2 via Spare") {
+		t.Fatalf("log lacks the fallback read error line: %q", out)
+	}
+	if strings.Contains(out, spare.URL[len("http://"):]) {
+		t.Fatalf("log names the fallback's address: %q", out)
 	}
 }

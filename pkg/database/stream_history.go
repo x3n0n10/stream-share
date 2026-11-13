@@ -101,7 +101,7 @@ func (m *DBManager) SetStreamHistoryVia(streamID, via string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := m.db.ExecContext(ctx, `UPDATE stream_history SET via = $2 WHERE stream_id = $1 AND end_time IS NULL`, streamID, via)
+	_, err := m.db.ExecContext(ctx, `UPDATE stream_history SET via = $2 WHERE stream_id = $1 AND stream_type = 'live' AND end_time IS NULL`, streamID, via)
 	return err
 }
 

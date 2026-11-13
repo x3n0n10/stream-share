@@ -678,6 +678,7 @@ When a live channel cannot start on this instance's provider (connection limit, 
 Limits:
 - The same viewer asking again gets today's channel switch, not a second connection.
 - A lent stream is cut when the lender's own household starts watching and needs the connection.
+- With fallbacks configured, another household viewer no longer takes the connection from someone already watching; they are served by a fallback or see the `IN_USE` slate.
 - A provider that takes longer than 3 s to answer is treated as failed and the next instance is tried.
 - Each additional fallback can add up to 3 s to a channel start, so with two or more fallbacks a channel may run past the player's start window when earlier fallbacks hang.
 

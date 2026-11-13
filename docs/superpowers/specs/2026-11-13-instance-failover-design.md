@@ -96,6 +96,8 @@ everything behaves exactly as today.
 
 ### Channel matching
 
+> Changed during planning: see "Builder decisions" at the end.
+
 The primary periodically fetches each fallback's live channel list (through the
 fallback instance's own Xtream API, with the service account) and keeps only a
 compact index:
@@ -128,6 +130,8 @@ they share a provider stream today. If a second primary viewer starts the same
 channel, they join the existing (fallback-backed) stream.
 
 ### Forward marker (slates, loops, speed)
+
+> Changed during planning: see "Builder decisions" at the end.
 
 Every request the primary sends to a fallback carries a marker (e.g. a header
 `X-StreamShare-Forwarded: 1`, plus the service account identifying the caller).
@@ -186,6 +190,7 @@ fallback, or the slate). Mid-stream switching stays out of scope.
   builder's choice), using the internal address it already computes
   (`instanceUrl`: gluetun's address with the VPN on, the container name with it
   off). Nobody types addresses or secrets.
+- *(Changed during planning: see "Builder decisions" at the end.)*
 - **Service login (owner, 2026-11-13):** StreamShare has no user store of its
   own (basic mode: one fixed login, viewers tracked by IP; LDAP mode: an
   external directory), so the "service account" is a **separate service login
@@ -220,3 +225,51 @@ fallback, or the slate). Mid-stream switching stays out of scope.
 - How the Suite presents service-account streams (hide vs merge).
 - Splitting into PRs (likely: stream-share forward marker + failover; Suite
   wiring + display).
+
+## Builder decisions (2026-11-13, planning)
+
+Calls made while planning, within "Left to the builder" unless marked as a
+deviation. The plan is `docs/superpowers/plans/2026-11-13-instance-failover-plan.md`.
+
+- **Deviation: the fallback does the matching, not the primary.** The primary
+  sends the channel's EPG ID and name; the fallback looks them up in the channel
+  indexes it already keeps. No periodic fetch, no second index, no extra memory,
+  and the match is never stale. The matching rules themselves are as specified.
+- **Deviation: a dedicated endpoint and key instead of a service login.**
+  `GET /api/failover/live` on the fallback, protected by a key header, replaces
+  both the marker header and the service account in the Xtream auth code. A
+  request on this endpoint *is* the marked request: it never gets a slate and is
+  never forwarded on. Upstream's auth code stays untouched. The Suite derives
+  the key from the instance's existing internal API key (a hash), so nothing new
+  is stored; an instance only gets a key when another instance lists it as a
+  fallback.
+- **Environment:** `FAILOVER_KEY` (the instance's own key; the endpoint does not
+  exist without it) and `FAILOVER_INSTANCES` (ordered JSON list of name, address,
+  key).
+- **Version gating:** the version endpoint reports a `failover` capability; the
+  Suite offers only instances that report it. An older fallback answers 404 on
+  the endpoint, which the primary treats like any other failure.
+- **Lent streams on the fallback** are identified as
+  `failover:<primary's name>/<stream id>`, run at share-guest priority, and are
+  left out of the active-viewer counts. The Suite shows them as "Lent to
+  <name>"; it does not merge them with the primary's row.
+- **Start timeouts:** with fallbacks configured, the own provider gets 3 s to
+  answer a live channel start, each fallback 3 s (the player's request is
+  answered within 8 s as today). A stream already showing the slate retries the
+  own provider without that limit.
+- **A stream showing the slate holds no provider connection** (with fallbacks
+  configured), so it cannot block another viewer; each retry tries the own
+  provider and the fallbacks again.
+- **New slate key `IN_USE`** ("All provider connections are in use by other
+  viewers.") for a viewer who could be served nowhere because the household is
+  using every connection.
+- **Status codes from a fallback:** no matching channel 404; no free connection
+  503; a provider failure answers the provider's own status; timeout 504;
+  anything else 502; wrong key 401.
+- **Internal address:** VPN on: `127.0.0.1:<port>` (shared network namespace);
+  VPN off: the instance's container name. The VPN-on address is not verified on
+  a real stack yet.
+- **Known limits:** in basic auth mode a viewer is a client IP, so two devices
+  behind one address count as one viewer (a channel switch, as today); the 8 s
+  start window can run out before a second fallback is reached when earlier
+  attempts hang.

@@ -108,21 +108,21 @@ func (sm *SessionManager) acquirePolite(ctx context.Context, buffer *StreamBuffe
 	return lease, nil
 }
 
-// dialOwn dials the own provider within budget (0: no limit). A connection
-// limit answer gets one more try after limitRetryWait, still within budget: a
-// panel can keep counting the connection just closed (a channel switch, a VOD
-// that stopped) for a moment, and a fallback should not get the channel for it.
+// dialOwn dials the own provider within budget (0: no limit, a slate retry).
+// At a channel start a connection limit answer gets one more try after
+// limitRetryWait, still within budget: a panel can keep counting the
+// connection just closed (a channel switch, a VOD that stopped) for a moment,
+// and a fallback should not get the channel for it. Slate retries already
+// come back later, so they do not ask twice.
 func (sm *SessionManager) dialOwn(ctx context.Context, budget time.Duration, u *url.URL) (*http.Response, *UpstreamError) {
 	start := time.Now()
 	resp, uerr := sm.dialWithin(ctx, budget, u, nil)
-	if uerr == nil || (uerr.StatusCode != 456 && uerr.StatusCode != 461) {
+	if uerr == nil || budget <= 0 || (uerr.StatusCode != 456 && uerr.StatusCode != 461) {
 		return resp, uerr
 	}
-	var left time.Duration
-	if budget > 0 {
-		if left = budget - time.Since(start) - sm.limitRetryWait; left <= 0 {
-			return nil, uerr
-		}
+	left := budget - time.Since(start) - sm.limitRetryWait
+	if left <= 0 {
+		return nil, uerr
 	}
 	t := time.NewTimer(sm.limitRetryWait)
 	defer t.Stop()

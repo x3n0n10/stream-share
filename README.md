@@ -680,7 +680,7 @@ Limits:
 - A lent stream is cut when the lender's own household starts watching and needs the connection.
 - With fallbacks configured, another household viewer no longer takes the connection from someone already watching; they are served by a fallback or see the `IN_USE` slate.
 - A provider that takes longer than 3 s to answer is treated as failed and the next instance is tried.
-- A connection limit answer (456/461) from the own provider is asked once more after 1.5 s before a fallback is tried: right after a channel switch or a VOD that stopped, a provider panel can still count the old connection for a moment.
+- At a channel start, a connection limit answer (456/461) from the own provider is asked once more after 1.5 s before a fallback is tried: right after a channel switch or a VOD that stopped, a provider panel can still count the old connection for a moment.
 - Each additional fallback can add up to 3 s to a channel start, so with two or more fallbacks a channel may run past the player's start window when earlier fallbacks hang.
 
 ## Container Health & Startup Ordering

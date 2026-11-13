@@ -22,6 +22,7 @@ package session
 import (
 	"bytes"
 	"context"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -731,10 +732,36 @@ func TestSlateRecoversViaFallback(t *testing.T) {
 	})
 }
 
+// slowClose holds an upstream body's Close for d, so a stopped stream keeps
+// its provider slot for a moment after the switch that stopped it.
+type slowClose struct {
+	io.ReadCloser
+	d time.Duration
+}
+
+func (b slowClose) Close() error {
+	time.Sleep(b.d)
+	return b.ReadCloser.Close()
+}
+
+type slowCloseTransport struct {
+	http.RoundTripper
+	d time.Duration
+}
+
+func (t slowCloseTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := t.RoundTripper.RoundTrip(r)
+	if err == nil {
+		resp.Body = slowClose{ReadCloser: resp.Body, d: t.d}
+	}
+	return resp, err
+}
+
 func TestSameViewerSwitchTakesOwnSlot(t *testing.T) {
 	own := newFakeUpstream(t, 'O', 0)
 	spare := newFakeUpstream(t, 'F', 0)
 	sm, _ := failoverRig(t, nil, target(t, "Spare", spare.URL))
+	sm.httpClient.Transport = slowCloseTransport{RoundTripper: sm.httpClient.Transport, d: 100 * time.Millisecond}
 	aliceWatches(t, sm, own)
 
 	buffer, key := watch(t, sm, "alice", "ch2", "live", own.URL)
@@ -807,5 +834,55 @@ func TestWithoutTargetsNewestStillWins(t *testing.T) {
 	}
 	if !waitStopped(sm, "ch1", 3*time.Second) {
 		t.Fatal("bob's start should cut alice's stream")
+	}
+}
+
+// A slating stream's own retry dial has no timeout: a hung provider must still
+// give the slot back at once when the household needs it (not after
+// preemptGrace, over the limit).
+func TestSlateRetryOwnDialYieldsToPreemption(t *testing.T) {
+	var ownRequests atomic.Int64
+	own := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ownRequests.Add(1) == 1 {
+			w.WriteHeader(456)
+			return
+		}
+		select {
+		case <-r.Context().Done():
+		case <-time.After(20 * time.Second):
+		}
+	}))
+	t.Cleanup(own.Close)
+	spare := newFakeUpstream(t, 'F', http.StatusServiceUnavailable)
+	other := newFakeUpstream(t, 'A', 0)
+	sm, slots := failoverRig(t, newFakeSlate(t, bytes.Repeat([]byte("S"), 2048)), target(t, "Spare", spare.URL))
+
+	buffer, bob := watch(t, sm, "bob", "ch2", "live", own.URL)
+	stop := make(chan struct{})
+	defer close(stop)
+	go keepDraining(sm, "ch2", bob, stop)
+	if waitReady(t, buffer) == nil {
+		t.Fatal("the stream should have failed to start")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for ownRequests.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !buffer.ownSlot.Load() {
+		t.Fatal("the slate retry should be holding the own slot in its hung dial")
+	}
+
+	_, alice := watch(t, sm, "alice", "ch1", "timeshift", other.URL)
+	if !served(sm, "ch1", alice, 'A', 3*time.Second) {
+		t.Fatal("the household start should get the slot promptly")
+	}
+	if !waitStopped(sm, "ch2", 2*time.Second) {
+		t.Fatal("the preempted stream should stop")
+	}
+	if buffer.ownSlot.Load() {
+		t.Fatal("the preempted stream should hold no own slot")
+	}
+	if n := len(slots.Snapshot().Held); n != 1 {
+		t.Fatalf("%d slots held, want 1 (the preempted lease released)", n)
 	}
 }

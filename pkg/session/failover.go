@@ -93,7 +93,8 @@ func (sm *SessionManager) acquirePolite(ctx context.Context, buffer *StreamBuffe
 	class := buffer.audienceClass()
 	// A guest-class request also waits when a guest-class or background holder
 	// has the slot: that is usually the stream this caller just dropped.
-	wait := class < provider.Foreground && sm.providerSlots.WouldGrant(provider.Foreground)
+	// A takeover waits for the slot of the stream its viewer just left.
+	wait := buffer.takeover || (class < provider.Foreground && sm.providerSlots.WouldGrant(provider.Foreground))
 	if !wait && !sm.providerSlots.WouldGrant(class) {
 		return nil, &UpstreamError{Key: KeyAllInUse}
 	}
@@ -139,12 +140,15 @@ func (sm *SessionManager) failoverAttempt(ctx context.Context, buffer *StreamBuf
 	lease, ownErr := sm.acquirePolite(ctx, buffer)
 	if ownErr == nil {
 		buffer.ownSlot.Store(true)
+		// Watch from the grant: a preemption during the dial (unbounded on a
+		// slate retry) stops the stream, which cancels the dial.
+		stopWatch := sm.watchPreemption(ctx, buffer, lease)
 		resp, uerr := sm.dialWithin(ctx, ownTimeout, upstreamURL, nil)
 		if uerr == nil {
-			sm.watchPreemption(ctx, buffer, lease)
 			return resp, lease, nil
 		}
 		// A failed or slating stream holds no slot.
+		stopWatch()
 		buffer.ownSlot.Store(false)
 		lease.Release()
 		ownErr = uerr

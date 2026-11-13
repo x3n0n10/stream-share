@@ -965,16 +965,19 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 }
 
 // watchPreemption stops the stream when the arbiter wants lease back for
-// another watched stream, until ctx ends.
-func (sm *SessionManager) watchPreemption(ctx context.Context, buffer *StreamBuffer, lease *provider.Lease) {
+// another watched stream, until ctx ends or stop is called.
+func (sm *SessionManager) watchPreemption(ctx context.Context, buffer *StreamBuffer, lease *provider.Lease) (stop func()) {
+	done := make(chan struct{})
 	go func() {
 		select {
 		case <-lease.Preempted():
 			utils.WarnLog("Provider slot: %s gives its connection to another watched stream", sm.streamLabel(buffer.streamID))
 			sm.stopStreamLocking(buffer.streamID)
 		case <-ctx.Done():
+		case <-done:
 		}
 	}()
+	return func() { close(done) }
 }
 
 // fanOut delivers one chunk to every attached client in parallel and waits for

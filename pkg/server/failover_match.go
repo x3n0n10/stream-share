@@ -32,7 +32,7 @@ var (
 	// A country tag only counts when delimited ("NL | ", "UK: ", "[NL]"): a bare
 	// "NL-TV" or "BBC One" must keep its letters.
 	channelCountryTag = regexp.MustCompile(`^\s*(?:\[[a-z]{2,3}\]|\([a-z]{2,3}\)|[a-z]{2,3}\s*[|:])`)
-	channelQualityTag = regexp.MustCompile(`\b(?:uhd|4k|fhd|hd|sd|hevc|h265|2160p|1080p|720p)\b`)
+	channelQualityTag = regexp.MustCompile(`\b(?:8k|4320p|uhd|4k|fhd|hd|sd|hevc|h265|2160p|1080p|720p)\b`)
 )
 
 // normalizeChannelName reduces a channel name to what two providers share:
@@ -48,12 +48,14 @@ func normalizeChannelName(name string) string {
 	}, s)
 }
 
-// qualityClass ranks a name's quality word: 3 UHD/4K, 2 FHD, 1 HD or none, 0 SD.
+// qualityClass ranks a name's quality word: 4 8K, 3 UHD/4K, 2 FHD, 1 HD or none, 0 SD.
 func qualityClass(name string) int {
 	class := -1
 	for _, w := range channelQualityTag.FindAllString(strings.ToLower(name), -1) {
 		c := -1
 		switch w {
+		case "8k", "4320p":
+			c = 4
 		case "uhd", "4k", "2160p":
 			c = 3
 		case "fhd", "1080p":

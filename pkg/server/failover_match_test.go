@@ -49,6 +49,7 @@ func TestNormalizeChannelName(t *testing.T) {
 func TestQualityClass(t *testing.T) {
 	for in, want := range map[string]int{
 		"NPO 1 UHD": 3, "NPO 1 4K": 3, "RTL 4 FHD": 2, "X 1080p": 2, "NPO 1 HD": 1, "NPO 1": 1, "NPO 1 SD": 0,
+		"8K | RTL 4": 4, "X 4320p": 4,
 	} {
 		if got := qualityClass(in); got != want {
 			t.Errorf("qualityClass(%q) = %d, want %d", in, got, want)

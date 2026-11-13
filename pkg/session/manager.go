@@ -75,6 +75,19 @@ type SessionManager struct {
 	providerSlots *provider.Arbiter
 	errorCatalog  *Catalog
 	slateRetryMax time.Duration
+	// slotWait bounds how long a lent stream waits for a slot held by a
+	// guest that is leaving (see acquirePolite).
+	slotWait time.Duration
+	// failoverTargets lists the fallback instances for a live channel start
+	// (nil: no failover). failoverOwnTimeout and failoverPeerTimeout bound
+	// the own and each fallback dial: with slotWait and one fallback, a start
+	// stays under the handler's 8 s start window (upstreamReadyTimeout).
+	failoverTargets     func(streamID string) []FailoverTarget
+	failoverOwnTimeout  time.Duration
+	failoverPeerTimeout time.Duration
+	// limitRetryWait is the pause before the own provider is asked again
+	// after a connection limit answer, inside failoverOwnTimeout (see dialOwn).
+	limitRetryWait time.Duration
 
 	// pauseGrace controls how long a catchup-enabled live stream keeps its
 	// upstream connection (and disk recording) alive after its last viewer
@@ -181,6 +194,20 @@ type StreamBuffer struct {
 	startErrMu sync.Mutex
 	startErr   *UpstreamError
 	slateOK    bool
+
+	// forwarded marks a stream lent to another instance (created by a
+	// failover identity): it never slates and asks politely for its slot.
+	forwarded bool
+	// slating is true while the pump serves the error slate.
+	slating atomic.Bool
+	// failover marks a household live stream that may be served by a
+	// fallback instance when the own provider cannot start it.
+	failover bool
+	// ownSlot is true while the pump holds an own-provider lease.
+	ownSlot atomic.Bool
+	// takeover: this start stopped the same viewer's previous stream, which
+	// held the own slot, so waiting for that slot beats a fallback.
+	takeover bool
 }
 
 // markReady records the upstream outcome and releases anyone waiting on Ready.
@@ -249,23 +276,27 @@ func (t *probeTap) snapshot() []byte {
 // NewSessionManager creates a new session manager
 func NewSessionManager(db *database.DBManager) *SessionManager {
 	manager := &SessionManager{
-		userSessions:       make(map[string]*types.UserSession),
-		streamSessions:     make(map[string]*types.StreamSession),
-		streamBuffers:      make(map[string]*StreamBuffer),
-		tempLinks:          make(map[string]*types.TemporaryLink),
-		db:                 db,
-		cleanupInterval:    24 * time.Hour,
-		sessionTimeout:     30 * time.Minute,
-		streamTimeout:      2 * time.Minute,
-		tempLinkTimeout:    24 * time.Hour,
-		vodCacheStaleAge:   24 * time.Hour,
-		clientStallTimeout: defaultClientStallTimeout,
-		pendingStops:       make(map[string]chan struct{}),
-		vodViewTimers:      make(map[string]*time.Timer),
-		vodHistoryIDs:      make(map[string]int64),
-		vodHistoryTitles:   make(map[string]string),
-		liveHistoryIDs:     make(map[string]int64),
-		stopChan:           make(chan struct{}),
+		userSessions:        make(map[string]*types.UserSession),
+		streamSessions:      make(map[string]*types.StreamSession),
+		streamBuffers:       make(map[string]*StreamBuffer),
+		tempLinks:           make(map[string]*types.TemporaryLink),
+		db:                  db,
+		cleanupInterval:     24 * time.Hour,
+		sessionTimeout:      30 * time.Minute,
+		streamTimeout:       2 * time.Minute,
+		tempLinkTimeout:     24 * time.Hour,
+		vodCacheStaleAge:    24 * time.Hour,
+		clientStallTimeout:  defaultClientStallTimeout,
+		slotWait:            1 * time.Second,
+		failoverOwnTimeout:  3 * time.Second,
+		failoverPeerTimeout: 3 * time.Second,
+		limitRetryWait:      1500 * time.Millisecond,
+		pendingStops:        make(map[string]chan struct{}),
+		vodViewTimers:       make(map[string]*time.Timer),
+		vodHistoryIDs:       make(map[string]int64),
+		vodHistoryTitles:    make(map[string]string),
+		liveHistoryIDs:      make(map[string]int64),
+		stopChan:            make(chan struct{}),
 		httpClient: &http.Client{
 			// No global Timeout: long-running streams must not be cut after 60s
 			Transport: &http.Transport{
@@ -539,6 +570,7 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 	sm.userLock.Unlock()
 
 	// Handle case where user switches streams
+	takeover := false
 	if prevStreamID != "" && prevStreamID != streamID {
 		sm.streamLock.Lock()
 		prevBuffer, hasBuffer := sm.streamBuffers[prevStreamID]
@@ -546,8 +578,9 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		// another user, or another device of this user (a second live
 		// connection besides the one switching away). Stalled connections (a
 		// reconnect's half-open socket) don't count.
-		if !hasBuffer || !prevBuffer.active || !prevBuffer.watchedBeyond(username) {
+		if !hasBuffer || !prevBuffer.active || !prevBuffer.watchedBeyond(username, true) {
 			if hasBuffer && prevBuffer.active {
+				takeover = prevBuffer.ownSlot.Load()
 				sm.stopStream(prevStreamID)
 			}
 			// A previous stream without a live buffer (e.g. a VOD view) still
@@ -559,6 +592,10 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 			// Close the departing viewer's history row for the previous stream.
 			sm.closeLiveHistory(username, prevStreamID)
 		} else {
+			// Kept only for guests: still wait for the slot, which the new
+			// channel takes once this viewer's old connection leaves and the
+			// previous stream drops to Share class.
+			takeover = prevBuffer.ownSlot.Load() && !prevBuffer.watchedBeyond(username, false)
 			sm.streamLock.Unlock()
 		}
 	}
@@ -631,7 +668,11 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		clients:     map[string]*streamClient{client.key: client},
 		stopChan:    make(chan struct{}),
 		ready:       make(chan struct{}),
-		slateOK:     slateEligible(streamType),
+		slateOK:     slateEligible(streamType) && !IsFailoverIdentity(username),
+		forwarded:   IsFailoverIdentity(username),
+		failover: sm.failoverTargets != nil && streamType == "live" &&
+			!IsShareIdentity(username) && !IsFailoverIdentity(username),
+		takeover: takeover,
 	}
 
 	// Start a local disk buffer for live streams when catchup is enabled, unless
@@ -685,14 +726,14 @@ func IsShareIdentity(username string) bool {
 }
 
 // audienceClass is the provider-slot priority of this stream: Foreground while
-// any household client watches, Share while only share-link clients do,
-// Background when nobody does.
+// any household client watches, Share while only guests (share-link or
+// forwarded clients) do, Background when nobody does.
 func (b *StreamBuffer) audienceClass() provider.Class {
 	b.clientsLock.RLock()
 	defer b.clientsLock.RUnlock()
 	class := provider.Background
 	for _, cl := range b.clients {
-		if !IsShareIdentity(cl.user) {
+		if !IsShareIdentity(cl.user) && !IsFailoverIdentity(cl.user) {
 			return provider.Foreground
 		}
 		class = provider.Share
@@ -720,11 +761,15 @@ func (b *StreamBuffer) userClientKeysLocked(username string) []string {
 // watchedBeyond reports whether this buffer is still watched once username's
 // switching device leaves it: another user has a client, or username has at
 // least two live (non-stalled) connections, i.e. another device of theirs stays.
-func (b *StreamBuffer) watchedBeyond(username string) bool {
+// Guest clients (share-link, forwarded) count only when guests is true.
+func (b *StreamBuffer) watchedBeyond(username string, guests bool) bool {
 	b.clientsLock.RLock()
 	defer b.clientsLock.RUnlock()
 	live := 0
 	for _, cl := range b.clients {
+		if !guests && (IsShareIdentity(cl.user) || IsFailoverIdentity(cl.user)) {
+			continue
+		}
 		if cl.user != username {
 			return true
 		}
@@ -788,29 +833,50 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 	// the provider's only connection is paused to make room. If the slot is
 	// taken back for another watched stream (the provider cannot serve both),
 	// this stream stops; its players reconnect if they still want it.
-	lease, slotErr := sm.providerSlots.AcquireClass(ctx, "live "+sm.streamLabel(buffer.streamID),
-		func() provider.Class { return buffer.audienceClass() }, provider.Fresh)
-	if slotErr != nil {
-		buffer.markReady(classifyUpstream(slotErr, 0))
-		sm.stopStreamLocking(buffer.streamID)
-		return
-	}
-	defer lease.Release()
-	go func() {
-		select {
-		case <-lease.Preempted():
-			utils.WarnLog("Provider slot: %s gives its connection to another watched stream", sm.streamLabel(buffer.streamID))
-			sm.stopStreamLocking(buffer.streamID)
-		case <-ctx.Done():
-		}
+	// A lent stream never takes a slot from a same-class holder (see
+	// acquirePolite). A failover stream tries the own provider politely,
+	// then the fallback instances (see failoverAttempt).
+	// lease is reassigned when a slate retry gets a new one.
+	var lease *provider.Lease
+	defer func() {
+		buffer.ownSlot.Store(false)
+		lease.Release()
 	}()
+	var resp *http.Response
+	var uerr *UpstreamError
+	if buffer.failover {
+		resp, lease, uerr = sm.failoverAttempt(ctx, buffer, upstreamURL, sm.failoverOwnTimeout)
+	} else {
+		var slotErr *UpstreamError
+		if buffer.forwarded {
+			lease, slotErr = sm.acquirePolite(ctx, buffer)
+		} else {
+			var err error
+			lease, err = sm.providerSlots.AcquireClass(ctx, "live "+sm.streamLabel(buffer.streamID),
+				func() provider.Class { return buffer.audienceClass() }, provider.Fresh)
+			if err != nil {
+				slotErr = classifyUpstream(err, 0)
+			}
+		}
+		if slotErr != nil {
+			buffer.markReady(slotErr)
+			sm.stopStreamLocking(buffer.streamID)
+			return
+		}
+		buffer.ownSlot.Store(true)
+		sm.watchPreemption(ctx, buffer, lease)
 
-	// Dial the upstream. dialUpstream sets the same headers as before: never
-	// inject Range, so the upstream returns a natural 200 with Content-Length
-	// rather than a 206 that may lack a Content-Range total (which causes
-	// avformat errors in media players). 200 and 206 are both accepted, since
-	// some providers return 206 unconditionally.
-	resp, uerr := sm.dialUpstream(ctx, upstreamURL)
+		// Dial the upstream. dialUpstream sets the same headers as before: never
+		// inject Range, so the upstream returns a natural 200 with Content-Length
+		// rather than a 206 that may lack a Content-Range total (which causes
+		// avformat errors in media players). 200 and 206 are both accepted, since
+		// some providers return 206 unconditionally.
+		resp, uerr = sm.dialUpstream(ctx, upstreamURL)
+	}
+
+	// Raise slating before Ready so whoever wakes on Ready already sees it.
+	slating := uerr != nil && sm.slateEnabled(buffer)
+	buffer.slating.Store(slating)
 
 	// Release the HTTP handler waiting to learn whether this stream came up, so
 	// it can choose a response before committing to a 200.
@@ -819,13 +885,25 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 	if uerr != nil {
 		utils.ErrorLog("Upstream failed for %s: %s", sm.streamLabel(buffer.streamID), uerr.Error())
 
-		if !sm.slateEnabled(buffer) {
+		if !slating {
 			sm.stopStreamLocking(buffer.streamID)
 			return
 		}
 		// Show the viewer what went wrong and keep retrying the provider. This
 		// returns a live response only if the upstream came back.
-		if resp = sm.serveSlateAndRetry(ctx, buffer, upstreamURL, uerr); resp == nil {
+		redial := func() (*http.Response, *UpstreamError) { return sm.dialUpstream(ctx, upstreamURL) }
+		if buffer.failover {
+			// A viewer on the slate is past the start window: no own timeout,
+			// so a slow provider can still recover.
+			redial = func() (*http.Response, *UpstreamError) {
+				r, l, err := sm.failoverAttempt(ctx, buffer, upstreamURL, 0)
+				lease = l
+				return r, err
+			}
+		}
+		resp = sm.serveSlateAndRetry(ctx, buffer, redial, uerr)
+		buffer.slating.Store(false)
+		if resp == nil {
 			sm.stopStreamLocking(buffer.streamID)
 			return
 		}
@@ -890,12 +968,36 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 		}
 		if rerr != nil {
 			if rerr != io.EOF && ctx.Err() == nil {
-				utils.ErrorLog("Error reading from upstream: %v", rerr)
+				sm.streamLock.RLock()
+				ss := sm.streamSessions[buffer.streamID]
+				sm.streamLock.RUnlock()
+				if ss != nil && ss.GetVia() != "" {
+					// rerr names the fallback's address: log its name only.
+					utils.ErrorLog("Error reading from upstream: %s via %s", sm.streamLabel(buffer.streamID), ss.GetVia())
+				} else {
+					utils.ErrorLog("Error reading from upstream: %v", rerr)
+				}
 			}
 			sm.stopStreamLocking(buffer.streamID)
 			return
 		}
 	}
+}
+
+// watchPreemption stops the stream when the arbiter wants lease back for
+// another watched stream, until ctx ends or stop is called.
+func (sm *SessionManager) watchPreemption(ctx context.Context, buffer *StreamBuffer, lease *provider.Lease) (stop func()) {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-lease.Preempted():
+			utils.WarnLog("Provider slot: %s gives its connection to another watched stream", sm.streamLabel(buffer.streamID))
+			sm.stopStreamLocking(buffer.streamID)
+		case <-ctx.Done():
+		case <-done:
+		}
+	}()
+	return func() { close(done) }
 }
 
 // fanOut delivers one chunk to every attached client in parallel and waits for
@@ -1035,7 +1137,8 @@ func (sm *SessionManager) RemoveClient(streamID, username, clientKey string) {
 		// real, so a TiviMate "pause" (which looks like a disconnect to us)
 		// followed by a resume keeps recording with no gap. A genuine channel
 		// switch is detected and stopped immediately in RequestStream instead.
-		if buffer.diskBuffer != nil && sm.pauseGrace > 0 {
+		// A lent stream stops at once so its slot frees for the next request.
+		if buffer.diskBuffer != nil && sm.pauseGrace > 0 && !IsFailoverIdentity(username) {
 			sm.schedulePendingStop(streamID)
 		} else {
 			sm.stopStream(streamID)

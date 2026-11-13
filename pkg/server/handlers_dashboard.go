@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lucasduport/stream-share/pkg/session"
 	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
@@ -83,7 +84,8 @@ func (c *Config) getDashboardStats(ctx *gin.Context) {
 		allSessions := c.sessionManager.GetAllSessions()
 		activeUserSet := make(map[string]struct{}, len(allSessions))
 		for _, us := range allSessions {
-			if us.StreamID != "" {
+			// A lent viewer is already counted on their own instance.
+			if us.StreamID != "" && !session.IsFailoverIdentity(us.Username) {
 				activeUserSet[us.Username] = struct{}{}
 			}
 		}

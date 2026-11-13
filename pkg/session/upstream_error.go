@@ -35,6 +35,9 @@ const (
 	// KeyNoRecording: a catchup request for a time neither the local buffer
 	// nor the provider has a recording of.
 	KeyNoRecording = "NO_RECORDING"
+	// KeyAllInUse: a lent (forwarded) stream found every provider connection
+	// taken by this instance's own viewers.
+	KeyAllInUse = "IN_USE"
 )
 
 // UpstreamError describes why an upstream stream could not be started. Key is

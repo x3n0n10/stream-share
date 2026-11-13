@@ -51,6 +51,7 @@ type activeStreamItem struct {
 	StartedAt    time.Time       `json:"started_at"`
 	Duration     string          `json:"duration"`
 	Tech         *StreamTechInfo `json:"tech,omitempty"`
+	Via          string          `json:"via,omitempty"` // fallback instance serving it
 }
 
 // buildActiveStreamItem resolves a stream session into its API view. Title
@@ -95,6 +96,7 @@ func (c *Config) buildActiveStreamItem(s *types.StreamSession, aliases map[strin
 		Viewers:      viewerInfos,
 		StartedAt:    s.StartTime,
 		Duration:     dur.String(),
+		Via:          s.GetVia(),
 	}
 	if s.StreamType == "live" {
 		item.Num, _ = c.liveChannelNumber(s.StreamID)

@@ -63,3 +63,20 @@ func TestGetVersionReportsTheBuildVersion(t *testing.T) {
 		t.Errorf("data.version = %q, want %q", body.Data.Version, "1.2.3-test")
 	}
 }
+
+func TestVersionReportsFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c := &Config{ProxyConfig: &config.ProxyConfig{}}
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/internal/version", nil)
+	c.getVersion(ctx)
+	var body struct {
+		Data struct {
+			Failover bool `json:"failover"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || !body.Data.Failover {
+		t.Fatalf("data.failover = %v (%v), want true: %s", body.Data.Failover, err, w.Body.String())
+	}
+}

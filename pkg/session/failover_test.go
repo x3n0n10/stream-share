@@ -862,7 +862,7 @@ func TestNoFailoverForGuestsAndCatchup(t *testing.T) {
 		t.Fatalf("lent StartError = %+v, want %s", uerr, KeyAllInUse)
 	}
 	buffer, _ = watch(t, sm, "bob", "ch4", "timeshift", own.URL)
-	waitReady(t, buffer)
+	_ = waitReady(t, buffer) // only the fallback request count matters here
 	time.Sleep(200 * time.Millisecond)
 	if n := spare.requests.Load(); n != 0 {
 		t.Fatalf("the fallback got %d requests, want 0", n)

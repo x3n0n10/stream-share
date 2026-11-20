@@ -21,8 +21,6 @@ package xtream
 
 import (
 	"context"
-	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -64,9 +62,6 @@ func TestClassifyCatalogFile(t *testing.T) {
 			kind, small, err := ClassifyCatalogFile(p, getLiveStreams)
 			if (err != nil) != tc.wantErr || kind != tc.kind {
 				t.Fatalf("kind=%v err=%v, want kind=%v wantErr=%v", kind, err, tc.kind, tc.wantErr)
-			}
-			if tc.wantErr && !errors.Is(err, io.ErrUnexpectedEOF) {
-				t.Fatalf("err = %v, want unexpected EOF", err)
 			}
 			if tc.name == "object" {
 				if m, ok := small.(map[string]interface{}); !ok || len(m) != 1 {

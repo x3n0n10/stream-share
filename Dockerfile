@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.23-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 # Install CA certificates for HTTPS requests during build (if needed)
 RUN apk add --no-cache ca-certificates
@@ -22,7 +22,7 @@ ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X github.com/lucasduport/stream-share/pkg/version.Version=${VERSION}" -o stream-share .
 
 # Runtime stage
-FROM alpine:3.19
+FROM alpine:3.24
 
 # Install CA certificates for runtime HTTPS, and ffmpeg (for ffprobe, used by
 # the optional live-stream technical-info probe; see STREAM_TECH_PROBE_ENABLED,

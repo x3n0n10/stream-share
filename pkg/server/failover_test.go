@@ -36,7 +36,7 @@ import (
 )
 
 // failoverServer is shareTestServer plus the failover route, keyed "test-key"
-// unless noKey, on a catalogue where channel 10 is "NPO 1 HD".
+// unless noKey, on a catalogue where channel 10 is "Alpha 1 HD".
 func failoverServer(t *testing.T, capacity int, noKey bool) (*shareEnv, string) {
 	t.Helper()
 	e := shareTestServer(t, capacity, nil)
@@ -45,8 +45,8 @@ func failoverServer(t *testing.T, capacity int, noKey bool) (*shareEnv, string) 
 		e.c.FailoverKey = "test-key"
 	}
 	setChannelIndex(t,
-		map[string]string{"10": "NPO 1 HD", "12": "RTL 4 FHD"},
-		map[string]string{"10": "npo1.nl"})
+		map[string]string{"10": "Alpha 1 HD", "12": "Beta 4 FHD"},
+		map[string]string{"10": "alpha1.nl"})
 	r := gin.New()
 	r.GET("/api/failover/live", e.c.handleFailoverLive)
 	front := httptest.NewServer(r)
@@ -75,9 +75,9 @@ func TestFailoverEndpointRefusals(t *testing.T) {
 		noKey            bool
 		want             int
 	}{
-		{"no key configured", "test-key", "?epg=npo1.nl", true, http.StatusNotFound},
-		{"missing key", "", "?epg=npo1.nl", false, http.StatusUnauthorized},
-		{"wrong key", "nope", "?epg=npo1.nl", false, http.StatusUnauthorized},
+		{"no key configured", "test-key", "?epg=alpha1.nl", true, http.StatusNotFound},
+		{"missing key", "", "?epg=alpha1.nl", false, http.StatusUnauthorized},
+		{"wrong key", "nope", "?epg=alpha1.nl", false, http.StatusUnauthorized},
 		{"no match", "test-key", "?epg=none.nl&name=Nothing", false, http.StatusNotFound},
 	} {
 		_, u := failoverServer(t, 1, tc.noKey)
@@ -103,7 +103,7 @@ func TestFailoverCaller(t *testing.T) {
 	e, _ := failoverServer(t, 1, false)
 	r := gin.New()
 	r.GET("/f", e.c.handleFailoverLive)
-	req := httptest.NewRequest(http.MethodGet, "/f?epg=npo1.nl", nil)
+	req := httptest.NewRequest(http.MethodGet, "/f?epg=alpha1.nl", nil)
 	req.Header.Set(failoverKeyHeader, "test-key")
 	req.Header["X-Failover-From"] = []string{"Ma\nin<b>"}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -123,7 +123,7 @@ func TestFailoverEndpointStreams(t *testing.T) {
 	e, u := failoverServer(t, 1, false)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	resp := failoverGet(t, ctx, u+"?epg=npo1.nl&name=NPO+1", "test-key", "Main")
+	resp := failoverGet(t, ctx, u+"?epg=alpha1.nl&name=Alpha+1", "test-key", "Main")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
@@ -142,7 +142,7 @@ func TestFailoverEndpointNeverSlates(t *testing.T) {
 	e, u := failoverServer(t, 1, false)
 	enableSlates(t, e)
 	e.p.failStatus = 456
-	resp := failoverGet(t, context.Background(), u+"?epg=npo1.nl", "test-key", "Main")
+	resp := failoverGet(t, context.Background(), u+"?epg=alpha1.nl", "test-key", "Main")
 	body := make([]byte, 16)
 	n, _ := resp.Body.Read(body)
 	if resp.StatusCode != 456 || n != 0 {
@@ -158,7 +158,7 @@ func TestFailoverEndpointBusyWhileHouseholdHoldsTheConnection(t *testing.T) {
 	if code != http.StatusOK || !eventually(3*time.Second, func() bool { return atomic.LoadInt64(mine) > 0 }) {
 		t.Fatalf("household stream: %d", code)
 	}
-	if got := failoverGet(t, ctx, u+"?epg=npo1.nl", "test-key", "Main").StatusCode; got != http.StatusServiceUnavailable {
+	if got := failoverGet(t, ctx, u+"?epg=alpha1.nl", "test-key", "Main").StatusCode; got != http.StatusServiceUnavailable {
 		t.Fatalf("status %d, want 503", got)
 	}
 }
@@ -175,7 +175,7 @@ func TestFailoverEndpointRefusesASlatingHouseholdStream(t *testing.T) {
 	if code != http.StatusOK || !eventually(3*time.Second, func() bool { return e.c.sessionManager.Slating("10") }) {
 		t.Fatalf("household should be slating (status %d)", code)
 	}
-	if got := failoverGet(t, ctx, u+"?epg=npo1.nl", "test-key", "Main").StatusCode; got != 456 {
+	if got := failoverGet(t, ctx, u+"?epg=alpha1.nl", "test-key", "Main").StatusCode; got != 456 {
 		t.Fatalf("status %d, want 456", got)
 	}
 }

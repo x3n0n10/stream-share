@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Work only in the worktree `/Users/jorislankhorst/Source/stream-share-wt-version-endpoint`, branch `claude/version-endpoint` (off `origin/master`). Do not touch `/Users/jorislankhorst/Source/stream-share` (the main checkout). Do not push the branch or any tag; the controller does that.
+- Work only in the worktree `~/Source/stream-share-wt-version-endpoint`, branch `claude/version-endpoint` (off `origin/master`). Do not touch `~/Source/stream-share` (the main checkout). Do not push the branch or any tag; the controller does that.
 - The worktree's git identity is already the GitHub noreply address (`20641331+x3n0n10@users.noreply.github.com`, name `x3n0n10`); do not change it. GitHub rejects pushes carrying the personal address.
 - Commit messages end with `Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>`. Plain `git commit` works in this repo. If a hook ever blocks it with `simplify-guard: ...`, commit with plumbing (`git write-tree`, `git commit-tree -p HEAD -m ...`, `git update-ref refs/heads/claude/version-endpoint <sha>`), verifying `git diff --cached --stat` is non-empty first.
 - Go tooling: always `-mod vendor` (dependencies are vendored; do not run `go mod tidy`/`go get`, do not touch `vendor/` or `go.mod`). Baseline before this plan: `go vet -mod vendor ./...` clean and `go test -mod vendor ./...` all green.
@@ -40,7 +40,7 @@
   `pkg/server/api.go` already carries both copyright lines; leave its header alone.
 - Match existing style: gofmt'd code; comments explain *why*; handler doc comments start with the method and path, like `getInstanceInfo`.
 - Response shape (exact): `{"success": true, "data": {"version": "<string>"}}`.
-- Ruby is available for YAML assertions (`ruby -ryaml`); `docker`, `actionlint` and `goreleaser` are not installed. Write assertion scripts to a scratch file outside the repo (`/private/tmp/claude-501/-Users-jorislankhorst-Claude/83ef7f57-0172-4320-ba0f-424f637c7b19/scratchpad/`), not into the worktree.
+- Ruby is available for YAML assertions (`ruby -ryaml`); `docker`, `actionlint` and `goreleaser` are not installed. Write assertion scripts to a scratch file outside the repo (`<scratchpad>/`), not into the worktree.
 
 ## File Structure
 
@@ -412,10 +412,10 @@ Expected: prints `stamping ok`.
 ```bash
 go build -mod vendor \
   -ldflags "-X github.com/lucasduport/stream-share/pkg/version.Version=9.9.9-stamp-check" \
-  -o /private/tmp/claude-501/-Users-jorislankhorst-Claude/83ef7f57-0172-4320-ba0f-424f637c7b19/scratchpad/stream-share-stamped .
-strings /private/tmp/claude-501/-Users-jorislankhorst-Claude/83ef7f57-0172-4320-ba0f-424f637c7b19/scratchpad/stream-share-stamped | grep -c "9.9.9-stamp-check"
-go build -mod vendor -o /private/tmp/claude-501/-Users-jorislankhorst-Claude/83ef7f57-0172-4320-ba0f-424f637c7b19/scratchpad/stream-share-plain .
-strings /private/tmp/claude-501/-Users-jorislankhorst-Claude/83ef7f57-0172-4320-ba0f-424f637c7b19/scratchpad/stream-share-plain | grep -c "9.9.9-stamp-check"
+  -o <scratchpad>/stream-share-stamped .
+strings <scratchpad>/stream-share-stamped | grep -c "9.9.9-stamp-check"
+go build -mod vendor -o <scratchpad>/stream-share-plain .
+strings <scratchpad>/stream-share-plain | grep -c "9.9.9-stamp-check"
 ```
 
 Expected: the first `grep -c` prints a number greater than 0 (the stamped value is in the binary); the second prints `0`. Delete both binaries afterwards. Do not leave a `stream-share` binary in the worktree (`git status` must show only the three modified files).

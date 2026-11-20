@@ -29,12 +29,12 @@ import (
 
 func TestNormalizeChannelName(t *testing.T) {
 	for in, want := range map[string]string{
-		"NL | NPO 1 HD":  "npo1",
-		"NPO 1 FHD ⏺ʳᵉᶜ": "npo1",
-		"NPO 1 4K":       "npo1",
+		"NL | Alpha 1 HD":  "alpha1",
+		"Alpha 1 FHD ⏺ʳᵉᶜ": "alpha1",
+		"Alpha 1 4K":       "alpha1",
 		"UK: BBC One HD": "bbcone",
-		"[NL] RTL 4":     "rtl4",
-		"RTL 4 UHD HEVC": "rtl4",
+		"[NL] Beta 4":     "beta4",
+		"Beta 4 UHD HEVC": "beta4",
 		"NL-TV":          "nltv",
 		"Channel 4 HD":   "channel4",
 		"HD":             "",
@@ -48,8 +48,8 @@ func TestNormalizeChannelName(t *testing.T) {
 
 func TestQualityClass(t *testing.T) {
 	for in, want := range map[string]int{
-		"NPO 1 UHD": 3, "NPO 1 4K": 3, "RTL 4 FHD": 2, "X 1080p": 2, "NPO 1 HD": 1, "NPO 1": 1, "NPO 1 SD": 0,
-		"8K | RTL 4": 4, "X 4320p": 4,
+		"Alpha 1 UHD": 3, "Alpha 1 4K": 3, "Beta 4 FHD": 2, "X 1080p": 2, "Alpha 1 HD": 1, "Alpha 1": 1, "Alpha 1 SD": 0,
+		"8K | Beta 4": 4, "X 4320p": 4,
 	} {
 		if got := qualityClass(in); got != want {
 			t.Errorf("qualityClass(%q) = %d, want %d", in, got, want)
@@ -102,19 +102,19 @@ func TestMatchFailoverChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	setChannelIndex(t,
-		map[string]string{"10": "NPO 1 HD", "11": "NPO 1 UHD", "12": "RTL 4 FHD", "13": "NPO 1 SD"},
-		map[string]string{"10": "NPO1.nl", "11": "npo1.nl", "13": "npo1.nl"})
+		map[string]string{"10": "Alpha 1 HD", "11": "Alpha 1 UHD", "12": "Beta 4 FHD", "13": "Alpha 1 SD"},
+		map[string]string{"10": "Alpha1.nl", "11": "alpha1.nl", "13": "alpha1.nl"})
 
 	for _, tc := range []struct {
 		epg, name, want string
 	}{
-		{"npo1.NL", "NL | NPO 1 4K", "11"},
-		{"npo1.nl", "NPO 1 FHD", "10"},
-		{"", "RTL 4 HD", "12"},
-		{"unknown.id", "RTL 4", "12"},
+		{"alpha1.NL", "NL | Alpha 1 4K", "11"},
+		{"alpha1.nl", "Alpha 1 FHD", "10"},
+		{"", "Beta 4 HD", "12"},
+		{"unknown.id", "Beta 4", "12"},
 		{"", "HD", ""},
 		{"", "", ""},
-		{"npo1.nl", "NPO 1 SD", "10"},
+		{"alpha1.nl", "Alpha 1 SD", "10"},
 	} {
 		got, ok := e.c.matchFailoverChannel(tc.epg, tc.name)
 		if got != tc.want || ok != (tc.want != "") {
@@ -125,7 +125,7 @@ func TestMatchFailoverChannel(t *testing.T) {
 
 // failoverCatalogue is the live catalogue the matching tests run against;
 // channel 13 sits in a category the filter hides.
-const failoverCatalogue = `[{"num":1,"stream_id":10,"name":"NPO 1 HD","category_id":"10","epg_channel_id":"NPO1.nl","is_adult":0},` +
-	`{"num":2,"stream_id":11,"name":"NPO 1 UHD","category_id":"10","epg_channel_id":"npo1.nl","is_adult":0},` +
-	`{"num":3,"stream_id":12,"name":"RTL 4 FHD","category_id":"10","is_adult":0},` +
-	`{"num":4,"stream_id":13,"name":"NPO 1 SD","category_id":"20","epg_channel_id":"npo1.nl","is_adult":0}]`
+const failoverCatalogue = `[{"num":1,"stream_id":10,"name":"Alpha 1 HD","category_id":"10","epg_channel_id":"Alpha1.nl","is_adult":0},` +
+	`{"num":2,"stream_id":11,"name":"Alpha 1 UHD","category_id":"10","epg_channel_id":"alpha1.nl","is_adult":0},` +
+	`{"num":3,"stream_id":12,"name":"Beta 4 FHD","category_id":"10","is_adult":0},` +
+	`{"num":4,"stream_id":13,"name":"Alpha 1 SD","category_id":"20","epg_channel_id":"alpha1.nl","is_adult":0}]`

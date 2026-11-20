@@ -51,7 +51,7 @@ func TestParseFailoverInstances(t *testing.T) {
 }
 
 func TestFailoverTargets(t *testing.T) {
-	setChannelIndex(t, map[string]string{"10": "NPO 1 HD"}, map[string]string{"10": "npo1.nl"})
+	setChannelIndex(t, map[string]string{"10": "Alpha 1 HD"}, map[string]string{"10": "alpha1.nl"})
 	c := &Config{ProxyConfig: &config.ProxyConfig{InstanceName: "Main", FailoverInstances: `[` +
 		`{"name":"Spare","url":"http://127.0.0.1:1/base","key":"test-key"},` +
 		`{"name":"Third","url":"http://127.0.0.1:2","key":"other-key"}]`}}
@@ -65,7 +65,7 @@ func TestFailoverTargets(t *testing.T) {
 			t.Fatalf("%s: targets %+v", id, ts)
 		}
 		u := ts[0].URL
-		if u.Path != "/base/api/failover/live" || u.Query().Get("epg") != "npo1.nl" || u.Query().Get("name") != "NPO 1 HD" {
+		if u.Path != "/base/api/failover/live" || u.Query().Get("epg") != "alpha1.nl" || u.Query().Get("name") != "Alpha 1 HD" {
 			t.Fatalf("%s: url %s", id, u)
 		}
 		if ts[0].Header.Get(failoverKeyHeader) != "test-key" || ts[0].Header.Get(failoverFromHeader) != "Main" {
@@ -98,8 +98,8 @@ func primaryFor(t *testing.T, instances string) *shareEnv {
 // answering exactly as it does without fallbacks.
 func TestFailoverEndToEnd(t *testing.T) {
 	setChannelIndex(t,
-		map[string]string{"10": "NPO 1 HD", "12": "RTL 4 FHD"},
-		map[string]string{"10": "npo1.nl"})
+		map[string]string{"10": "Alpha 1 HD", "12": "Beta 4 FHD"},
+		map[string]string{"10": "alpha1.nl"})
 	status := func(e *shareEnv) int {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()

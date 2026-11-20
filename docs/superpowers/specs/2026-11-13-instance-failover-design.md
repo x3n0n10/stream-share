@@ -30,7 +30,7 @@ connection is in use, so B is served by a fallback instance's provider instead.
   already pays for.
 - The Suite sets the chain up; nobody types addresses or credentials.
 - The Suite's overview and history show when a stream came from a fallback
-  (e.g. "NPO 1 via <instance name>"). The player app is not told.
+  (e.g. "Alpha 1 via <instance name>"). The player app is not told.
 
 ## Non-goals
 
@@ -103,7 +103,7 @@ fallback instance's own Xtream API, with the service account) and keeps only a
 compact index:
 
 - key: the EPG channel ID (`epg_channel_id`), compared case-insensitively
-  (seen in practice: `npo1.nl` on one provider, `NPO1.nl` on another);
+  (seen in practice: `alpha1.nl` on one provider, `Alpha1.nl` on another);
 - fallback key: a normalised channel name (strip provider decoration such as
   country prefixes, symbols, quality tags) for channels without an EPG ID;
 - value: the fallback's stream ID(s), with a quality class derived from the name
@@ -168,7 +168,7 @@ fallback, or the slate). Mid-stream switching stays out of scope.
 ### Logging and display
 
 - Primary log (info): which fallback served a channel and why the primary could
-  not (e.g. "Failover: NPO 1 served via <instance name> (own provider: 456
+  not (e.g. "Failover: Alpha 1 served via <instance name> (own provider: 456
   connection limit)"). Never log credentials; addresses only masked as the rest
   of the code does.
 - History / streams API: the primary records the viewer's stream as usual plus a

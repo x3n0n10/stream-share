@@ -18,7 +18,7 @@ Copied from the spec ([2026-09-19-custom-credentials-client-ip-identity-design.m
 - No new API fields, no new columns, no changes to `stream-share-suite`.
 - Custom login name stays in existing `DebugLog` lines and is not otherwise recorded.
 
-Work happens in the worktree `/Users/jorislankhorst/Source/stream-share-wt-ip-identity` on branch `claude/custom-creds-client-ip`. Run all commands from that directory.
+Work happens in the worktree `~/Source/stream-share-wt-ip-identity` on branch `claude/custom-creds-client-ip`. Run all commands from that directory.
 
 ---
 

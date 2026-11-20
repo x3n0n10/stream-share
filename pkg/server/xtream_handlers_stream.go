@@ -676,6 +676,10 @@ func (c *Config) serveCachedVOD(ctx *gin.Context, username, streamIDRaw, streamT
 	return false
 }
 
+// afterRequestStream is a test seam: it runs right after RequestStream, so a
+// test can let the upstream outcome land before the handler continues.
+var afterRequestStream func(streamID, clientKey string, buffer *session.StreamBuffer)
+
 // joinStreamSession requests the stream through the session manager for
 // multiplexing and returns this client's data and done channels once the
 // upstream is up. ok is false when the request has already been answered: an
@@ -685,6 +689,9 @@ func (c *Config) joinStreamSession(ctx *gin.Context, username, streamID, streamT
 	// clientKey identifies this connection: one user can hold several (e.g.
 	// two devices on the same account), so every later call names its own.
 	buffer, clientKey, err := c.sessionManager.RequestStream(username, streamID, streamType, streamTitle, targetURL)
+	if afterRequestStream != nil {
+		afterRequestStream(streamID, clientKey, buffer)
+	}
 	if err != nil {
 		utils.ErrorLog("Multiplex: RequestStream failed for user=%s %s err=%v", username, label, err)
 		ctx.AbortWithStatus(http.StatusInternalServerError)
@@ -697,6 +704,11 @@ func (c *Config) joinStreamSession(ctx *gin.Context, username, streamID, streamT
 	// Get the data channel and termination signal for this client
 	dataChan, exists := c.sessionManager.GetClientChannel(streamID, clientKey)
 	if !exists {
+		// A failed upstream may already have removed this client: answer with
+		// that failure's status rather than a 500 for the missing channel.
+		if buffer != nil && !c.awaitUpstreamStart(ctx, buffer, username, streamID, clientKey, label) {
+			return nil, nil, "", false
+		}
 		utils.ErrorLog("Failed to get client channel for user=%s, %s", username, label)
 		c.sessionManager.RemoveClient(streamID, username, clientKey)
 		ctx.AbortWithStatus(http.StatusInternalServerError)

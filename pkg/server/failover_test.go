@@ -163,6 +163,33 @@ func TestFailoverEndpointBusyWhileHouseholdHoldsTheConnection(t *testing.T) {
 	}
 }
 
+// A lent stream whose upstream fails before the handler looks up its client
+// channel (the session manager has already removed the client) still answers
+// with the upstream's status, not a 500.
+func TestFailoverEndpointBusyWhenTheClientIsGoneFirst(t *testing.T) {
+	e, u := failoverServer(t, 1, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	code, mine, _ := watch(t, ctx, e.front.URL+"/household/12")
+	if code != http.StatusOK || !eventually(3*time.Second, func() bool { return atomic.LoadInt64(mine) > 0 }) {
+		t.Fatalf("household stream: %d", code)
+	}
+	afterRequestStream = func(streamID, clientKey string, buffer *session.StreamBuffer) {
+		if buffer == nil {
+			return
+		}
+		<-buffer.Ready()
+		eventually(3*time.Second, func() bool {
+			_, ok := e.c.sessionManager.GetClientChannel(streamID, clientKey)
+			return !ok
+		})
+	}
+	t.Cleanup(func() { afterRequestStream = nil })
+	if got := failoverGet(t, ctx, u+"?epg=alpha1.nl", "test-key", "Main").StatusCode; got != http.StatusServiceUnavailable {
+		t.Fatalf("status %d, want 503", got)
+	}
+}
+
 // Review Focus 1: joining a household stream that shows its slate is a failure
 // for the caller, not a 200 carrying the slate.
 func TestFailoverEndpointRefusesASlatingHouseholdStream(t *testing.T) {

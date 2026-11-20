@@ -71,7 +71,7 @@ func processXtreamArray(arr interface{}) interface{} {
 
 func hasFieldsField(item interface{}) bool {
 	respValue := reflect.ValueOf(item)
-	if respValue.Kind() == reflect.Ptr {
+	if respValue.Kind() == reflect.Pointer {
 		respValue = respValue.Elem()
 	}
 	if respValue.Kind() != reflect.Struct {
@@ -117,7 +117,7 @@ func processXtreamStruct(item interface{}) interface{} {
 	if strings.Contains(respType.String(), "VideoOnDemandInfo") {
 		utils.DebugLog("Special handling for VideoOnDemandInfo")
 		respValue := reflect.ValueOf(item)
-		if respValue.Kind() == reflect.Ptr {
+		if respValue.Kind() == reflect.Pointer {
 			respValue = respValue.Elem()
 		}
 		fieldValue := respValue.FieldByName("Fields")
@@ -134,7 +134,7 @@ func processXtreamStruct(item interface{}) interface{} {
 	}
 	if isXtreamCodesStruct(item) {
 		respValue := reflect.ValueOf(item)
-		if respValue.Kind() == reflect.Ptr {
+		if respValue.Kind() == reflect.Pointer {
 			respValue = respValue.Elem()
 		}
 		fieldValue := respValue.FieldByName("Fields")

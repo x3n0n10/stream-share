@@ -47,6 +47,7 @@ Owner chose both (2026-11-20).
   error and not retried; the instance runs without the bot.
 - A failed bulk overwrite is logged and not retried (as today); Discord keeps
   the commands from the previous registration.
+- When the bot is in exactly one guild (auto-guild), registration also bulk-overwrites the global command list with an empty list, removing stale global commands that otherwise show next to the guild ones (owner, 2026-11-20). With 0 or 2+ guilds the global list is left alone. A failure there is logged as a warning.
 - Delete `unregisterSlashCommands`, its call in `Stop()`, and the then-unused
   `registeredCommands` field (owner, 2026-11-20): the bulk overwrite on start
   already syncs the command set.

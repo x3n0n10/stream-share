@@ -13,7 +13,8 @@ call. Instances without Discord reach "ready" in ~0.1 s.
 
 - "Server is ready and listening" no longer waits on Discord. A Discord outage
   or bad token must not stop the instance from serving streams.
-- Slash command registration on start takes one Discord call instead of ~12.
+- Slash commands are registered with one Discord call instead of ~12, and
+  never deleted.
 
 ## Non-goals
 
@@ -46,20 +47,13 @@ Owner chose both (2026-11-20).
   error and not retried; the instance runs without the bot.
 - A failed bulk overwrite is logged and not retried (as today); Discord keeps
   the commands from the previous registration.
-- `Stop()` ends the retry loop. It must not hang on a connect attempt already
-  in flight (the default websocket handshake timeout is 45 s): give the bot's
-  session a short dial timeout, or let `Stop()` not wait on that attempt.
-  The "start failed" case is already safe: `unregisterSlashCommands` returns
-  early without registered commands.
-
-## Open question for the owner
-
-`Stop()` still deletes the commands one by one (`unregisterSlashCommands`)
-whenever a guild scope is in use, including the auto-guild case. That makes
-shutdown take ~40 s (past Docker's stop grace period, so the container gets
-killed) and hides the commands until the next start. Removing that loop too —
-the bulk overwrite on start already syncs the set — would fix both. Left out
-until the owner decides.
+- Delete `unregisterSlashCommands`, its call in `Stop()`, and the then-unused
+  `registeredCommands` field (owner, 2026-11-20): the bulk overwrite on start
+  already syncs the command set.
+- `Stop()` closes `stopChan` (ending the retry loop) and the session, without
+  waiting on the retry goroutine. It rarely runs: the server installs no signal
+  handler, so `docker stop` ends the process without running deferred calls;
+  `Stop()` only runs when `router.Run` returns an error, right before exit.
 
 ## Verification
 
@@ -67,5 +61,5 @@ until the owner decides.
   ready and listening" well under 1 s, "Slash commands registered" shortly
   after.
 - With a bad token: still reaches "ready", logs the auth error once, no retries.
-- Retry loop and `Stop()` during a retry: a unit test with a stub opener that
+- Retry loop: a unit test with a stub opener that
   fails N times, rather than blocking Discord in a container.

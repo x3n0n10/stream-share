@@ -171,8 +171,22 @@ func TestXtreamGetServesStaleWhileRefreshing(t *testing.T) {
 		}
 		_, _ = w.Write([]byte("#EXTM3U\n#EXTINF:-1,Movie " + string(rune('0'+n)) + "\nhttp://p/movie/provuser/provpass/7.mkv\n"))
 	}))
-	defer srv.Close()
-	defer close(release)
+	// Release the stalled download and let the background refresh finish
+	// before the temp dir is removed: cleanups run in reverse order, so this
+	// runs first. Otherwise the refresh can write into the folder mid-removal.
+	t.Cleanup(func() {
+		close(release)
+		getPHPMu.Lock()
+		running := make([]*getPHPFetch, 0, len(getPHPInFlight))
+		for _, f := range getPHPInFlight {
+			running = append(running, f)
+		}
+		getPHPMu.Unlock()
+		for _, f := range running {
+			<-f.done
+		}
+		srv.Close()
+	})
 	c := getPHPTestConfig(srv.URL)
 
 	w := serveGetPHP(t, c)

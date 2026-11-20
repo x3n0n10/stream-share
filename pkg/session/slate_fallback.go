@@ -131,8 +131,40 @@ func (sm *SessionManager) dial(ctx context.Context, upstreamURL *url.URL, header
 // (200/206), or a classified UpstreamError otherwise — notably StatusCode 456
 // when the provider is blocking our egress IP. The response body is closed here
 // since the probe only cares about reachability, not the stream itself.
+//
+// The probe goes through the provider-slot arbiter as a Background holder so it
+// never kicks a viewer off a limited account: with no slot free it returns
+// KeyAllInUse without dialling, and it gives up with KeyAllInUse the moment a
+// viewer preempts it. KeyAllInUse means nothing was measured.
 func (sm *SessionManager) ProbeUpstream(ctx context.Context, target *url.URL) *UpstreamError {
-	resp, uerr := sm.dialUpstream(ctx, target)
+	if !sm.providerSlots.WouldGrant(provider.Background) {
+		return &UpstreamError{Key: KeyAllInUse}
+	}
+	lease, err := sm.providerSlots.AcquireClass(ctx, "health probe", nil, provider.Resume)
+	if err != nil {
+		return &UpstreamError{Key: KeyAllInUse}
+	}
+	defer lease.Release()
+
+	dialCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-lease.Preempted():
+			cancel()
+		case <-dialCtx.Done():
+		}
+	}()
+
+	resp, uerr := sm.dialUpstream(dialCtx, target)
+	select {
+	case <-lease.Preempted():
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		return &UpstreamError{Key: KeyAllInUse}
+	default:
+	}
 	if uerr != nil {
 		return uerr
 	}

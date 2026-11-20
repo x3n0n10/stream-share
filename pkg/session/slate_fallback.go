@@ -212,6 +212,7 @@ func (sm *SessionManager) serveSlateAndRetry(
 			return resp
 		}
 
+		buffer.noteOwnErr(retryErr)
 		utils.DebugLog("Error slate: %s still failing (%s); next retry in %s",
 			sm.streamLabel(buffer.streamID), retryErr.Error(), utils.HumanDuration(backoff))
 

@@ -205,6 +205,9 @@ type StreamBuffer struct {
 	failover bool
 	// ownSlot is true while the pump holds an own-provider lease.
 	ownSlot atomic.Bool
+	// ownErr is why the own provider is failing this stream (error slate, or
+	// a fallback serving after an own-provider error); nil when it is not.
+	ownErr atomic.Pointer[UpstreamError]
 	// takeover: this start stopped the same viewer's previous stream, which
 	// held the own slot, so waiting for that slot beats a fallback.
 	takeover bool
@@ -877,6 +880,9 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 	// Raise slating before Ready so whoever wakes on Ready already sees it.
 	slating := uerr != nil && sm.slateEnabled(buffer)
 	buffer.slating.Store(slating)
+	if slating {
+		buffer.noteOwnErr(uerr)
+	}
 
 	// Release the HTTP handler waiting to learn whether this stream came up, so
 	// it can choose a response before committing to a 200.
@@ -903,6 +909,9 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 		}
 		resp = sm.serveSlateAndRetry(ctx, buffer, redial, uerr)
 		buffer.slating.Store(false)
+		if resp != nil && !buffer.failover {
+			buffer.noteOwnErr(nil) // failover streams were noted by failoverAttempt
+		}
 		if resp == nil {
 			sm.stopStreamLocking(buffer.streamID)
 			return

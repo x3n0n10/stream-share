@@ -104,3 +104,21 @@ func TestSetStreamHistoryVia(t *testing.T) {
 		}
 	}
 }
+
+func TestStatsSkipLentViewers(t *testing.T) {
+	m := freshHistoryDB(t)
+	_, _ = m.AddStreamHistory("alice", "10", "live", "Alpha 1", "", "")
+	_, _ = m.AddStreamHistory("failover:Main/1", "20", "live", "Alpha 1 UHD", "", "")
+	w, err := m.GetWatchStats(time.Time{})
+	if err != nil || w.Sessions != 1 || w.UniqueViewers != 1 {
+		t.Fatalf("watch stats = %+v (%v)", w, err)
+	}
+	titles, err := m.GetTopTitles(time.Time{}, 10)
+	if err != nil || len(titles) != 1 || titles[0].StreamID != "10" {
+		t.Fatalf("top titles = %+v (%v)", titles, err)
+	}
+	users, err := m.GetTopUsers(time.Time{}, 10)
+	if err != nil || len(users) != 1 || users[0].Username != "alice" {
+		t.Fatalf("top users = %+v (%v)", users, err)
+	}
+}

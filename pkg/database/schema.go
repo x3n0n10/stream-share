@@ -68,6 +68,9 @@ func (m *DBManager) initSchema() error {
 	if _, err := m.db.Exec(`ALTER TABLE stream_history ADD COLUMN IF NOT EXISTS via TEXT NOT NULL DEFAULT ''`); err != nil {
 		return fmt.Errorf("failed to add via to stream_history: %w", err)
 	}
+	if _, err := m.db.Exec(`ALTER TABLE stream_history ADD COLUMN IF NOT EXISTS via_channel TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("failed to add via_channel to stream_history: %w", err)
+	}
 
 	if _, err := m.db.Exec(`
         CREATE TABLE IF NOT EXISTS temporary_links (

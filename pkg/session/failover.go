@@ -200,7 +200,7 @@ func (sm *SessionManager) failoverAttempt(ctx context.Context, buffer *StreamBuf
 		if ss != nil {
 			channel, _ := url.QueryUnescape(resp.Header.Get(FailoverChannelHeader)) // "" when malformed
 			ss.SetVia(target.Name, channel)
-			sm.recordHistoryVia(buffer.streamID, target.Name)
+			sm.recordHistoryVia(buffer.streamID, target.Name, channel)
 		}
 		utils.InfoLog("Failover: %s served via %s (own provider: %s)", label, target.Name, sm.failoverReason(ownErr))
 		buffer.noteOwnErr(ownErr)

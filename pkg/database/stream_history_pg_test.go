@@ -80,18 +80,19 @@ func TestSetStreamHistoryVia(t *testing.T) {
 	if err := m.CloseStreamHistory(closed); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.SetStreamHistoryVia("10", "Spare"); err != nil {
+	if err := m.SetStreamHistoryVia("10", "Spare", "Channel X"); err != nil {
 		t.Fatal(err)
 	}
-	want := map[int64]string{open1: "Spare", open2: "Spare", closed: "", other: "", nonLive: ""}
-	for id, via := range want {
-		var got string
-		if err := m.db.QueryRow("SELECT via FROM stream_history WHERE id=$1", id).Scan(&got); err != nil || got != via {
-			t.Fatalf("row %d via = %q (%v), want %q", id, got, err, via)
+	marked, unmarked := [2]string{"Spare", "Channel X"}, [2]string{"", ""}
+	want := map[int64][2]string{open1: marked, open2: marked, closed: unmarked, other: unmarked, nonLive: unmarked}
+	for id, w := range want {
+		var got [2]string
+		if err := m.db.QueryRow("SELECT via, via_channel FROM stream_history WHERE id=$1", id).Scan(&got[0], &got[1]); err != nil || got != w {
+			t.Fatalf("row %d via = %q (%v), want %q", id, got, err, w)
 		}
 	}
 	u, err := m.GetUserHistory("alice", time.Time{}, 10, 0)
-	if err != nil || len(u) != 1 || u[0].Via != "Spare" {
+	if err != nil || len(u) != 1 || u[0].Via != "Spare" || u[0].ViaChannel != "Channel X" {
 		t.Fatalf("user history = %+v (%v)", u, err)
 	}
 	r, err := m.GetRecentHistory(time.Time{}, 10, 0)
@@ -99,8 +100,12 @@ func TestSetStreamHistoryVia(t *testing.T) {
 		t.Fatalf("recent = %+v (%v)", r, err)
 	}
 	for _, e := range r {
-		if (e.Username == "alice" || e.Username == "bob") != (e.Via == "Spare") {
-			t.Fatalf("recent row %s via = %q", e.Username, e.Via)
+		w := unmarked
+		if e.Username == "alice" || e.Username == "bob" {
+			w = marked
+		}
+		if got := [2]string{e.Via, e.ViaChannel}; got != w {
+			t.Fatalf("recent row %s via = %q, want %q", e.Username, got, w)
 		}
 	}
 }

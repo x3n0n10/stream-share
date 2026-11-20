@@ -98,6 +98,7 @@ func (c *Config) getHistoryFeed(ctx *gin.Context) {
 		StartTime   time.Time `json:"start_time"`
 		DurationSec int64     `json:"duration_sec"`
 		Via         string    `json:"via,omitempty"`
+		ViaChannel  string    `json:"via_channel,omitempty"`
 	}
 	feedItems := make([]item, 0, len(entries))
 	for _, e := range entries {
@@ -110,6 +111,7 @@ func (c *Config) getHistoryFeed(ctx *gin.Context) {
 			StartTime:   e.StartTime,
 			DurationSec: e.DurationSec,
 			Via:         e.Via,
+			ViaChannel:  e.ViaChannel,
 		})
 	}
 
@@ -198,6 +200,7 @@ func (c *Config) getUserHistory(ctx *gin.Context) {
 		StartTime   time.Time `json:"start_time"`
 		DurationSec int64     `json:"duration_sec"`
 		Via         string    `json:"via,omitempty"`
+		ViaChannel  string    `json:"via_channel,omitempty"`
 	}
 	entryItems := make([]item, 0, len(entries))
 	for _, e := range entries {
@@ -208,6 +211,7 @@ func (c *Config) getUserHistory(ctx *gin.Context) {
 			StartTime:   e.StartTime,
 			DurationSec: e.DurationSec,
 			Via:         e.Via,
+			ViaChannel:  e.ViaChannel,
 		})
 	}
 

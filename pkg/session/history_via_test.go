@@ -59,22 +59,22 @@ func viaTestDB(t *testing.T) *database.DBManager {
 	return db
 }
 
-// historyVia waits for the user's newest history row to carry want.
-func historyVia(t *testing.T, db *database.DBManager, user, want string) {
+// historyVia waits for the user's newest history row to carry want and wantCh.
+func historyVia(t *testing.T, db *database.DBManager, user, want, wantCh string) {
 	t.Helper()
-	var got string
+	var got, gotCh string
 	for end := time.Now().Add(3 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
 		rows, err := db.GetUserHistory(user, time.Time{}, 1, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(rows) == 1 {
-			if got = rows[0].Via; got == want {
+			if got, gotCh = rows[0].Via, rows[0].ViaChannel; got == want && gotCh == wantCh {
 				return
 			}
 		}
 	}
-	t.Fatalf("%s: history via = %q, want %q", user, got, want)
+	t.Fatalf("%s: history via = %q/%q, want %q/%q", user, got, gotCh, want, wantCh)
 }
 
 func waitHistoryRow(t *testing.T, sm *SessionManager, user, streamID string) {
@@ -105,9 +105,9 @@ func TestHistoryViaBothOrders(t *testing.T) {
 		user, ch := "via-a"+run, "via-ch-a"+run
 		sm.recordLiveHistory(user, ch, "live", "T", "", "")
 		waitHistoryRow(t, sm, user, ch)
-		historyVia(t, db, user, "")
-		sm.recordHistoryVia(ch, "Spare")
-		historyVia(t, db, user, "Spare")
+		historyVia(t, db, user, "", "")
+		sm.recordHistoryVia(ch, "Spare", "Channel X")
+		historyVia(t, db, user, "Spare", "Channel X")
 	})
 
 	t.Run("via set before the insert", func(t *testing.T) {
@@ -116,13 +116,13 @@ func TestHistoryViaBothOrders(t *testing.T) {
 		sm.db = db
 		user, ch := "via-b"+run, "via-ch-b"+run
 		ss := &types.StreamSession{StreamID: ch, StreamType: "live", Viewers: map[string]time.Time{}}
-		ss.SetVia("Spare", "")
+		ss.SetVia("Spare", "Channel X")
 		sm.streamLock.Lock()
 		sm.streamSessions[ch] = ss
 		sm.streamLock.Unlock()
 		sm.recordLiveHistory(user, ch, "live", "T", "", "")
 		waitHistoryRow(t, sm, user, ch)
-		historyVia(t, db, user, "Spare")
+		historyVia(t, db, user, "Spare", "Channel X")
 	})
 
 	// The pump's own UPDATE must fill a row that already exists: another
@@ -141,8 +141,8 @@ func TestHistoryViaBothOrders(t *testing.T) {
 		if uerr := waitReady(t, buffer); uerr != nil {
 			t.Fatalf("StartError = %+v", uerr)
 		}
-		historyVia(t, db, pre, "Spare")
+		historyVia(t, db, pre, "Spare", "")
 		waitHistoryRow(t, sm, "via-c"+run, ch)
-		historyVia(t, db, "via-c"+run, "Spare")
+		historyVia(t, db, "via-c"+run, "Spare", "")
 	})
 }

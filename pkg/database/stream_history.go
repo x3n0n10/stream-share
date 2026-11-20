@@ -94,14 +94,14 @@ func (m *DBManager) CloseStreamHistory(historyID int64) error {
 }
 
 // SetStreamHistoryVia records the fallback instance serving a stream on its
-// open history rows.
-func (m *DBManager) SetStreamHistoryVia(streamID, via string) error {
+// open history rows, with the channel it picked there.
+func (m *DBManager) SetStreamHistoryVia(streamID, via, channel string) error {
 	if m == nil || m.db == nil {
 		return fmt.Errorf("database not initialized")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := m.db.ExecContext(ctx, `UPDATE stream_history SET via = $2 WHERE stream_id = $1 AND stream_type = 'live' AND end_time IS NULL`, streamID, via)
+	_, err := m.db.ExecContext(ctx, `UPDATE stream_history SET via = $2, via_channel = $3 WHERE stream_id = $1 AND stream_type = 'live' AND end_time IS NULL`, streamID, via, channel)
 	return err
 }
 
@@ -114,6 +114,7 @@ type HistoryEntry struct {
 	StartTime   time.Time
 	EndTime     sql.NullTime
 	Via         string
+	ViaChannel  string
 	DurationSec int64 // COALESCE(end_time, now) - start_time, in seconds
 }
 
@@ -132,7 +133,7 @@ func (m *DBManager) GetUserHistory(username string, since time.Time, limit, offs
 	sinceParam := sql.NullTime{Time: since, Valid: !since.IsZero()}
 
 	rows, err := m.db.QueryContext(ctx, `
-        SELECT stream_id, stream_type, COALESCE(stream_title, ''), start_time, end_time, via,
+        SELECT stream_id, stream_type, COALESCE(stream_title, ''), start_time, end_time, via, via_channel,
                EXTRACT(EPOCH FROM (COALESCE(end_time, NOW()) - start_time))::bigint
         FROM stream_history
         WHERE username = $1 AND ($2::timestamp IS NULL OR start_time >= $2)
@@ -148,7 +149,7 @@ func (m *DBManager) GetUserHistory(username string, since time.Time, limit, offs
 	entries := make([]HistoryEntry, 0)
 	for rows.Next() {
 		e := HistoryEntry{Username: username}
-		if err := rows.Scan(&e.StreamID, &e.StreamType, &e.StreamTitle, &e.StartTime, &e.EndTime, &e.Via, &e.DurationSec); err != nil {
+		if err := rows.Scan(&e.StreamID, &e.StreamType, &e.StreamTitle, &e.StartTime, &e.EndTime, &e.Via, &e.ViaChannel, &e.DurationSec); err != nil {
 			utils.WarnLog("Database error scanning history row: %v", err)
 			continue
 		}
@@ -172,7 +173,7 @@ func (m *DBManager) GetRecentHistory(since time.Time, limit, offset int) ([]Hist
 	sinceParam := sql.NullTime{Time: since, Valid: !since.IsZero()}
 
 	rows, err := m.db.QueryContext(ctx, `
-        SELECT username, stream_id, stream_type, COALESCE(stream_title, ''), start_time, end_time, via,
+        SELECT username, stream_id, stream_type, COALESCE(stream_title, ''), start_time, end_time, via, via_channel,
                EXTRACT(EPOCH FROM (COALESCE(end_time, NOW()) - start_time))::bigint
         FROM stream_history
         WHERE ($1::timestamp IS NULL OR start_time >= $1)
@@ -188,7 +189,7 @@ func (m *DBManager) GetRecentHistory(since time.Time, limit, offset int) ([]Hist
 	entries := make([]HistoryEntry, 0)
 	for rows.Next() {
 		var e HistoryEntry
-		if err := rows.Scan(&e.Username, &e.StreamID, &e.StreamType, &e.StreamTitle, &e.StartTime, &e.EndTime, &e.Via, &e.DurationSec); err != nil {
+		if err := rows.Scan(&e.Username, &e.StreamID, &e.StreamType, &e.StreamTitle, &e.StartTime, &e.EndTime, &e.Via, &e.ViaChannel, &e.DurationSec); err != nil {
 			utils.WarnLog("Database error scanning history row: %v", err)
 			continue
 		}

@@ -28,6 +28,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/lucasduport/stream-share/pkg/config"
+	"github.com/lucasduport/stream-share/pkg/types"
 	xtreamapi "github.com/lucasduport/stream-share/pkg/xtream"
 )
 
@@ -394,5 +395,18 @@ func TestIsTruthyQuery(t *testing.T) {
 		if isTruthyQuery(v) {
 			t.Errorf("isTruthyQuery(%q) = true, want false", v)
 		}
+	}
+}
+
+func TestCountOwnStreamsSkipsFallbackServed(t *testing.T) {
+	own := &types.StreamSession{StreamID: "1", Active: true}
+	lentHere := &types.StreamSession{StreamID: "2", Active: true} // a lent stream on the lender has no via
+	borrowed := &types.StreamSession{StreamID: "3", Active: true}
+	borrowed.SetVia("Spare")
+	if got := countOwnStreams([]*types.StreamSession{own, lentHere, borrowed}); got != 2 {
+		t.Fatalf("countOwnStreams = %d, want 2", got)
+	}
+	if got := countOwnStreams(nil); got != 0 {
+		t.Fatalf("countOwnStreams(nil) = %d, want 0", got)
 	}
 }

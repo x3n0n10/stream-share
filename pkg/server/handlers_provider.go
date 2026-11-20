@@ -231,7 +231,9 @@ func (c *Config) renderProviderInfo(snap providerInfoSnapshot) map[string]interf
 	// How many of those provider-side connections are ours: one per active
 	// shared stream, however many viewers each is serving. Seeing this next to
 	// active_connections is what makes the multiplexing visible — and tells an
-	// operator whether a connection limit is being spent elsewhere.
+	// operator whether a connection limit is being spent elsewhere. A stream
+	// served through a fallback instance uses that instance's connection, so it
+	// is not counted here.
 	data["local_upstream_connections"] = c.activeStreamCount()
 
 	if len(info.AllowedOutputFormats) > 0 {
@@ -255,15 +257,20 @@ func (c *Config) renderProviderInfo(snap providerInfoSnapshot) map[string]interf
 	return data
 }
 
-// activeStreamCount reports how many shared streams are currently running, which
-// is also how many connections this instance holds open to the provider.
+// activeStreamCount reports how many connections this instance holds open to
+// its own provider.
 func (c *Config) activeStreamCount() int {
 	if c.sessionManager == nil {
 		return 0
 	}
+	return countOwnStreams(c.sessionManager.GetAllStreams())
+}
+
+// countOwnStreams counts active streams not served through a fallback instance.
+func countOwnStreams(streams []*types.StreamSession) int {
 	n := 0
-	for _, s := range c.sessionManager.GetAllStreams() {
-		if s.Active {
+	for _, s := range streams {
+		if s.Active && s.GetVia() == "" {
 			n++
 		}
 	}

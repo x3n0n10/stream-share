@@ -410,3 +410,21 @@ func TestCountOwnStreamsSkipsFallbackServed(t *testing.T) {
 		t.Fatalf("countOwnStreams(nil) = %d, want 0", got)
 	}
 }
+
+func TestConnectionsUseLiveCountWhenHigher(t *testing.T) {
+	if got := connectionsLine(0, 1, 1); got != "1/1 connection(s) in use" {
+		t.Errorf("connectionsLine(0, 1, 1) = %q", got)
+	}
+	if got := connectionsLine(0, 1, 0); got != "1 connection(s) in use" {
+		t.Errorf("connectionsLine(0, 1, 0) = %q", got)
+	}
+	if got := connectionsLine(0, 0, 0); got != "" {
+		t.Errorf("connectionsLine(0, 0, 0) = %q, want empty", got)
+	}
+	if got := connectionsAvailable(0, 1, 1); got != 0 {
+		t.Errorf("connectionsAvailable(0, 1, 1) = %d, want 0", got)
+	}
+	if got := connectionsAvailable(3, 1, 4); got != 1 {
+		t.Errorf("connectionsAvailable(3, 1, 4) = %d, want 1", got)
+	}
+}

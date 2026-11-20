@@ -255,14 +255,20 @@ func (m *DBManager) GetWatchStats(since time.Time) (WatchStats, error) {
         SELECT COUNT(*), COUNT(DISTINCT username),
                COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(end_time, NOW()) - start_time))), 0)::bigint
         FROM stream_history
-        WHERE ($1::timestamp IS NULL OR start_time >= $1)
-    `, sinceParam).Scan(&stats.Sessions, &stats.UniqueViewers, &stats.WatchSeconds)
+        WHERE ($1::timestamp IS NULL OR start_time >= $1) AND username NOT LIKE $2
+    `, sinceParam, failoverUsernamePrefix+"%").Scan(&stats.Sessions, &stats.UniqueViewers, &stats.WatchSeconds)
 	if err != nil {
 		utils.ErrorLog("Database error getting watch stats: %v", err)
 		return stats, err
 	}
 	return stats, nil
 }
+
+// failoverUsernamePrefix marks the stand-in viewer recorded for a connection
+// lent to another instance. It mirrors session.FailoverIdentityPrefix (database
+// cannot import session, which imports database). Stats skip these rows so a
+// viewing is not counted on both instances.
+const failoverUsernamePrefix = "failover:"
 
 // TitleStat is an aggregate row for one piece of content over a time window.
 type TitleStat struct {
@@ -291,11 +297,11 @@ func (m *DBManager) GetTopTitles(since time.Time, limit int) ([]TitleStat, error
         SELECT stream_id, stream_type, MAX(NULLIF(stream_title, '')) AS title,
                COUNT(*), COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(end_time, NOW()) - start_time))), 0)::bigint AS watch_seconds
         FROM stream_history
-        WHERE ($1::timestamp IS NULL OR start_time >= $1)
+        WHERE ($1::timestamp IS NULL OR start_time >= $1) AND username NOT LIKE $3
         GROUP BY stream_id, stream_type
         ORDER BY watch_seconds DESC
         LIMIT $2
-    `, sinceParam, limit)
+    `, sinceParam, limit, failoverUsernamePrefix+"%")
 	if err != nil {
 		utils.ErrorLog("Database error getting top titles: %v", err)
 		return nil, err
@@ -344,11 +350,11 @@ func (m *DBManager) GetTopUsers(since time.Time, limit int) ([]UserStat, error) 
 	rows, err := m.db.QueryContext(ctx, `
         SELECT username, COUNT(*), COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(end_time, NOW()) - start_time))), 0)::bigint AS watch_seconds
         FROM stream_history
-        WHERE ($1::timestamp IS NULL OR start_time >= $1)
+        WHERE ($1::timestamp IS NULL OR start_time >= $1) AND username NOT LIKE $3
         GROUP BY username
         ORDER BY watch_seconds DESC
         LIMIT $2
-    `, sinceParam, limit)
+    `, sinceParam, limit, failoverUsernamePrefix+"%")
 	if err != nil {
 		utils.ErrorLog("Database error getting top users: %v", err)
 		return nil, err

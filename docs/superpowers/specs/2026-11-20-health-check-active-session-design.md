@@ -57,24 +57,29 @@ stay as they are), `runProviderProbe` decides in this order:
    error) and is not `slating`. Lent (forwarded) streams count: they are served
    by the own provider. Detail names the evidence, e.g. "own provider serving N
    active stream(s)".
-2. **Failing stream present → its error.** A stream that is `slating`, or that is
-   being served via a fallback instance after the own provider returned an error
-   (not `KeyAllInUse`). Its last own-provider `UpstreamError` is classified like
-   a probe result: blocked when the status is in the blocked list, else error.
-3. **Otherwise → probe, politely.** Acquire a **Background**-class arbiter lease
+2. **Otherwise → probe, politely.** Acquire a **Background**-class arbiter lease
    (never preempts anything), bounded by the probe timeout, then dial as today and
-   release. If no slot frees up, a holder is using the own provider, so report
-   healthy ("provider connection in use"), since failing holders were already
-   caught by step 2.
+   release. A probe error other than `KeyAllInUse` is classified like any
+   failure (blocked when its status is in the blocked list, else error).
+3. **No slot free (`KeyAllInUse`, nothing measured) → failing evidence, else
+   healthy.** If a stream is `slating`, or is served via a fallback instance
+   after the own provider returned an error (not `KeyAllInUse`), its last
+   own-provider `UpstreamError` is classified the same way. With none, a holder
+   is using the own provider: healthy ("provider connection in use").
 
-Precedence: step 1 wins over step 2. A working connection proves the egress IP
+Why probe before failing evidence: failing evidence from a fallback-served
+stream is never refreshed, so it must not stop a fresh probe after a VPN
+reconnect. Failing streams hold no slot, so probing is safe.
+
+Precedence: step 1 wins over the rest. A working connection proves the egress IP
 is not blocked; a slate next to it is channel-specific (e.g. a removed channel).
 
 ### Recording the fallback reason
 
 `failoverAttempt` already knows `ownErr` when it serves via a fallback. Store it
 on the `StreamBuffer` (cleared when the own provider serves again, including on
-a slate-retry recovery). Slating streams likewise keep their latest
+a slate-retry recovery). `noteOwnErr` leaves the stored value unchanged on
+`KeyAllInUse`: a busy slot says nothing about the provider. Slating streams likewise keep their latest
 `UpstreamError` (the initial one, updated by each failed retry).
 
 ### 456 ambiguity

@@ -141,13 +141,15 @@ func (c *Config) probeHealth() (snap healthSnapshot, throttled bool) {
 	return snap, false
 }
 
-// runProviderProbe decides the verdict without ever cutting a viewer. It reads
-// evidence from live streams first (an own-provider stream serving means the
-// provider is fine; a slate or provider-error fallback is the failure), and
-// only when there is none dials the probe channel once — through a free
-// connection slot, never by preempting a viewer. A busy provider proves
-// nothing, so it counts as healthy. It never mutates cache state; probeHealth
-// owns that.
+// runProviderProbe decides the verdict without ever cutting a viewer. An
+// own-provider stream serving means the provider is fine. Otherwise it dials
+// the probe channel once, through a free connection slot and never by
+// preempting a viewer; failing streams hold no slot, so their stale evidence
+// (a fallback-served stream is never retried on the own provider) must not
+// stop a fresh probe after a VPN reconnect. Only when no slot is free, so
+// nothing was measured, does it fall back on a failing stream's error; with
+// none, a busy provider counts as healthy. It never mutates cache state;
+// probeHealth owns that.
 func (c *Config) runProviderProbe() (status, code, detail string) {
 	if c.sessionManager == nil {
 		return healthStatusError, "", "session manager not initialized"
@@ -155,9 +157,6 @@ func (c *Config) runProviderProbe() (status, code, detail string) {
 	serving, failing := c.sessionManager.ProviderEvidence()
 	if serving > 0 {
 		return healthStatusHealthy, "", fmt.Sprintf("own provider serving %d active stream(s)", serving)
-	}
-	if len(failing) > 0 {
-		return c.classifyFailures(failing)
 	}
 	target, err := c.healthProbeURL()
 	if err != nil {
@@ -173,6 +172,9 @@ func (c *Config) runProviderProbe() (status, code, detail string) {
 		return healthStatusHealthy, "", "provider served a live response"
 	}
 	if uerr.Key == session.KeyAllInUse {
+		if len(failing) > 0 {
+			return c.classifyFailures(failing)
+		}
 		return healthStatusHealthy, "", "provider connection in use"
 	}
 	return c.classifyFailures([]*session.UpstreamError{uerr})

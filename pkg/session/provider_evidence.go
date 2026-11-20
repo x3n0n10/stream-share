@@ -19,11 +19,11 @@
 
 package session
 
-// noteOwnErr records why the own provider is not serving this stream, or
-// clears it. A connection-limit refusal is not the provider's fault.
+// noteOwnErr records why the own provider is not serving this stream. nil
+// clears it. A connection-limit refusal is not the provider's fault and says
+// nothing new, so it leaves what was recorded as it is.
 func (b *StreamBuffer) noteOwnErr(uerr *UpstreamError) {
-	if uerr == nil || uerr.Key == KeyAllInUse {
-		b.ownErr.Store(nil)
+	if uerr != nil && uerr.Key == KeyAllInUse {
 		return
 	}
 	b.ownErr.Store(uerr)

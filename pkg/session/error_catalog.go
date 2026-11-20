@@ -71,6 +71,9 @@ func builtinCatalog() map[string]ErrorInfo {
 
 		// Catchup for a time no recording exists of.
 		KeyNoRecording: {Meaning: "No Recording", Message: "No recording is available for this time."},
+
+		// A lent stream refused because the own viewers use every connection.
+		KeyAllInUse: {Meaning: "In Use", Message: "All provider connections are in use by other viewers."},
 	}
 }
 

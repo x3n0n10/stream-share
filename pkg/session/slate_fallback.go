@@ -91,6 +91,11 @@ func (sm *SessionManager) ServesSlateFor(streamID string) bool {
 // dialUpstream performs one upstream attempt, returning either a live response
 // or a classified failure. The response body is the caller's to close.
 func (sm *SessionManager) dialUpstream(ctx context.Context, upstreamURL *url.URL) (*http.Response, *UpstreamError) {
+	return sm.dial(ctx, upstreamURL, nil)
+}
+
+// dial is dialUpstream with extra request headers.
+func (sm *SessionManager) dial(ctx context.Context, upstreamURL *url.URL, header http.Header) (*http.Response, *UpstreamError) {
 	req, err := http.NewRequestWithContext(ctx, "GET", upstreamURL.String(), nil)
 	if err != nil {
 		return nil, classifyUpstream(err, 0)
@@ -103,6 +108,11 @@ func (sm *SessionManager) dialUpstream(ctx context.Context, upstreamURL *url.URL
 	req.Header.Set("Accept-Language", utils.GetLanguageHeader())
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("Connection", "keep-alive")
+	for k, vs := range header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
 
 	resp, err := sm.httpClient.Do(req)
 	if err != nil {
@@ -149,11 +159,11 @@ func (sm *SessionManager) slateViewFor(streamID string, uerr *UpstreamError) sla
 //
 // It returns a live upstream response when the provider recovers — the caller
 // resumes normal pumping with it — or nil when the retry budget is exhausted,
-// every viewer left, or the stream was stopped.
+// every viewer left, or the stream was stopped. redial is one retry.
 func (sm *SessionManager) serveSlateAndRetry(
 	ctx context.Context,
 	buffer *StreamBuffer,
-	upstreamURL *url.URL,
+	redial func() (*http.Response, *UpstreamError),
 	uerr *UpstreamError,
 ) *http.Response {
 
@@ -196,7 +206,7 @@ func (sm *SessionManager) serveSlateAndRetry(
 			continue
 		}
 
-		resp, retryErr := sm.dialUpstream(ctx, upstreamURL)
+		resp, retryErr := redial()
 		if retryErr == nil {
 			utils.InfoLog("Error slate: %s recovered; resuming live video", sm.streamLabel(buffer.streamID))
 			return resp

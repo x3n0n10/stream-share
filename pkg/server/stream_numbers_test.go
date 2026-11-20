@@ -124,3 +124,65 @@ func TestStatusTextShowsStreamIdentifiers(t *testing.T) {
 		t.Fatal("num must be omitted when unknown")
 	}
 }
+
+// A stream served by a fallback shows its name as "via"; the key is absent
+// otherwise.
+func TestActiveStreamItemVia(t *testing.T) {
+	c := playerAPITestConfig("http://provider.invalid")
+	s := &types.StreamSession{StreamID: "10", StreamType: "live", StreamTitle: "T",
+		StartTime: time.Now(), Viewers: map[string]time.Time{}}
+	b, _ := json.Marshal(c.buildActiveStreamItem(s, nil))
+	if strings.Contains(string(b), `"via"`) {
+		t.Fatalf("via must be omitted without a fallback: %s", b)
+	}
+	s.SetVia("Spare")
+	b, _ = json.Marshal(c.buildActiveStreamItem(s, nil))
+	if !strings.Contains(string(b), `"via":"Spare"`) {
+		t.Fatalf("via missing: %s", b)
+	}
+}
+
+// A lent viewer (failover identity) is already counted on their own
+// instance, so neither viewer count includes it.
+func TestViewerCountsSkipFailoverIdentities(t *testing.T) {
+	c := playerAPITestConfig("http://provider.invalid")
+	sm := session.NewSessionManager(nil)
+	defer sm.Stop()
+	c.sessionManager = sm
+	for _, u := range []string{"lucas", "failover:Main/10"} {
+		sm.RegisterUser(u, "1.2.3.4", "ua")
+		sm.RegisterVODView(u, "5", "movie", "M")
+	}
+
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("GET", "/api/internal/status", nil)
+	c.statusSummary(ctx)
+	var st struct {
+		Data struct {
+			Active int `json:"users_count_active"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Data.Active != 1 {
+		t.Fatalf("users_count_active = %d, want 1", st.Data.Active)
+	}
+
+	w = httptest.NewRecorder()
+	ctx, _ = gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("GET", "/api/internal/dashboard", nil)
+	c.getDashboardStats(ctx)
+	var d struct {
+		Data struct {
+			Active int `json:"active_viewers"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Data.Active != 1 {
+		t.Fatalf("active_viewers = %d, want 1", d.Data.Active)
+	}
+}

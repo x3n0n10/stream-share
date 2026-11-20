@@ -39,6 +39,8 @@ import (
 // many stream connections are open at once.
 type liveProvider struct {
 	open, maxOpen, total int32
+	streams              string // get_live_streams answer; empty uses the default catalogue
+	failStatus           int    // answered to every stream request when non-zero
 }
 
 func (p *liveProvider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -48,12 +50,20 @@ func (p *liveProvider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case "get_live_categories":
 			_, _ = w.Write([]byte(`[{"category_id":"10","category_name":"A| News","parent_id":0},{"category_id":"20","category_name":"B| News","parent_id":0}]`))
 		case "get_live_streams":
+			if p.streams != "" {
+				_, _ = w.Write([]byte(p.streams))
+				return
+			}
 			_, _ = w.Write([]byte(`[{"num":1,"stream_id":101,"name":"A| Channel One","category_id":"10","epg_channel_id":"one.a","stream_icon":"http://logo/one.png","is_adult":0},` +
 				`{"num":2,"stream_id":102,"name":"A| Channel Two","category_id":"10","epg_channel_id":"two.a","is_adult":0},` +
 				`{"num":3,"stream_id":103,"name":"B| Channel Three","category_id":"20","epg_channel_id":"three.b","is_adult":0}]`))
 		default:
 			_, _ = w.Write([]byte(`[]`))
 		}
+		return
+	}
+	if p.failStatus != 0 {
+		w.WriteHeader(p.failStatus)
 		return
 	}
 	n := atomic.AddInt32(&p.open, 1)

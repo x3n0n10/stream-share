@@ -342,7 +342,7 @@ curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   https://streamshare.example.com/api/internal/ip-aliases
 ```
 
-Every endpoint that surfaces a viewer identity then includes a resolved `display_name` alongside the raw one — e.g. `streams`/`status` return `viewers: [{"id": "192.168.1.42", "display_name": "Living Room TV"}]` instead of a bare string list, `users` adds a top-level `display_name`, and `history`'s per-entry `username` is joined by a `display_name`. The raw `id`/`username` (IP or LDAP username) is always still there too — that's the real identity used for lookups (e.g. `GET /users/:username`, `GET /history/:username`); the alias is display-only. One alias per IP: posting again for the same `ip_address` replaces the existing alias rather than adding a second one. Aliases are also unique (case-insensitively) across IPs, so they double as a reverse lookup — `GET /ip-aliases/resolve/:alias` — used by Discord's `/history alias:` option to look a viewer up by their friendly name instead of typing out the IP.
+Every endpoint that surfaces a viewer identity then includes a resolved `display_name` alongside the raw one — e.g. `streams`/`status` return `viewers: [{"id": "192.168.1.42", "display_name": "Living Room TV"}]` instead of a bare string list, `users` adds a top-level `display_name`, and `history`'s per-entry `username` is joined by a `display_name`. The raw `id`/`username` (IP or LDAP username) is always still there too — that's the real identity used for lookups (e.g. `GET /users/:username`, `GET /history/:username`); the alias is display-only. One alias per IP: posting again for the same `ip_address` replaces the existing alias rather than adding a second one. Aliases are also unique (case-insensitively) across IPs, so they double as a reverse lookup — `GET /ip-aliases/resolve/:alias` — used by Discord's `/history alias:` option to look a viewer up by their friendly name instead of typing out the IP. When a fallback instance served a live stream, `streams`/`status` items and `history` entries also carry `via` (its display name; omitted otherwise), and its lent viewers are not counted in `users_count_active` or the dashboard's `active_viewers`.
 
 This also flows into Discord:
 - `/status`'s viewer list shows `Alias (raw IP)` when an alias is set (or just the raw identifier when it isn't), so you always see both at a glance.
@@ -647,6 +647,7 @@ The file is a single object mapping an error key to the text for that error:
 | `DNS` | The provider's hostname could not be resolved |
 | `TLS` | The provider's certificate could not be verified |
 | `NO_RECORDING` | Catchup for a time neither the local buffer nor the provider has a recording of |
+| `IN_USE` | The provider is in use by this instance's own household and the channel could not be started elsewhere |
 
 **The fields** are both optional, and each falls back independently — so overriding one does not blank the other:
 
@@ -664,6 +665,23 @@ Notes:
 - Long messages wrap to two lines and are then truncated — aim for something short enough to read at a glance from the sofa.
 
 ---
+
+## Failover between instances
+
+When a live channel cannot start on this instance's provider (connection limit, error, timeout), it can ask other StreamShare instances, in order, to lend the same channel from their provider connection. The first one that answers with a stream serves the viewer; if none does, the viewer gets the same slate or error as without failover.
+
+- Live channels only, and only at channel start. Catchup, movies and series, and switching mid-stream behave as before.
+- Channels are matched by EPG ID, then by name.
+- Set on the instance that asks (the primary): `FAILOVER_INSTANCES`, an ordered JSON list such as `[{"name":"Spare","url":"http://spare.example.test:8080","key":"test-key"}]`. Set on the instance that lends: `FAILOVER_KEY`, the same key. An instance without `FAILOVER_KEY` never lends. If `FAILOVER_INSTANCES` is not valid JSON, or an entry lacks a field or has a non-http(s) URL, failover stays off and a warning is logged.
+- The Suite sets both variables for you.
+
+Limits:
+- The same viewer asking again gets today's channel switch, not a second connection.
+- A lent stream is cut when the lender's own household starts watching and needs the connection.
+- With fallbacks configured, another household viewer no longer takes the connection from someone already watching; they are served by a fallback or see the `IN_USE` slate.
+- A provider that takes longer than 3 s to answer is treated as failed and the next instance is tried.
+- At a channel start, a connection limit answer (456/461) from the own provider is asked once more after 1.5 s before a fallback is tried: right after a channel switch or a VOD that stopped, a provider panel can still count the old connection for a moment.
+- Each additional fallback can add up to 3 s to a channel start, so with two or more fallbacks a channel may run past the player's start window when earlier fallbacks hang.
 
 ## Container Health & Startup Ordering
 

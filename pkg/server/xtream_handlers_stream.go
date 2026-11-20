@@ -720,6 +720,16 @@ func (c *Config) awaitUpstreamStart(ctx *gin.Context, buffer *session.StreamBuff
 	clientGone := ctx.Request.Context().Done()
 	select {
 	case <-buffer.Ready():
+		// A lent stream reports the failure instead of a slate, also when it
+		// joined a household stream that is showing one.
+		if session.IsFailoverIdentity(username) {
+			startErr := buffer.StartError()
+			if c.sessionManager.Slating(streamID) || (startErr != nil && !c.sessionManager.ServesSlateFor(streamID)) {
+				c.sessionManager.RemoveClient(streamID, username, clientKey)
+				ctx.AbortWithStatus(failoverStatus(startErr))
+				return false
+			}
+		}
 		if startErr := buffer.StartError(); startErr != nil {
 			// The session manager serves an error slate for eligible live
 			// streams; the bytes arrive on dataChan like any other content,

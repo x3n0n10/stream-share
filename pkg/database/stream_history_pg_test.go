@@ -24,6 +24,7 @@ package database
 
 import (
 	"testing"
+	"time"
 )
 
 func freshHistoryDB(t *testing.T) *DBManager {
@@ -64,5 +65,42 @@ func TestUpdateStreamHistoryTitleCorrectsRow(t *testing.T) {
 	}
 	if got := storedTitle(t, m, id); got != "The Real Movie Title" {
 		t.Fatalf("expected corrected title, got %q", got)
+	}
+}
+
+// SetStreamHistoryVia marks only the open rows of that stream, and both
+// history getters return it.
+func TestSetStreamHistoryVia(t *testing.T) {
+	m := freshHistoryDB(t)
+	open1, _ := m.AddStreamHistory("alice", "10", "live", "T", "", "")
+	open2, _ := m.AddStreamHistory("bob", "10", "live", "T", "", "")
+	closed, _ := m.AddStreamHistory("carol", "10", "live", "T", "", "")
+	other, _ := m.AddStreamHistory("dave", "11", "live", "T", "", "")
+	nonLive, _ := m.AddStreamHistory("erin", "10", "movie", "T", "", "")
+	if err := m.CloseStreamHistory(closed); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SetStreamHistoryVia("10", "Spare"); err != nil {
+		t.Fatal(err)
+	}
+	want := map[int64]string{open1: "Spare", open2: "Spare", closed: "", other: "", nonLive: ""}
+	for id, via := range want {
+		var got string
+		if err := m.db.QueryRow("SELECT via FROM stream_history WHERE id=$1", id).Scan(&got); err != nil || got != via {
+			t.Fatalf("row %d via = %q (%v), want %q", id, got, err, via)
+		}
+	}
+	u, err := m.GetUserHistory("alice", time.Time{}, 10, 0)
+	if err != nil || len(u) != 1 || u[0].Via != "Spare" {
+		t.Fatalf("user history = %+v (%v)", u, err)
+	}
+	r, err := m.GetRecentHistory(time.Time{}, 10, 0)
+	if err != nil || len(r) != 5 {
+		t.Fatalf("recent = %+v (%v)", r, err)
+	}
+	for _, e := range r {
+		if (e.Username == "alice" || e.Username == "bob") != (e.Via == "Spare") {
+			t.Fatalf("recent row %s via = %q", e.Username, e.Via)
+		}
 	}
 }

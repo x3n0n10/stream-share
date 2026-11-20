@@ -26,6 +26,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -408,6 +409,7 @@ type fakeUpstream struct {
 	requests atomic.Int64
 	keyed    atomic.Bool
 	status   atomic.Int32
+	channel  string // sent raw as X-Failover-Channel when set
 }
 
 func newFakeUpstream(t *testing.T, fill byte, status int) *fakeUpstream {
@@ -421,6 +423,9 @@ func newFakeUpstream(t *testing.T, fill byte, status int) *fakeUpstream {
 		if s := f.status.Load(); s != 0 {
 			w.WriteHeader(int(s))
 			return
+		}
+		if f.channel != "" {
+			w.Header().Set(FailoverChannelHeader, f.channel)
 		}
 		w.WriteHeader(http.StatusOK)
 		fl, _ := w.(http.Flusher)
@@ -507,10 +512,10 @@ func served(sm *SessionManager, streamID, key string, fill byte, d time.Duration
 	}
 }
 
-func via(sm *SessionManager, streamID string) string {
+func via(sm *SessionManager, streamID string) (string, string) {
 	ss, ok := sm.GetStreamInfo(streamID)
 	if !ok {
-		return "<no session>"
+		return "<no session>", ""
 	}
 	return ss.GetVia()
 }
@@ -559,8 +564,35 @@ func TestFailoverWhenAnotherViewerHoldsTheSlot(t *testing.T) {
 	if n := own.requests.Load(); n != 1 {
 		t.Fatalf("own upstream opened %d times, want 1", n)
 	}
-	if v := via(sm, "ch2"); v != "Spare" {
+	if v, _ := via(sm, "ch2"); v != "Spare" {
 		t.Fatalf("Via = %q, want Spare", v)
+	}
+}
+
+func TestFailoverRecordsFallbackChannel(t *testing.T) {
+	for _, tc := range []struct{ name, header, want string }{
+		{"named", url.QueryEscape("Kanaal Één+ HD"), "Kanaal Één+ HD"},
+		{"absent", "", ""},
+		{"malformed", "%zz", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			own := newFakeUpstream(t, 'O', 0)
+			spare := newFakeUpstream(t, 'F', 0)
+			spare.channel = tc.header
+			sm, _ := failoverRig(t, nil, target(t, "Spare", spare.URL))
+			aliceWatches(t, sm, own)
+
+			buffer, bob := watch(t, sm, "bob", "ch2", "live", own.URL)
+			if uerr := waitReady(t, buffer); uerr != nil {
+				t.Fatalf("StartError = %+v, want served via the fallback", uerr)
+			}
+			if !served(sm, "ch2", bob, 'F', 3*time.Second) {
+				t.Fatal("bob should receive the fallback's bytes")
+			}
+			if inst, ch := via(sm, "ch2"); inst != "Spare" || ch != tc.want {
+				t.Fatalf("GetVia = (%q, %q), want (Spare, %q)", inst, ch, tc.want)
+			}
+		})
 	}
 }
 
@@ -691,7 +723,7 @@ func TestFailoverTargetsInOrder(t *testing.T) {
 	if !served(sm, "ch2", bob, 'F', 3*time.Second) {
 		t.Fatal("bob should receive the healthy fallback's bytes")
 	}
-	if v := via(sm, "ch2"); v != "Healthy" {
+	if v, _ := via(sm, "ch2"); v != "Healthy" {
 		t.Fatalf("Via = %q, want Healthy", v)
 	}
 	out := logs.String()
@@ -774,7 +806,7 @@ func TestSlateRecoversViaFallback(t *testing.T) {
 		if !served(sm, "ch2", bob, 'F', 10*time.Second) {
 			t.Fatal("bob should continue with the fallback's bytes")
 		}
-		if v := via(sm, "ch2"); v != "Spare" {
+		if v, _ := via(sm, "ch2"); v != "Spare" {
 			t.Fatalf("Via = %q, want Spare", v)
 		}
 		if sm.Slating("ch2") {
@@ -794,7 +826,7 @@ func TestSlateRecoversViaFallback(t *testing.T) {
 		if !served(sm, "ch2", bob, 'O', 10*time.Second) {
 			t.Fatal("bob should continue with the own upstream's bytes")
 		}
-		if v := via(sm, "ch2"); v != "" {
+		if v, _ := via(sm, "ch2"); v != "" {
 			t.Fatalf("Via = %q, want empty", v)
 		}
 	})

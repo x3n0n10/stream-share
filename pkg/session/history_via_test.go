@@ -116,7 +116,7 @@ func TestHistoryViaBothOrders(t *testing.T) {
 		sm.db = db
 		user, ch := "via-b"+run, "via-ch-b"+run
 		ss := &types.StreamSession{StreamID: ch, StreamType: "live", Viewers: map[string]time.Time{}}
-		ss.SetVia("Spare")
+		ss.SetVia("Spare", "")
 		sm.streamLock.Lock()
 		sm.streamSessions[ch] = ss
 		sm.streamLock.Unlock()

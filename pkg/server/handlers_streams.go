@@ -51,7 +51,8 @@ type activeStreamItem struct {
 	StartedAt    time.Time       `json:"started_at"`
 	Duration     string          `json:"duration"`
 	Tech         *StreamTechInfo `json:"tech,omitempty"`
-	Via          string          `json:"via,omitempty"` // fallback instance serving it
+	Via          string          `json:"via,omitempty"`         // fallback instance serving it
+	ViaChannel   string          `json:"via_channel,omitempty"` // channel name it matched
 }
 
 // buildActiveStreamItem resolves a stream session into its API view. Title
@@ -87,6 +88,7 @@ func (c *Config) buildActiveStreamItem(s *types.StreamSession, aliases map[strin
 	epgID, _ := lookupEPGChannelID(normalizeStreamID(s.StreamID))
 	dur := time.Since(s.StartTime).Truncate(time.Second)
 
+	via, viaChannel := s.GetVia()
 	item := activeStreamItem{
 		StreamID:     s.StreamID,
 		StreamType:   s.StreamType,
@@ -96,7 +98,8 @@ func (c *Config) buildActiveStreamItem(s *types.StreamSession, aliases map[strin
 		Viewers:      viewerInfos,
 		StartedAt:    s.StartTime,
 		Duration:     dur.String(),
-		Via:          s.GetVia(),
+		Via:          via,
+		ViaChannel:   viaChannel,
 	}
 	if s.StreamType == "live" {
 		item.Num, _ = c.liveChannelNumber(s.StreamID)

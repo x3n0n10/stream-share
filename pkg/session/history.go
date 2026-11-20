@@ -282,7 +282,7 @@ func (sm *SessionManager) recordLiveHistory(username, streamID, streamType, titl
 			ss := sm.streamSessions[streamID]
 			sm.streamLock.RUnlock()
 			if ss != nil {
-				if via := ss.GetVia(); via != "" {
+				if via, _ := ss.GetVia(); via != "" {
 					sm.recordHistoryVia(streamID, via)
 				}
 			}

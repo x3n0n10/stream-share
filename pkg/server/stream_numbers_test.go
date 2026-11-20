@@ -135,10 +135,15 @@ func TestActiveStreamItemVia(t *testing.T) {
 	if strings.Contains(string(b), `"via"`) {
 		t.Fatalf("via must be omitted without a fallback: %s", b)
 	}
-	s.SetVia("Spare")
+	s.SetVia("Spare", "")
 	b, _ = json.Marshal(c.buildActiveStreamItem(s, nil))
-	if !strings.Contains(string(b), `"via":"Spare"`) {
-		t.Fatalf("via missing: %s", b)
+	if !strings.Contains(string(b), `"via":"Spare"`) || strings.Contains(string(b), `"via_channel"`) {
+		t.Fatalf("via missing or via_channel present without a channel: %s", b)
+	}
+	s.SetVia("Spare", "Channel X")
+	b, _ = json.Marshal(c.buildActiveStreamItem(s, nil))
+	if !strings.Contains(string(b), `"via_channel":"Channel X"`) {
+		t.Fatalf("via_channel missing: %s", b)
 	}
 }
 

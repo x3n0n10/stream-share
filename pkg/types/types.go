@@ -48,6 +48,7 @@ type StreamSession struct {
 	Viewers       map[string]time.Time // Map of usernames to their last activity time
 	Active        bool                 // Whether the stream is currently active
 	Via           string               // Fallback instance serving this stream; empty = own provider
+	ViaChannel    string               // Channel name the fallback matched; empty = unknown
 	lock          sync.RWMutex         // Lock for concurrent access
 }
 
@@ -71,18 +72,20 @@ func (s *StreamSession) RemoveViewer(username string) bool {
 	return len(s.Viewers) > 0
 }
 
-// SetVia records the fallback instance serving this stream.
-func (s *StreamSession) SetVia(name string) {
+// SetVia records the fallback instance serving this stream and the channel
+// name it matched ("" = unknown).
+func (s *StreamSession) SetVia(instance, channel string) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
-	s.Via = name
+	s.Via, s.ViaChannel = instance, channel
 }
 
-// GetVia returns the fallback instance serving this stream ("" = own provider).
-func (s *StreamSession) GetVia() string {
+// GetVia returns the fallback instance serving this stream ("" = own
+// provider) and the channel name it matched ("" = unknown).
+func (s *StreamSession) GetVia() (instance, channel string) {
 	s.lock.RLock()
 	defer s.lock.RUnlock()
-	return s.Via
+	return s.Via, s.ViaChannel
 }
 
 // GetViewers returns a copy of the current viewers map

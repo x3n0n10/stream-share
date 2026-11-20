@@ -125,7 +125,7 @@ func TestFailoverEndToEnd(t *testing.T) {
 		}
 		if !eventually(5*time.Second, func() bool {
 			for _, s := range e.c.sessionManager.GetAllStreams() {
-				if s.GetVia() == "Spare" {
+				if v, _ := s.GetVia(); v == "Spare" {
 					return true
 				}
 			}

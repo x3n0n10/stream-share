@@ -267,7 +267,10 @@ func (c *Config) activeStreamCount() int {
 func countOwnStreams(streams []*types.StreamSession) int {
 	n := 0
 	for _, s := range streams {
-		if s.Active && s.GetVia() == "" {
+		if !s.Active {
+			continue
+		}
+		if via, _ := s.GetVia(); via == "" {
 			n++
 		}
 	}

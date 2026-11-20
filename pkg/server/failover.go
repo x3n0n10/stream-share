@@ -22,6 +22,7 @@ package server
 import (
 	"crypto/subtle"
 	"net/http"
+	"net/url"
 	"unicode"
 
 	"github.com/gin-gonic/gin"
@@ -78,6 +79,9 @@ func (c *Config) handleFailoverLive(ctx *gin.Context) {
 		c.sessionManager.RegisterUser(identity, ctx.ClientIP(), ctx.Request.UserAgent())
 	}
 	ctx.Set("username", identity)
+	if name, _ := lookupAPIChannelName(id); name != "" {
+		ctx.Header(session.FailoverChannelHeader, url.QueryEscape(name))
+	}
 	utils.InfoLog("Failover: serving %s for %s", c.streamLabel(id), from)
 	c.multiplexedStream(ctx, targetURL)
 }

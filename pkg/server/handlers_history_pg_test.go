@@ -60,7 +60,7 @@ func TestHistoryEndpointsCarryVia(t *testing.T) {
 	if _, err := db.AddStreamHistory("viahist-a", "viahist-ch1", "live", "T", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetStreamHistoryVia("viahist-ch1", "Spare"); err != nil {
+	if err := db.SetStreamHistoryVia("viahist-ch1", "Spare", "Channel X"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.AddStreamHistory("viahist-b", "viahist-ch2", "live", "T", "", ""); err != nil {
@@ -78,21 +78,21 @@ func TestHistoryEndpointsCarryVia(t *testing.T) {
 		return w.Body.String()
 	}
 
-	if body := get("/history/viahist-a"); !strings.Contains(body, `"via":"Spare"`) {
+	if body := get("/history/viahist-a"); !strings.Contains(body, `"via":"Spare"`) || !strings.Contains(body, `"via_channel":"Channel X"`) {
 		t.Fatalf("user history lacks via: %s", body)
 	}
-	if body := get("/history/viahist-b"); strings.Contains(body, `"via"`) {
+	if body := get("/history/viahist-b"); strings.Contains(body, `"via"`) || strings.Contains(body, `"via_channel"`) {
 		t.Fatalf("user history row without via has the key: %s", body)
 	}
 	feed := get("/history?limit=500")
 	for _, row := range strings.Split(feed, `{"username"`) {
 		switch {
 		case strings.HasPrefix(row, `":"viahist-a"`):
-			if !strings.Contains(row, `"via":"Spare"`) {
+			if !strings.Contains(row, `"via":"Spare"`) || !strings.Contains(row, `"via_channel":"Channel X"`) {
 				t.Fatalf("feed row a lacks via: %s", row)
 			}
 		case strings.HasPrefix(row, `":"viahist-b"`):
-			if strings.Contains(strings.SplitN(row, "}", 2)[0], `"via"`) {
+			if b := strings.SplitN(row, "}", 2)[0]; strings.Contains(b, `"via"`) || strings.Contains(b, `"via_channel"`) {
 				t.Fatalf("feed row b has via: %s", row)
 			}
 		}

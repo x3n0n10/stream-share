@@ -980,9 +980,13 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 				sm.streamLock.RLock()
 				ss := sm.streamSessions[buffer.streamID]
 				sm.streamLock.RUnlock()
-				if ss != nil && ss.GetVia() != "" {
+				var via string
+				if ss != nil {
+					via, _ = ss.GetVia()
+				}
+				if via != "" {
 					// rerr names the fallback's address: log its name only.
-					utils.ErrorLog("Error reading from upstream: %s via %s", sm.streamLabel(buffer.streamID), ss.GetVia())
+					utils.ErrorLog("Error reading from upstream: %s via %s", sm.streamLabel(buffer.streamID), via)
 				} else {
 					utils.ErrorLog("Error reading from upstream: %v", rerr)
 				}

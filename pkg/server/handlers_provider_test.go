@@ -402,7 +402,7 @@ func TestCountOwnStreamsSkipsFallbackServed(t *testing.T) {
 	own := &types.StreamSession{StreamID: "1", Active: true}
 	lentHere := &types.StreamSession{StreamID: "2", Active: true} // a lent stream on the lender has no via
 	borrowed := &types.StreamSession{StreamID: "3", Active: true}
-	borrowed.SetVia("Spare")
+	borrowed.SetVia("Spare", "")
 	if got := countOwnStreams([]*types.StreamSession{own, lentHere, borrowed}); got != 2 {
 		t.Fatalf("countOwnStreams = %d, want 2", got)
 	}

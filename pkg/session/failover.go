@@ -36,6 +36,10 @@ import (
 // lent: a guest that never gets a slate and yields to the household.
 const FailoverIdentityPrefix = "failover:"
 
+// FailoverChannelHeader carries the matched channel's name (query-escaped) in
+// the fallback instance's response to a failover request.
+const FailoverChannelHeader = "X-Failover-Channel"
+
 // IsFailoverIdentity reports whether username is a forwarded viewer's identity.
 func IsFailoverIdentity(username string) bool {
 	return strings.HasPrefix(username, FailoverIdentityPrefix)
@@ -194,8 +198,9 @@ func (sm *SessionManager) failoverAttempt(ctx context.Context, buffer *StreamBuf
 		ss := sm.streamSessions[buffer.streamID]
 		sm.streamLock.RUnlock()
 		if ss != nil {
-			ss.SetVia(target.Name)
-			sm.recordHistoryVia(buffer.streamID, target.Name)
+			channel, _ := url.QueryUnescape(resp.Header.Get(FailoverChannelHeader)) // "" when malformed
+			ss.SetVia(target.Name, channel)
+			sm.recordHistoryVia(buffer.streamID, target.Name, channel)
 		}
 		utils.InfoLog("Failover: %s served via %s (own provider: %s)", label, target.Name, sm.failoverReason(ownErr))
 		buffer.noteOwnErr(ownErr)

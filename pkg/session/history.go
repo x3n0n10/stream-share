@@ -282,8 +282,8 @@ func (sm *SessionManager) recordLiveHistory(username, streamID, streamType, titl
 			ss := sm.streamSessions[streamID]
 			sm.streamLock.RUnlock()
 			if ss != nil {
-				if via := ss.GetVia(); via != "" {
-					sm.recordHistoryVia(streamID, via)
+				if via, channel := ss.GetVia(); via != "" {
+					sm.recordHistoryVia(streamID, via, channel)
 				}
 			}
 			return
@@ -299,12 +299,12 @@ func (sm *SessionManager) recordLiveHistory(username, streamID, streamType, titl
 
 // recordHistoryVia stores the serving fallback on the stream's open history
 // rows, off the caller's goroutine (the pump must not wait on the database).
-func (sm *SessionManager) recordHistoryVia(streamID, via string) {
+func (sm *SessionManager) recordHistoryVia(streamID, via, channel string) {
 	if sm.db == nil {
 		return
 	}
 	go func() {
-		if err := sm.db.SetStreamHistoryVia(streamID, via); err != nil {
+		if err := sm.db.SetStreamHistoryVia(streamID, via, channel); err != nil {
 			utils.WarnLog("Failed to record failover instance in stream history: %v", err)
 		}
 	}()

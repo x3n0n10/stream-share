@@ -24,6 +24,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,6 +127,10 @@ func TestFailoverEndpointStreams(t *testing.T) {
 	resp := failoverGet(t, ctx, u+"?epg=alpha1.nl&name=Alpha+1", "test-key", "Main")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status %d", resp.StatusCode)
+	}
+	want, _ := lookupAPIChannelName("10")
+	if got, _ := url.QueryUnescape(resp.Header.Get(session.FailoverChannelHeader)); want == "" || got != want {
+		t.Fatalf("channel header %q, want %q", got, want)
 	}
 	buf := make([]byte, 188)
 	if n, _ := resp.Body.Read(buf); n == 0 || buf[0] != 0x47 {

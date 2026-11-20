@@ -36,6 +36,10 @@ import (
 // lent: a guest that never gets a slate and yields to the household.
 const FailoverIdentityPrefix = "failover:"
 
+// FailoverChannelHeader carries the matched channel's name (query-escaped) in
+// the fallback instance's response to a failover request.
+const FailoverChannelHeader = "X-Failover-Channel"
+
 // IsFailoverIdentity reports whether username is a forwarded viewer's identity.
 func IsFailoverIdentity(username string) bool {
 	return strings.HasPrefix(username, FailoverIdentityPrefix)

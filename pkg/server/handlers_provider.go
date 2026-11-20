@@ -220,19 +220,18 @@ func (c *Config) renderProviderInfo(snap providerInfoSnapshot) map[string]interf
 	if info.CreatedAt != nil {
 		data["created_at"] = info.CreatedAt.Format(time.RFC3339)
 	}
+	live := c.activeStreamCount()
 	if info.MaxConnections > 0 {
-		available := info.MaxConnections - info.ActiveConnections
-		if available < 0 {
-			available = 0
-		}
 		data["max_connections"] = info.MaxConnections
-		data["connections_available"] = available
+		data["connections_available"] = connectionsAvailable(info.ActiveConnections, live, info.MaxConnections)
 	}
 	// How many of those provider-side connections are ours: one per active
 	// shared stream, however many viewers each is serving. Seeing this next to
 	// active_connections is what makes the multiplexing visible — and tells an
-	// operator whether a connection limit is being spent elsewhere.
-	data["local_upstream_connections"] = c.activeStreamCount()
+	// operator whether a connection limit is being spent elsewhere. A stream
+	// served through a fallback instance uses that instance's connection, so it
+	// is not counted here.
+	data["local_upstream_connections"] = live
 
 	if len(info.AllowedOutputFormats) > 0 {
 		data["allowed_output_formats"] = info.AllowedOutputFormats
@@ -255,15 +254,20 @@ func (c *Config) renderProviderInfo(snap providerInfoSnapshot) map[string]interf
 	return data
 }
 
-// activeStreamCount reports how many shared streams are currently running, which
-// is also how many connections this instance holds open to the provider.
+// activeStreamCount reports how many connections this instance holds open to
+// its own provider.
 func (c *Config) activeStreamCount() int {
 	if c.sessionManager == nil {
 		return 0
 	}
+	return countOwnStreams(c.sessionManager.GetAllStreams())
+}
+
+// countOwnStreams counts active streams not served through a fallback instance.
+func countOwnStreams(streams []*types.StreamSession) int {
 	n := 0
-	for _, s := range c.sessionManager.GetAllStreams() {
-		if s.Active {
+	for _, s := range streams {
+		if s.Active && s.GetVia() == "" {
 			n++
 		}
 	}
@@ -296,6 +300,28 @@ func (c *Config) providerStatusBlock() map[string]interface{} {
 	return block
 }
 
+// connectionsInUse is the provider's cached total or our own live count,
+// whichever is higher: the cache can lag behind connections we just opened.
+func connectionsInUse(active, live int) int { return max(active, live) }
+
+// connectionsAvailable is the free slots under the limit, never negative.
+func connectionsAvailable(active, live, limit int) int {
+	return max(limit-connectionsInUse(active, live), 0)
+}
+
+// connectionsLine is the "N/M connection(s) in use" part of the status line,
+// empty when there is nothing to report.
+func connectionsLine(active, live, limit int) string {
+	used := connectionsInUse(active, live)
+	if limit > 0 {
+		return fmt.Sprintf("%d/%d connection(s) in use", used, limit)
+	}
+	if used > 0 {
+		return fmt.Sprintf("%d connection(s) in use", used)
+	}
+	return ""
+}
+
 // providerStatusLine renders the subscription as one line for the text summary
 // that /status returns and Discord's /status echoes. Empty when nothing is
 // cached yet.
@@ -324,10 +350,8 @@ func (c *Config) providerStatusLine() string {
 		days := int(math.Floor(time.Until(*info.ExpiresAt).Hours() / 24))
 		parts = append(parts, fmt.Sprintf("%d day(s) left", days))
 	}
-	if info.MaxConnections > 0 {
-		parts = append(parts, fmt.Sprintf("%d/%d connection(s) in use", info.ActiveConnections, info.MaxConnections))
-	} else if info.ActiveConnections > 0 {
-		parts = append(parts, fmt.Sprintf("%d connection(s) in use", info.ActiveConnections))
+	if conns := connectionsLine(info.ActiveConnections, c.activeStreamCount(), info.MaxConnections); conns != "" {
+		parts = append(parts, conns)
 	}
 	return "Subscription: " + strings.Join(parts, " — ")
 }

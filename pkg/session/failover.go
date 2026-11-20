@@ -171,6 +171,7 @@ func (sm *SessionManager) failoverAttempt(ctx context.Context, buffer *StreamBuf
 		stopWatch := sm.watchPreemption(ctx, buffer, lease)
 		resp, uerr := sm.dialOwn(ctx, ownTimeout, upstreamURL)
 		if uerr == nil {
+			buffer.noteOwnErr(nil)
 			return resp, lease, nil
 		}
 		// A failed or slating stream holds no slot.
@@ -197,6 +198,7 @@ func (sm *SessionManager) failoverAttempt(ctx context.Context, buffer *StreamBuf
 			sm.recordHistoryVia(buffer.streamID, target.Name)
 		}
 		utils.InfoLog("Failover: %s served via %s (own provider: %s)", label, target.Name, sm.failoverReason(ownErr))
+		buffer.noteOwnErr(ownErr)
 		return resp, nil, nil
 	}
 	return nil, nil, ownErr

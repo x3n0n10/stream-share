@@ -187,3 +187,68 @@ func TestHouseholdPreemptsShareStream(t *testing.T) {
 	}
 	removeKey(sm, "ch-x", mine)
 }
+
+// The health probe must not kick a viewer off a single-connection account.
+func TestProbeSkipsWhenSlotHeld(t *testing.T) {
+	own := newFakeUpstream(t, 'O', 0)
+	other := newFakeUpstream(t, 'X', 0)
+	sm, _ := failoverRig(t, nil)
+	aliceWatches(t, sm, own)
+
+	uerr := sm.ProbeUpstream(context.Background(), mustURL(t, other.URL))
+	if uerr == nil || uerr.Key != KeyAllInUse {
+		t.Fatalf("probe = %+v, want KeyAllInUse", uerr)
+	}
+	if n := other.requests.Load(); n != 0 {
+		t.Fatalf("probe dialled the provider %d times, want 0", n)
+	}
+	if n := own.requests.Load(); n != 1 {
+		t.Fatalf("own upstream opened %d times, want 1", n)
+	}
+	if !streamActive(sm, "ch1") {
+		t.Fatal("alice's stream must keep playing")
+	}
+}
+
+func TestProbeUsesFreeSlot(t *testing.T) {
+	up := newFakeUpstream(t, 'X', 0)
+	sm, slots := failoverRig(t, nil)
+
+	if uerr := sm.ProbeUpstream(context.Background(), mustURL(t, up.URL)); uerr != nil {
+		t.Fatalf("probe = %+v, want nil", uerr)
+	}
+	if !slots.WouldGrant(provider.Background) {
+		t.Fatal("probe must release its slot")
+	}
+}
+
+func TestViewerPreemptsProbe(t *testing.T) {
+	own := newFakeUpstream(t, 'O', 0)
+	hang := hangingUpstream(t)
+	sm, slots := failoverRig(t, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res := make(chan *UpstreamError, 1)
+	go func() { res <- sm.ProbeUpstream(ctx, mustURL(t, hang.URL)) }()
+	deadline := time.Now().Add(3 * time.Second)
+	for len(slots.Snapshot().Held) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("probe never took a slot")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	_, key := watch(t, sm, "alice", "ch1", "live", own.URL)
+	if !receiving(sm, "ch1", key, 3*time.Second) {
+		t.Fatal("alice should get the slot from the probe")
+	}
+	select {
+	case uerr := <-res:
+		if uerr == nil || uerr.Key != KeyAllInUse {
+			t.Fatalf("probe = %+v, want KeyAllInUse", uerr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("probe did not yield to the viewer")
+	}
+}

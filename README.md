@@ -541,7 +541,7 @@ stream-share now arbitrates every media connection it opens to the provider (liv
 
 `/api/internal/status` lists who holds the provider connections and which downloads are paused (`provider_slots`) when a limit applies.
 
-Not arbitrated: movies proxied directly when VOD caching is off, HLS segment requests, and the optional provider health probe; they behave as before.
+Not arbitrated: movies proxied directly when VOD caching is off, and HLS segment requests; they behave as before.
 
 ---
 
@@ -713,7 +713,7 @@ VPN egress IPs get blocked. If you run stream-share behind a VPN, the provider w
 
 **stream-share only reports health. It never touches the VPN.** Reconnecting is deliberately left to a separate service, so this app has no dependency on any particular VPN — gluetun, WireGuard, OpenVPN, or anything else you choose. That separation is the whole design:
 
-- **stream-share** probes one configured live channel and classifies the result — `healthy` (provider served video), `blocked` (the provider refused with a code that means "your IP is banned"), or `error` (outage, bad probe channel, transport failure). It's the right place to do this: it already holds the provider credentials and, when it shares the VPN's network namespace, its probe egresses through the exact IP a real viewer would use.
+- **stream-share** checks the active streams, or probes one configured live channel when none is playing, and classifies the result — `healthy` (provider served video), `blocked` (the provider refused with a code that means "your IP is banned"), or `error` (outage, bad probe channel, transport failure). It's the right place to do this: it already holds the provider credentials and, when it shares the VPN's network namespace, its probe egresses through the exact IP a real viewer would use.
 - **`GET /api/internal/health`** (authenticated) exposes that verdict as machine-readable JSON, forcing a fresh probe on each call.
 - **Your watchdog** (a separate container, for whatever VPN you run) reads that endpoint and, only on `blocked`, reconnects the VPN onto a new server and re-checks in a loop. A complete example — using gluetun's control API but adaptable to any VPN — is in [`examples/vpn-watchdog/`](examples/vpn-watchdog/).
 
@@ -721,7 +721,7 @@ Which upstream code counts as "blocked" is configurable via `HEALTHCHECK_BLOCKED
 
 ### How it works
 
-1. On a schedule (`HEALTHCHECK_TIMES`, e.g. `04:00,16:00` in the container's `TZ`) and once at startup, stream-share dials the probe channel with the same headers a real player uses and records the verdict. It reuses the provider-error classification from the error-slate feature, so a block code is surfaced as `blocked` even though a live viewer would normally see a slate instead.
+1. On a schedule (`HEALTHCHECK_TIMES`, e.g. `04:00,16:00` in the container's `TZ`) and once at startup, stream-share first checks for an own-provider stream playing, which means healthy without dialing. Otherwise it dials the probe channel with the same headers a real player uses, only through a free connection slot, so it never cuts a viewer. If no slot is free, it reports a failing stream's error (`blocked` when its code is listed), or else healthy because the connection is in use. The verdict is recorded. It reuses the provider-error classification from the error-slate feature, so a block code is surfaced as `blocked` even though a live viewer would normally see a slate instead.
 2. `GET /api/internal/health` (authenticated) **forces** a fresh probe and returns the verdict. A watchdog calls this right after reconnecting the VPN, to test whether the new IP is accepted. It's rate-limited by `HEALTHCHECK_MIN_INTERVAL_SECONDS` so it can't be used to hammer the provider. The HTTP status mirrors the verdict — `200` when healthy, `503` when blocked, errored, or stale — but a consumer should read the `status` field from the body rather than rely on the status code (a `503` here is the verdict, not a transport failure).
 
 Probing is intentionally sparing — twice a day plus a handful of checks during an actual reconnect — because aggressive probing is exactly what gets an IP blocked faster.

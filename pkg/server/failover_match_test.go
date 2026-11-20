@@ -32,13 +32,13 @@ func TestNormalizeChannelName(t *testing.T) {
 		"NL | Alpha 1 HD":  "alpha1",
 		"Alpha 1 FHD ⏺ʳᵉᶜ": "alpha1",
 		"Alpha 1 4K":       "alpha1",
-		"UK: BBC One HD": "bbcone",
-		"[NL] Beta 4":     "beta4",
-		"Beta 4 UHD HEVC": "beta4",
-		"NL-TV":          "nltv",
-		"Channel 4 HD":   "channel4",
-		"HD":             "",
-		"★ ★":            "",
+		"UK: BBC One HD":   "bbcone",
+		"[NL] Beta 4":      "beta4",
+		"Beta 4 UHD HEVC":  "beta4",
+		"NL-TV":            "nltv",
+		"Channel 4 HD":     "channel4",
+		"HD":               "",
+		"★ ★":              "",
 	} {
 		if got := normalizeChannelName(in); got != want {
 			t.Errorf("normalizeChannelName(%q) = %q, want %q", in, got, want)

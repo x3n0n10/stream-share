@@ -541,7 +541,7 @@ stream-share now arbitrates every media connection it opens to the provider (liv
 
 `/api/internal/status` lists who holds the provider connections and which downloads are paused (`provider_slots`) when a limit applies.
 
-Not arbitrated: movies proxied directly when VOD caching is off, HLS segment requests, and the optional provider health probe; they behave as before.
+Not arbitrated: movies proxied directly when VOD caching is off, and HLS segment requests; they behave as before.
 
 ---
 
@@ -721,7 +721,7 @@ Which upstream code counts as "blocked" is configurable via `HEALTHCHECK_BLOCKED
 
 ### How it works
 
-1. On a schedule (`HEALTHCHECK_TIMES`, e.g. `04:00,16:00` in the container's `TZ`) and once at startup, stream-share dials the probe channel with the same headers a real player uses and records the verdict. It reuses the provider-error classification from the error-slate feature, so a block code is surfaced as `blocked` even though a live viewer would normally see a slate instead.
+1. On a schedule (`HEALTHCHECK_TIMES`, e.g. `04:00,16:00` in the container's `TZ`) and once at startup, stream-share first reads the active streams: an own-provider stream playing means healthy without dialing, and a slate or provider-error fallback is reported as that error (`blocked` when its code is listed). With no evidence it dials the probe channel with the same headers a real player uses, only through a free connection slot, so it never cuts a viewer (a busy provider counts as healthy), and records the verdict. It reuses the provider-error classification from the error-slate feature, so a block code is surfaced as `blocked` even though a live viewer would normally see a slate instead.
 2. `GET /api/internal/health` (authenticated) **forces** a fresh probe and returns the verdict. A watchdog calls this right after reconnecting the VPN, to test whether the new IP is accepted. It's rate-limited by `HEALTHCHECK_MIN_INTERVAL_SECONDS` so it can't be used to hammer the provider. The HTTP status mirrors the verdict — `200` when healthy, `503` when blocked, errored, or stale — but a consumer should read the `status` field from the body rather than rely on the status code (a `503` here is the verdict, not a transport failure).
 
 Probing is intentionally sparing — twice a day plus a handful of checks during an actual reconnect — because aggressive probing is exactly what gets an IP blocked faster.

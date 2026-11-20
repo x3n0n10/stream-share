@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lucasduport/stream-share/pkg/session"
 	"github.com/lucasduport/stream-share/pkg/utils"
 )
 
@@ -140,11 +141,23 @@ func (c *Config) probeHealth() (snap healthSnapshot, throttled bool) {
 	return snap, false
 }
 
-// runProviderProbe dials the configured probe channel once and classifies the
-// result. It never mutates cache state; probeHealth owns that.
+// runProviderProbe decides the verdict without ever cutting a viewer. It reads
+// evidence from live streams first (an own-provider stream serving means the
+// provider is fine; a slate or provider-error fallback is the failure), and
+// only when there is none dials the probe channel once — through a free
+// connection slot, never by preempting a viewer. A busy provider proves
+// nothing, so it counts as healthy. It never mutates cache state; probeHealth
+// owns that.
 func (c *Config) runProviderProbe() (status, code, detail string) {
 	if c.sessionManager == nil {
 		return healthStatusError, "", "session manager not initialized"
+	}
+	serving, failing := c.sessionManager.ProviderEvidence()
+	if serving > 0 {
+		return healthStatusHealthy, "", fmt.Sprintf("own provider serving %d active stream(s)", serving)
+	}
+	if len(failing) > 0 {
+		return c.classifyFailures(failing)
 	}
 	target, err := c.healthProbeURL()
 	if err != nil {
@@ -159,11 +172,21 @@ func (c *Config) runProviderProbe() (status, code, detail string) {
 	if uerr == nil {
 		return healthStatusHealthy, "", "provider served a live response"
 	}
-	code = uerr.Key
-	if c.isBlockedStatus(uerr.StatusCode) {
-		return healthStatusBlocked, code, fmt.Sprintf("provider returned %d: egress IP is blocked", uerr.StatusCode)
+	if uerr.Key == session.KeyAllInUse {
+		return healthStatusHealthy, "", "provider connection in use"
 	}
-	return healthStatusError, code, uerr.Error()
+	return c.classifyFailures([]*session.UpstreamError{uerr})
+}
+
+// classifyFailures turns provider failures into a verdict: the first blocked
+// status wins, otherwise the first failure is reported as an error.
+func (c *Config) classifyFailures(failing []*session.UpstreamError) (status, code, detail string) {
+	for _, uerr := range failing {
+		if c.isBlockedStatus(uerr.StatusCode) {
+			return healthStatusBlocked, uerr.Key, fmt.Sprintf("provider returned %d: egress IP is blocked", uerr.StatusCode)
+		}
+	}
+	return healthStatusError, failing[0].Key, failing[0].Error()
 }
 
 // healthProbeURL builds the upstream URL for the configured probe channel,

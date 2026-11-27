@@ -75,8 +75,8 @@ type SessionManager struct {
 	providerSlots *provider.Arbiter
 	errorCatalog  *Catalog
 	slateRetryMax time.Duration
-	// slotWait bounds how long a live start waits for a slot held by a
-	// guest that is leaving (see acquirePolite).
+	// slotWait bounds how long a live start waits for a slot about to free:
+	// the viewer's previous channel, or a leaving guest (see acquirePolite).
 	slotWait time.Duration
 	// failoverTargets lists the fallback instances for a live channel start
 	// (nil: no failover). failoverOwnTimeout and failoverPeerTimeout bound
@@ -208,6 +208,34 @@ type StreamBuffer struct {
 	// takeover: this start stopped the same viewer's previous stream, which
 	// held the own slot, so waiting for that slot beats a fallback.
 	takeover bool
+
+	// Catchup readers of this channel's disk buffer, per user (see
+	// BeginCatchupRead); they count as watching. readersMu is a leaf lock.
+	readersMu sync.Mutex
+	readers   map[string]int
+}
+
+// bareID is a stream or channel id without its file extension.
+func bareID(s string) string { return strings.TrimSuffix(s, path.Ext(s)) }
+
+// hasReaders reports whether anyone reads this channel's catchup buffer.
+func (b *StreamBuffer) hasReaders() bool {
+	b.readersMu.Lock()
+	defer b.readersMu.Unlock()
+	return len(b.readers) > 0
+}
+
+// hasReaderOtherThan reports whether a user other than username reads this
+// channel's catchup buffer.
+func (b *StreamBuffer) hasReaderOtherThan(username string) bool {
+	b.readersMu.Lock()
+	defer b.readersMu.Unlock()
+	for user := range b.readers {
+		if user != username {
+			return true
+		}
+	}
+	return false
 }
 
 // markReady records the upstream outcome and releases anyone waiting on Ready.
@@ -341,7 +369,7 @@ func (sm *SessionManager) SetNameResolver(f func(streamID string) (string, bool)
 // falling back to "Stream <id>" when no name is known. The id is reported
 // without its file extension for readability.
 func (sm *SessionManager) streamLabel(streamID string) string {
-	id := strings.TrimSuffix(streamID, path.Ext(streamID))
+	id := bareID(streamID)
 	if sm.nameResolver != nil {
 		if name, ok := sm.nameResolver(streamID); ok && strings.TrimSpace(name) != "" {
 			return fmt.Sprintf("%s (Stream %s)", strings.TrimSpace(name), id)
@@ -672,14 +700,15 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		failover: sm.failoverTargets != nil && streamType == "live" &&
 			!IsShareIdentity(username) && !IsFailoverIdentity(username),
 		takeover: takeover,
+		readers:  map[string]int{},
 	}
 
 	// Start a local disk buffer for live streams when catchup is enabled, unless
 	// the provider archives the channel itself: its catchup goes to the provider.
 	if sm.catchupManager != nil && sm.catchupManager.IsEnabled() && streamType == "live" {
-		bareID := strings.TrimSuffix(path.Base(upstreamURL.Path), path.Ext(upstreamURL.Path))
-		if !sm.catchupManager.HasUpstreamCatchup(bareID) {
-			streamBuffer.diskBuffer = sm.catchupManager.StartBuffer(bareID)
+		id := bareID(path.Base(upstreamURL.Path))
+		if !sm.catchupManager.HasUpstreamCatchup(id) {
+			streamBuffer.diskBuffer = sm.catchupManager.StartBuffer(id)
 		}
 	}
 
@@ -728,6 +757,9 @@ func IsShareIdentity(username string) bool {
 // any household client watches, Share while only guests (share-link or
 // forwarded clients) do, Background when nobody does.
 func (b *StreamBuffer) audienceClass() provider.Class {
+	if b.hasReaders() {
+		return provider.Foreground
+	}
 	b.clientsLock.RLock()
 	defer b.clientsLock.RUnlock()
 	class := provider.Background
@@ -760,8 +792,12 @@ func (b *StreamBuffer) userClientKeysLocked(username string) []string {
 // watchedBeyond reports whether this buffer is still watched once username's
 // switching device leaves it: another user has a client, or username has at
 // least two live (non-stalled) connections, i.e. another device of theirs stays.
+// Another user reading its catchup buffer counts too.
 // Guest clients (share-link, forwarded) count only when guests is true.
 func (b *StreamBuffer) watchedBeyond(username string, guests bool) bool {
+	if b.hasReaderOtherThan(username) {
+		return true
+	}
 	b.clientsLock.RLock()
 	defer b.clientsLock.RUnlock()
 	live := 0
@@ -1114,7 +1150,6 @@ func (sm *SessionManager) RemoveClient(streamID, username, clientKey string) {
 	// every client), the user's viewer entry and history row are still
 	// released below.
 	userStillWatching := len(buffer.userClientKeysLocked(username)) > 0
-	remaining := len(buffer.clients)
 	buffer.clientsLock.Unlock()
 
 	if userStillWatching {
@@ -1131,23 +1166,33 @@ func (sm *SessionManager) RemoveClient(streamID, username, clientKey string) {
 	if streamSession, exists := sm.streamSessions[streamID]; exists {
 		streamSession.RemoveViewer(username)
 	}
-	// Stop the stream once its last client is gone.
-	if remaining == 0 && buffer.active {
-		// Catchup-enabled live streams get a grace window before stopping for
-		// real, so a TiviMate "pause" (which looks like a disconnect to us)
-		// followed by a resume keeps recording with no gap. A genuine channel
-		// switch is detected and stopped immediately in RequestStream instead.
-		// A lent stream stops at once so its slot frees for the next request.
-		if buffer.diskBuffer != nil && sm.pauseGrace > 0 && !IsFailoverIdentity(username) {
-			sm.schedulePendingStop(streamID)
-		} else {
-			sm.stopStream(streamID)
-		}
-	}
+	sm.lastViewerGone(buffer, username)
 
 	sm.streamLock.Unlock()
 	sm.closeHistoryRow(historyID)
 	utils.InfoLog("User %s removed from %s", username, sm.streamLabel(streamID))
+}
+
+// lastViewerGone decides what happens to buffer once username, its last client
+// or catchup reader, left it: nothing while a client or reader remains or
+// once the stream stopped.
+// Catchup-enabled live streams get a grace window before stopping for real, so
+// a TiviMate "pause" (which looks like a disconnect to us) followed by a resume
+// keeps recording with no gap. A genuine channel switch is detected and stopped
+// immediately in RequestStream instead. A lent stream stops at once so its slot
+// frees for the next request. The caller must hold streamLock.
+func (sm *SessionManager) lastViewerGone(buffer *StreamBuffer, username string) {
+	buffer.clientsLock.RLock()
+	clients := len(buffer.clients)
+	buffer.clientsLock.RUnlock()
+	if !buffer.active || clients > 0 || buffer.hasReaders() {
+		return
+	}
+	if buffer.diskBuffer != nil && sm.pauseGrace > 0 && !IsFailoverIdentity(username) {
+		sm.schedulePendingStop(buffer.streamID)
+	} else {
+		sm.stopStream(buffer.streamID)
+	}
 }
 
 // stopStreamLocking acquires streamLock and stops the stream. Used by the
@@ -1205,11 +1250,11 @@ func (sm *SessionManager) cancelPendingStop(streamID string) bool {
 // viewer who left it for catchup the buffer cannot serve needs the provider
 // connection it holds. It reports whether a stream was stopped.
 func (sm *SessionManager) ReleasePausedStream(id string) bool {
-	bare := strings.TrimSuffix(id, path.Ext(id))
+	bare := bareID(id)
 	sm.streamLock.Lock()
 	defer sm.streamLock.Unlock()
 	for streamID := range sm.pendingStops {
-		if strings.TrimSuffix(streamID, path.Ext(streamID)) == bare {
+		if bareID(streamID) == bare {
 			utils.InfoLog("Catchup: closing paused %s to free the provider connection", sm.streamLabel(streamID))
 			sm.stopStream(streamID) // also cancels the pending stop
 			return true
@@ -1218,15 +1263,48 @@ func (sm *SessionManager) ReleasePausedStream(id string) bool {
 	return false
 }
 
-// NotifyCatchupActivity cancels any pending stop for streamID, keeping the
-// upstream connection and disk recording alive while a client is actively
-// reading from its catchup buffer (e.g. rewinding). Safe to call whether or
-// not a stop was actually pending.
-func (sm *SessionManager) NotifyCatchupActivity(streamID string) {
+// BeginCatchupRead records username reading the catchup buffer of channel id
+// (with or without an extension): while the read lasts the live stream counts
+// as watched, so it keeps its provider slot and is not stopped. It cancels a
+// pending pause-grace stop. The returned end (idempotent) ends the read; it is
+// a no-op when no live stream of the channel runs.
+func (sm *SessionManager) BeginCatchupRead(username, id string) (end func()) {
+	bare := bareID(id)
 	sm.streamLock.Lock()
 	defer sm.streamLock.Unlock()
-	if sm.cancelPendingStop(streamID) {
-		utils.DebugLog("%s resumed via catchup before pause grace expired; continuing uninterrupted", sm.streamLabel(streamID))
+	var buffer *StreamBuffer
+	for streamID, b := range sm.streamBuffers {
+		if b.active && bareID(streamID) == bare {
+			buffer = b
+			break
+		}
+	}
+	if buffer == nil {
+		return func() {}
+	}
+	if sm.cancelPendingStop(buffer.streamID) {
+		utils.DebugLog("%s resumed via catchup before pause grace expired; continuing uninterrupted", sm.streamLabel(buffer.streamID))
+	}
+	buffer.readersMu.Lock()
+	buffer.readers[username]++
+	buffer.readersMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			sm.streamLock.Lock()
+			defer sm.streamLock.Unlock()
+			buffer.readersMu.Lock()
+			if n := buffer.readers[username]; n <= 1 {
+				delete(buffer.readers, username) // never creates an entry
+			} else {
+				buffer.readers[username] = n - 1
+			}
+			buffer.readersMu.Unlock()
+			if sm.streamBuffers[buffer.streamID] == buffer {
+				sm.lastViewerGone(buffer, username)
+			}
+		})
 	}
 }
 

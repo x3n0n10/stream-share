@@ -287,7 +287,7 @@ func TestShareClassSitsBetweenBackgroundAndForeground(t *testing.T) {
 	defer cancel()
 	if l, err := a.AcquireClass(waitCtx, "share-again", classOf(Share)); err == nil {
 		l.Release()
-		t.Fatal("a Fresh share request must not preempt the household")
+		t.Fatal("a share request must not preempt the household")
 	}
 	if hh.IsPreempted() {
 		t.Fatal("the household lease was preempted by a share")

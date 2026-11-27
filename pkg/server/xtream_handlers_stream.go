@@ -175,11 +175,11 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 		return
 	}
 
-	// A client is actively reading the catchup buffer (e.g. resuming after a
-	// pause) — cancel any pending pause-grace stop so recording continues
-	// uninterrupted and there's no gap once the buffer catches up to live.
+	// A client reading the catchup buffer (e.g. resuming after a pause)
+	// watches the channel: its live stream keeps recording and keeps its
+	// provider slot until the read ends.
 	if c.sessionManager != nil {
-		c.sessionManager.NotifyCatchupActivity(idRaw)
+		defer c.sessionManager.BeginCatchupRead(c.resolveRequestUsername(ctx), idRaw)()
 	}
 	// Reading the buffer of a channel learned to lack provider recordings keeps
 	// it learned, so its catchup does not bounce off the provider once a day.

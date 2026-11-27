@@ -92,8 +92,9 @@ func (sm *SessionManager) dialWithin(ctx context.Context, d time.Duration, u *ur
 
 // acquirePolite gets a provider slot for a live start without ever taking one
 // from a stream of the same class (first come, first served): it is refused at
-// once when a holder of its class has the slot, and waits at most slotWait
-// otherwise.
+// once when a holder of its class has the slot, except a takeover (waiting for
+// the slot of the viewer's previous channel) and a guest-class request (which
+// may be waiting for a leaving guest); it waits at most slotWait.
 func (sm *SessionManager) acquirePolite(ctx context.Context, buffer *StreamBuffer) (*provider.Lease, *UpstreamError) {
 	class := buffer.audienceClass()
 	// A guest-class request also waits when a guest-class or background holder

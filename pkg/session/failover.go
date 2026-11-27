@@ -90,9 +90,10 @@ func (sm *SessionManager) dialWithin(ctx context.Context, d time.Duration, u *ur
 	return resp, nil
 }
 
-// acquirePolite gets a provider slot for a lent stream without ever taking one
-// from a stream of the same class: it is refused at once when the household
-// holds the slot, and waits at most slotWait for a guest that is leaving.
+// acquirePolite gets a provider slot for a live start without ever taking one
+// from a stream of the same class (first come, first served): it is refused at
+// once when a holder of its class has the slot, and waits at most slotWait
+// otherwise.
 func (sm *SessionManager) acquirePolite(ctx context.Context, buffer *StreamBuffer) (*provider.Lease, *UpstreamError) {
 	class := buffer.audienceClass()
 	// A guest-class request also waits when a guest-class or background holder
@@ -105,7 +106,7 @@ func (sm *SessionManager) acquirePolite(ctx context.Context, buffer *StreamBuffe
 	actx, cancel := context.WithTimeout(ctx, sm.slotWait)
 	defer cancel()
 	lease, err := sm.providerSlots.AcquireClass(actx, "live "+sm.streamLabel(buffer.streamID),
-		func() provider.Class { return buffer.audienceClass() }, provider.Resume)
+		func() provider.Class { return buffer.audienceClass() })
 	if err != nil {
 		return nil, &UpstreamError{Key: KeyAllInUse}
 	}

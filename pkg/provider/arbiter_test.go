@@ -32,11 +32,11 @@ func flag(v bool) (func() bool, *atomic.Bool) {
 }
 
 // acquireAsync starts an Acquire and returns a channel receiving its lease.
-func acquireAsync(t *testing.T, a *Arbiter, ctx context.Context, label string, fg func() bool, mode Mode) <-chan *Lease {
+func acquireAsync(t *testing.T, a *Arbiter, ctx context.Context, label string, fg func() bool) <-chan *Lease {
 	t.Helper()
 	ch := make(chan *Lease, 1)
 	go func() {
-		l, err := a.Acquire(ctx, label, fg, mode)
+		l, err := a.Acquire(ctx, label, fg)
 		if err == nil {
 			ch <- l
 		}
@@ -64,7 +64,7 @@ func preempted(l *Lease, d time.Duration) bool {
 
 func TestNilAndUnlimitedArbitersGrantAtOnce(t *testing.T) {
 	var nilArb *Arbiter
-	l, err := nilArb.Acquire(context.Background(), "x", nil, Fresh)
+	l, err := nilArb.Acquire(context.Background(), "x", nil)
 	if err != nil || l == nil || l.IsPreempted() {
 		t.Fatalf("nil arbiter: %v %v", l, err)
 	}
@@ -73,7 +73,7 @@ func TestNilAndUnlimitedArbitersGrantAtOnce(t *testing.T) {
 	a := New(fixed(0))
 	ctx := context.Background()
 	for i := 0; i < 5; i++ {
-		if _, err := a.Acquire(ctx, "x", nil, Fresh); err != nil {
+		if _, err := a.Acquire(ctx, "x", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -86,10 +86,10 @@ func TestNilAndUnlimitedArbitersGrantAtOnce(t *testing.T) {
 func TestBackgroundWaitsInOrderAndNeverPreempts(t *testing.T) {
 	a := New(fixed(1))
 	ctx := context.Background()
-	first, _ := a.Acquire(ctx, "first", nil, Fresh)
-	second := acquireAsync(t, a, ctx, "second", nil, Fresh)
+	first, _ := a.Acquire(ctx, "first", nil)
+	second := acquireAsync(t, a, ctx, "second", nil)
 	time.Sleep(50 * time.Millisecond)
-	third := acquireAsync(t, a, ctx, "third", nil, Fresh)
+	third := acquireAsync(t, a, ctx, "third", nil)
 
 	if preempted(first, 400*time.Millisecond) {
 		t.Fatal("a background request preempted a holder")
@@ -115,9 +115,9 @@ func TestBackgroundWaitsInOrderAndNeverPreempts(t *testing.T) {
 func TestForegroundPreemptsBackground(t *testing.T) {
 	a := New(fixed(1))
 	ctx := context.Background()
-	bg, _ := a.Acquire(ctx, "download", nil, Fresh)
+	bg, _ := a.Acquire(ctx, "download", nil)
 	fgFn, _ := flag(true)
-	fg := acquireAsync(t, a, ctx, "live", fgFn, Fresh)
+	fg := acquireAsync(t, a, ctx, "live", fgFn)
 	if !preempted(bg, time.Second) {
 		t.Fatal("background holder was not preempted")
 	}
@@ -130,31 +130,19 @@ func TestForegroundPreemptsBackground(t *testing.T) {
 	}
 }
 
-// Fresh foreground takes the slot from an older foreground holder; Resume
-// foreground does not, so two watched streams cannot take it back in turn.
-func TestFreshForegroundWinsResumeWaits(t *testing.T) {
+// A watched request never takes the slot of a watched holder: it waits.
+func TestForegroundNeverPreemptsForeground(t *testing.T) {
 	a := New(fixed(1))
 	ctx := context.Background()
 	fgFn, _ := flag(true)
-	older, _ := a.Acquire(ctx, "older", fgFn, Fresh)
-
-	resume := acquireAsync(t, a, ctx, "resume", fgFn, Resume)
+	older, _ := a.Acquire(ctx, "older", fgFn)
+	newer := acquireAsync(t, a, ctx, "newer", fgFn)
 	if preempted(older, 400*time.Millisecond) {
-		t.Fatal("a Resume request preempted a foreground holder")
-	}
-	newer := acquireAsync(t, a, ctx, "newer", fgFn, Fresh)
-	if !preempted(older, time.Second) {
-		t.Fatal("a Fresh foreground request did not preempt the older foreground holder")
+		t.Fatal("a foreground request preempted a foreground holder")
 	}
 	older.Release()
-	// The Resume request was first in line among foreground waiters.
-	first := got(resume, time.Second)
-	if first == nil {
-		t.Fatal("no waiter got the freed slot")
-	}
-	first.Release()
 	if l := got(newer, time.Second); l == nil {
-		t.Fatal("newer never got a slot")
+		t.Fatal("newer did not get the freed slot")
 	}
 }
 
@@ -162,9 +150,9 @@ func TestFreshForegroundWinsResumeWaits(t *testing.T) {
 func TestWaiterTurningForegroundPreempts(t *testing.T) {
 	a := New(fixed(1))
 	ctx := context.Background()
-	bg, _ := a.Acquire(ctx, "download A", nil, Fresh)
+	bg, _ := a.Acquire(ctx, "download A", nil)
 	fn, watched := flag(false)
-	waiting := acquireAsync(t, a, ctx, "download B", fn, Resume)
+	waiting := acquireAsync(t, a, ctx, "download B", fn)
 	if preempted(bg, 400*time.Millisecond) {
 		t.Fatal("a background waiter preempted")
 	}
@@ -183,10 +171,10 @@ func TestForegroundWaitersFirst(t *testing.T) {
 	a := New(fixed(1))
 	ctx := context.Background()
 	fgFn, _ := flag(true)
-	holder, _ := a.Acquire(ctx, "holder", fgFn, Fresh)
-	bgWaiter := acquireAsync(t, a, ctx, "background", nil, Fresh)
+	holder, _ := a.Acquire(ctx, "holder", fgFn)
+	bgWaiter := acquireAsync(t, a, ctx, "background", nil)
 	time.Sleep(50 * time.Millisecond)
-	fgWaiter := acquireAsync(t, a, ctx, "watched", fgFn, Resume)
+	fgWaiter := acquireAsync(t, a, ctx, "watched", fgFn)
 	time.Sleep(50 * time.Millisecond)
 	holder.Release()
 	if l := got(fgWaiter, time.Second); l == nil {
@@ -202,11 +190,11 @@ func TestForegroundWaitersFirst(t *testing.T) {
 // A cancelled wait leaves the queue and does not block others.
 func TestCancelledWaitLeavesQueue(t *testing.T) {
 	a := New(fixed(1))
-	holder, _ := a.Acquire(context.Background(), "holder", nil, Fresh)
+	holder, _ := a.Acquire(context.Background(), "holder", nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
 	go func() {
-		_, err := a.Acquire(ctx, "gone", nil, Fresh)
+		_, err := a.Acquire(ctx, "gone", nil)
 		errc <- err
 	}()
 	time.Sleep(50 * time.Millisecond)
@@ -214,7 +202,7 @@ func TestCancelledWaitLeavesQueue(t *testing.T) {
 	if err := <-errc; err == nil {
 		t.Fatal("cancelled Acquire should fail")
 	}
-	next := acquireAsync(t, a, context.Background(), "next", nil, Fresh)
+	next := acquireAsync(t, a, context.Background(), "next", nil)
 	holder.Release()
 	if l := got(next, time.Second); l == nil {
 		t.Fatal("the cancelled waiter blocked the queue")
@@ -231,10 +219,10 @@ func TestStuckHolderDoesNotBlockForeverAfterGrace(t *testing.T) {
 	preemptGrace = 200 * time.Millisecond
 	t.Cleanup(func() { preemptGrace = old })
 	a := New(fixed(1))
-	stuck, _ := a.Acquire(context.Background(), "stuck", nil, Fresh)
+	stuck, _ := a.Acquire(context.Background(), "stuck", nil)
 	fgFn, _ := flag(true)
 	start := time.Now()
-	l, err := a.Acquire(context.Background(), "watched", fgFn, Fresh)
+	l, err := a.Acquire(context.Background(), "watched", fgFn)
 	if err != nil || l == nil {
 		t.Fatal(err)
 	}
@@ -255,13 +243,13 @@ func TestShareClassSitsBetweenBackgroundAndForeground(t *testing.T) {
 	a := New(fixed(1))
 	ctx := context.Background()
 
-	bg, err := a.Acquire(ctx, "download", nil, Resume)
+	bg, err := a.Acquire(ctx, "download", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	shareCh := make(chan *Lease, 1)
 	go func() {
-		l, err := a.AcquireClass(ctx, "share", classOf(Share), Fresh)
+		l, err := a.AcquireClass(ctx, "share", classOf(Share))
 		if err == nil {
 			shareCh <- l
 		}
@@ -282,7 +270,7 @@ func TestShareClassSitsBetweenBackgroundAndForeground(t *testing.T) {
 		t.Fatal("another share holds the slot at the same class: WouldGrant(Share) must be false")
 	}
 
-	fg := acquireAsync(t, a, ctx, "household", func() bool { return true }, Fresh)
+	fg := acquireAsync(t, a, ctx, "household", func() bool { return true })
 	if !preempted(share, time.Second) {
 		t.Fatal("household should preempt the share")
 	}
@@ -297,7 +285,7 @@ func TestShareClassSitsBetweenBackgroundAndForeground(t *testing.T) {
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 600*time.Millisecond)
 	defer cancel()
-	if l, err := a.AcquireClass(waitCtx, "share-again", classOf(Share), Fresh); err == nil {
+	if l, err := a.AcquireClass(waitCtx, "share-again", classOf(Share)); err == nil {
 		l.Release()
 		t.Fatal("a Fresh share request must not preempt the household")
 	}

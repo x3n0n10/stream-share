@@ -216,7 +216,7 @@ func TestProbeBusyIsHealthy(t *testing.T) {
 	c, sm, hits := probeHarness(t, http.StatusOK)
 	slots := provider.New(func() int { return 1 })
 	sm.SetProviderSlots(slots)
-	lease, err := slots.AcquireClass(context.Background(), "viewer", func() provider.Class { return provider.Foreground }, provider.Fresh)
+	lease, err := slots.AcquireClass(context.Background(), "viewer", func() provider.Class { return provider.Foreground })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ func TestProbeFallbackStreamDoesNotMaskRecovery(t *testing.T) {
 
 func TestProbeFailingEvidenceWhenBusy(t *testing.T) {
 	c, _, slots, hits, _ := fallbackRig(t)
-	lease, err := slots.AcquireClass(context.Background(), "viewer", func() provider.Class { return provider.Foreground }, provider.Fresh)
+	lease, err := slots.AcquireClass(context.Background(), "viewer", func() provider.Class { return provider.Foreground })
 	if err != nil {
 		t.Fatal(err)
 	}

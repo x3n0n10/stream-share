@@ -140,7 +140,7 @@ func (sm *SessionManager) ProbeUpstream(ctx context.Context, target *url.URL) *U
 	if !sm.providerSlots.WouldGrant(provider.Background) {
 		return &UpstreamError{Key: KeyAllInUse}
 	}
-	lease, err := sm.providerSlots.AcquireClass(ctx, "health probe", nil, provider.Resume)
+	lease, err := sm.providerSlots.AcquireClass(ctx, "health probe", nil)
 	if err != nil {
 		return &UpstreamError{Key: KeyAllInUse}
 	}

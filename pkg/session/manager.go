@@ -75,7 +75,7 @@ type SessionManager struct {
 	providerSlots *provider.Arbiter
 	errorCatalog  *Catalog
 	slateRetryMax time.Duration
-	// slotWait bounds how long a lent stream waits for a slot held by a
+	// slotWait bounds how long a live start waits for a slot held by a
 	// guest that is leaving (see acquirePolite).
 	slotWait time.Duration
 	// failoverTargets lists the fallback instances for a live channel start
@@ -195,9 +195,6 @@ type StreamBuffer struct {
 	startErr   *UpstreamError
 	slateOK    bool
 
-	// forwarded marks a stream lent to another instance (created by a
-	// failover identity): it never slates and asks politely for its slot.
-	forwarded bool
 	// slating is true while the pump serves the error slate.
 	slating atomic.Bool
 	// failover marks a household live stream that may be served by a
@@ -672,7 +669,6 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		stopChan:    make(chan struct{}),
 		ready:       make(chan struct{}),
 		slateOK:     slateEligible(streamType) && !IsFailoverIdentity(username),
-		forwarded:   IsFailoverIdentity(username),
 		failover: sm.failoverTargets != nil && streamType == "live" &&
 			!IsShareIdentity(username) && !IsFailoverIdentity(username),
 		takeover: takeover,
@@ -836,7 +832,7 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 	// the provider's only connection is paused to make room. If the slot is
 	// taken back for another watched stream (the provider cannot serve both),
 	// this stream stops; its players reconnect if they still want it.
-	// A lent stream never takes a slot from a same-class holder (see
+	// A live start never takes a slot from a same-class holder (see
 	// acquirePolite). A failover stream tries the own provider politely,
 	// then the fallback instances (see failoverAttempt).
 	// lease is reassigned when a slate retry gets a new one.
@@ -851,16 +847,7 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 		resp, lease, uerr = sm.failoverAttempt(ctx, buffer, upstreamURL, sm.failoverOwnTimeout)
 	} else {
 		var slotErr *UpstreamError
-		if buffer.forwarded {
-			lease, slotErr = sm.acquirePolite(ctx, buffer)
-		} else {
-			var err error
-			lease, err = sm.providerSlots.AcquireClass(ctx, "live "+sm.streamLabel(buffer.streamID),
-				func() provider.Class { return buffer.audienceClass() }, provider.Fresh)
-			if err != nil {
-				slotErr = classifyUpstream(err, 0)
-			}
-		}
+		lease, slotErr = sm.acquirePolite(ctx, buffer)
 		if slotErr != nil {
 			buffer.markReady(slotErr)
 			sm.stopStreamLocking(buffer.streamID)

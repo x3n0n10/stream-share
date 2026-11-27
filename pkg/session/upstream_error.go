@@ -35,8 +35,8 @@ const (
 	// KeyNoRecording: a catchup request for a time neither the local buffer
 	// nor the provider has a recording of.
 	KeyNoRecording = "NO_RECORDING"
-	// KeyAllInUse: a lent (forwarded) stream found every provider connection
-	// taken by this instance's own viewers.
+	// KeyAllInUse: a live start found every provider connection
+	// taken by watched streams of its own class.
 	KeyAllInUse = "IN_USE"
 )
 

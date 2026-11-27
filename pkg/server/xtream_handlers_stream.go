@@ -34,6 +34,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/lucasduport/stream-share/pkg/catchup"
+	"github.com/lucasduport/stream-share/pkg/provider"
 	"github.com/lucasduport/stream-share/pkg/session"
 	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
@@ -555,6 +556,13 @@ func (c *Config) streamVODWithCache(ctx *gin.Context, basePath, defaultExt strin
 		// one-connection provider cut the download, and vice versa.
 		upstream, dest, _ := c.resolveVODTarget(basePath, defaultExt, id, false)
 		expires := time.Now().Add(7 * 24 * time.Hour)
+		// Every slot watched: a new download would only wait, so say so. The
+		// check/acquire race is accepted.
+		if _, running := c.inProgressDownloads.Load(idRaw); !running && !c.providerSlots.WouldGrant(provider.Foreground) {
+			utils.InfoLog("Refusing %s for %s: every provider connection is in use by other viewers", basePath, c.vodLabel(idRaw))
+			ctx.String(http.StatusServiceUnavailable, "All provider connections are in use by other viewers.\n")
+			return
+		}
 		dl := c.startBackgroundDownload(upstream, dest, idRaw, basePath, expires, func() {
 			if err := c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: idRaw, Type: basePath, FilePath: dest, Status: "downloading", ExpiresAt: expires, CreatedAt: time.Now()}); err != nil {
 				utils.ErrorLog("Failed to record %s cache entry for %s: %v", basePath, idRaw, err)

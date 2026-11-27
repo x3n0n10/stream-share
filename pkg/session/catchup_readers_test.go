@@ -178,3 +178,35 @@ func TestClientLeavingKeepsReadersStream(t *testing.T) {
 		t.Fatal("a pause grace started while alice reads")
 	}
 }
+
+// A long catchup read makes no new requests; the reader's session must not
+// expire under it and stop the stream it reads.
+func TestReaderSessionDoesNotExpire(t *testing.T) {
+	sm, _ := readerManager(t, 1, time.Minute)
+	end := sm.BeginCatchupRead("alice", "42")
+	defer end()
+	sm.SetSessionTimeout(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
+	sm.cleanupExpiredSessions()
+	if !streamActive(sm, "42.ts") {
+		t.Fatal("session expiry stopped the stream alice reads")
+	}
+	if sm.GetUserSession("alice") == nil {
+		t.Fatal("alice's session expired while she reads")
+	}
+}
+
+// A catchup read targets the stream with a disk buffer, never a VOD sharing
+// its bare id.
+func TestCatchupReadSkipsVODWithSameID(t *testing.T) {
+	sm := newTestManager()
+	defer sm.Stop()
+	vod := &StreamBuffer{streamID: "42.mkv", active: true, readers: map[string]int{},
+		stopChan: make(chan struct{}), ready: make(chan struct{})}
+	sm.streamBuffers["42.mkv"] = vod
+	end := sm.BeginCatchupRead("alice", "42")
+	defer end()
+	if vod.hasReaders() {
+		t.Fatal("the catchup read was counted on a VOD stream")
+	}
+}

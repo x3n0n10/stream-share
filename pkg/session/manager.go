@@ -225,6 +225,13 @@ func (b *StreamBuffer) hasReaders() bool {
 	return len(b.readers) > 0
 }
 
+// hasReader reports whether username reads this channel's catchup buffer.
+func (b *StreamBuffer) hasReader(username string) bool {
+	b.readersMu.Lock()
+	defer b.readersMu.Unlock()
+	return b.readers[username] > 0
+}
+
 // hasReaderOtherThan reports whether a user other than username reads this
 // channel's catchup buffer.
 func (b *StreamBuffer) hasReaderOtherThan(username string) bool {
@@ -427,8 +434,9 @@ func (sm *SessionManager) cleanupExpiredSessions() {
 	for username, session := range sm.userSessions {
 		if session.LastActive.Before(threshold) {
 			// LastActive only moves on new requests, so a user still connected
-			// to a live stream (one long viewing, no zapping) is not idle.
-			if len(sm.userConnections(username)) > 0 {
+			// to a live stream (one long viewing, no zapping) or reading its
+			// catchup buffer is not idle.
+			if len(sm.userConnections(username)) > 0 || sm.userReading(username) {
 				continue
 			}
 			utils.InfoLog("Session expired for user %s (inactive for %s)",
@@ -478,6 +486,19 @@ func (sm *SessionManager) userConnections(username string) map[string][]string {
 		}
 	}
 	return conns
+}
+
+// userReading reports whether username reads the catchup buffer of an active
+// stream. Takes streamLock (userLock may already be held).
+func (sm *SessionManager) userReading(username string) bool {
+	sm.streamLock.RLock()
+	defer sm.streamLock.RUnlock()
+	for _, buffer := range sm.streamBuffers {
+		if buffer.active && buffer.hasReader(username) {
+			return true
+		}
+	}
+	return false
 }
 
 // cleanupUnusedStreams stops streams that have no viewers
@@ -1274,7 +1295,7 @@ func (sm *SessionManager) BeginCatchupRead(username, id string) (end func()) {
 	defer sm.streamLock.Unlock()
 	var buffer *StreamBuffer
 	for streamID, b := range sm.streamBuffers {
-		if b.active && bareID(streamID) == bare {
+		if b.active && b.diskBuffer != nil && bareID(streamID) == bare {
 			buffer = b
 			break
 		}

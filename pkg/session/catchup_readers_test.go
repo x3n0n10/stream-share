@@ -19,6 +19,7 @@
 package session
 
 import (
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -26,13 +27,10 @@ import (
 	"github.com/lucasduport/stream-share/pkg/provider"
 )
 
-// readerManager is a manager with catchup recording, a pause grace and
-// capacity provider slots, where alice watched 42.ts and then left it (the
-// stream is kept for the pause grace).
-func readerManager(t *testing.T, capacity int, grace time.Duration) (*SessionManager, string) {
+// catchupTestManager is a manager over srv with catchup recording, a pause
+// grace and capacity provider slots. Its streams stop before srv closes.
+func catchupTestManager(t *testing.T, srv *httptest.Server, capacity int, grace time.Duration) *SessionManager {
 	t.Helper()
-	var opens int64
-	srv := countingUpstream(t, &opens)
 	t.Cleanup(srv.Close)
 	sm := newTestManager()
 	t.Cleanup(sm.Stop)
@@ -46,11 +44,17 @@ func readerManager(t *testing.T, capacity int, grace time.Duration) (*SessionMan
 	sm.SetProviderSlots(provider.New(func() int { return capacity }))
 	sm.SetCatchupManager(catchup.New(true, t.TempDir(), 1))
 	sm.SetPauseGrace(grace)
+	return sm
+}
 
-	_, key, err := sm.RequestStream("alice", "42.ts", "live", "Live 42", mustURL(t, srv.URL+"/live/u/p/42.ts"))
-	if err != nil {
-		t.Fatal(err)
-	}
+// readerManager is a catchupTestManager where alice watched 42.ts and then
+// left it (the stream is kept for the pause grace).
+func readerManager(t *testing.T, capacity int, grace time.Duration) (*SessionManager, string) {
+	t.Helper()
+	var opens int64
+	srv := countingUpstream(t, &opens)
+	sm := catchupTestManager(t, srv, capacity, grace)
+	_, key := startLive(t, sm, srv.URL, "alice", "42")
 	if !receiving(sm, "42.ts", key, 3*time.Second) {
 		t.Fatal("stream should play")
 	}
@@ -65,10 +69,7 @@ func TestCatchupReaderKeepsSlot(t *testing.T) {
 	end := sm.BeginCatchupRead("alice", "42")
 	defer end()
 
-	buffer, _, err := sm.RequestStream("bob", "43.ts", "live", "Live 43", mustURL(t, base+"/live/u/p/43.ts"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	buffer, _ := startLive(t, sm, base, "bob", "43")
 	if uerr := waitReady(t, buffer); uerr == nil || uerr.Key != KeyAllInUse {
 		t.Fatalf("StartError = %+v, want %s", uerr, KeyAllInUse)
 	}
@@ -101,16 +102,11 @@ func TestOtherViewersSwitchKeepsReadersStream(t *testing.T) {
 	end := sm.BeginCatchupRead("alice", "42")
 	defer end()
 
-	_, key, err := sm.RequestStream("bob", "42.ts", "live", "Live 42", mustURL(t, base+"/live/u/p/42.ts"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, key := startLive(t, sm, base, "bob", "42")
 	if !receiving(sm, "42.ts", key, 3*time.Second) {
 		t.Fatal("bob should watch 42")
 	}
-	if _, _, err := sm.RequestStream("bob", "43.ts", "live", "Live 43", mustURL(t, base+"/live/u/p/43.ts")); err != nil {
-		t.Fatal(err)
-	}
+	startLive(t, sm, base, "bob", "43")
 	if !streamActive(sm, "42.ts") {
 		t.Fatal("bob's switch stopped the stream alice reads")
 	}
@@ -122,10 +118,7 @@ func TestOwnSwitchIgnoresOwnReader(t *testing.T) {
 	end := sm.BeginCatchupRead("alice", "42")
 	defer end()
 
-	_, key, err := sm.RequestStream("alice", "43.ts", "live", "Live 43", mustURL(t, base+"/live/u/p/43.ts"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, key := startLive(t, sm, base, "alice", "43")
 	if streamActive(sm, "42.ts") {
 		t.Fatal("alice's own reader kept her previous channel")
 	}
@@ -160,10 +153,7 @@ func TestClientLeavingKeepsReadersStream(t *testing.T) {
 	end := sm.BeginCatchupRead("alice", "42")
 	defer end()
 
-	_, key, err := sm.RequestStream("bob", "42.ts", "live", "Live 42", mustURL(t, base+"/live/u/p/42.ts"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, key := startLive(t, sm, base, "bob", "42")
 	if !receiving(sm, "42.ts", key, 3*time.Second) {
 		t.Fatal("bob should watch 42")
 	}

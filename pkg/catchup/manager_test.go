@@ -218,3 +218,24 @@ func TestStartBufferReplacesHeldBuffer(t *testing.T) {
 		t.Fatal("Cleanup kept a held buffer's file")
 	}
 }
+
+// A grace timer that fired but waits for the lock while a Hold cancels it
+// must not delete the held files.
+func TestGraceRacingHold(t *testing.T) {
+	m := New(true, t.TempDir(), 1)
+	m.SetGracePeriod(10 * time.Millisecond)
+	file := startedFile(t, m, "7")
+	m.StopBuffer("7")
+	m.mu.Lock()
+	time.Sleep(50 * time.Millisecond) // the timer fires and blocks on m.mu
+	// What Hold does under m.mu, ahead of the waiting timer goroutine.
+	buf := m.buffers["7"]
+	m.holds[buf]++
+	close(m.graceCancels["7"])
+	delete(m.graceCancels, "7")
+	m.mu.Unlock()
+	time.Sleep(50 * time.Millisecond)
+	if !exists(file) {
+		t.Fatal("a fired grace deleted a held buffer")
+	}
+}

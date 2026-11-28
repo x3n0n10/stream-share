@@ -216,9 +216,10 @@ func (m *Manager) armGrace(streamID string, buf *DiskBuffer) {
 
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		if m.graceCancels[streamID] == cancel {
-			delete(m.graceCancels, streamID)
+		if m.graceCancels[streamID] != cancel {
+			return // cancelled (Hold, StartBuffer, a newer grace) while waiting for m.mu
 		}
+		delete(m.graceCancels, streamID)
 		if current, exists := m.buffers[streamID]; exists && current == buf {
 			deleteFiles(buf)
 			delete(m.buffers, streamID)
@@ -249,6 +250,7 @@ func (m *Manager) Cleanup() {
 	for buf := range m.holds { // replaced buffers still held
 		deleteFiles(buf)
 	}
+	m.holds = make(map[*DiskBuffer]int)
 	utils.InfoLog("Catchup: all buffers cleaned up")
 }
 

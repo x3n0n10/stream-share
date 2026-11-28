@@ -92,6 +92,9 @@ type SessionManager struct {
 	// limitRetryWait is the pause before the own provider is asked again
 	// after a connection limit answer, inside failoverOwnTimeout (see dialOwn).
 	limitRetryWait time.Duration
+	// reconnectBackoff is the wait before the first redial of a protected
+	// stream whose upstream ended; it doubles per attempt (see reconnect).
+	reconnectBackoff time.Duration
 
 	// pauseGrace controls how long a catchup-enabled live stream keeps its
 	// upstream connection (and disk recording) alive after its last viewer
@@ -359,6 +362,7 @@ func NewSessionManager(db *database.DBManager) *SessionManager {
 		failoverOwnTimeout:  3 * time.Second,
 		failoverPeerTimeout: 3 * time.Second,
 		limitRetryWait:      1500 * time.Millisecond,
+		reconnectBackoff:    time.Second,
 		pendingStops:        make(map[string]chan struct{}),
 		vodViewTimers:       make(map[string]*time.Timer),
 		vodHistoryIDs:       make(map[string]int64),
@@ -977,6 +981,9 @@ func (sm *SessionManager) deliver(buffer *StreamBuffer, cl *streamClient, chunk 
 	}
 }
 
+// reconnectAttempts bounds the redials of a protected stream's upstream.
+const reconnectAttempts = 3
+
 // streamToClients pumps the single upstream connection and fans each chunk out
 // to every attached client. It is the only reader of the upstream body.
 func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url.URL) {
@@ -1008,8 +1015,21 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 	}()
 	var resp *http.Response
 	var uerr *UpstreamError
+	// redial dials the upstream again after a start failure (slate retry) or
+	// a protected stream's drop (reconnect), keeping the held slot. A failover
+	// stream starts over: a slow own provider can still recover (no own
+	// timeout), so the slot it may hold goes back first.
+	redial := func() (*http.Response, *UpstreamError) { return sm.dialUpstream(ctx, upstreamURL) }
 	if buffer.failover {
-		resp, lease, uerr = sm.failoverAttempt(ctx, buffer, upstreamURL, sm.failoverOwnTimeout)
+		start := func(ownTimeout time.Duration) (*http.Response, *UpstreamError) {
+			buffer.ownSlot.Store(false)
+			lease.Release()
+			r, l, err := sm.failoverAttempt(ctx, buffer, upstreamURL, ownTimeout)
+			lease = l
+			return r, err
+		}
+		redial = func() (*http.Response, *UpstreamError) { return start(0) }
+		resp, uerr = start(sm.failoverOwnTimeout)
 	} else {
 		var slotErr *UpstreamError
 		lease, slotErr = sm.acquirePolite(ctx, buffer)
@@ -1026,7 +1046,7 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 		// rather than a 206 that may lack a Content-Range total (which causes
 		// avformat errors in media players). 200 and 206 are both accepted, since
 		// some providers return 206 unconditionally.
-		resp, uerr = sm.dialUpstream(ctx, upstreamURL)
+		resp, uerr = redial()
 	}
 
 	// Raise slating before Ready so whoever wakes on Ready already sees it.
@@ -1049,16 +1069,6 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 		}
 		// Show the viewer what went wrong and keep retrying the provider. This
 		// returns a live response only if the upstream came back.
-		redial := func() (*http.Response, *UpstreamError) { return sm.dialUpstream(ctx, upstreamURL) }
-		if buffer.failover {
-			// A viewer on the slate is past the start window: no own timeout,
-			// so a slow provider can still recover.
-			redial = func() (*http.Response, *UpstreamError) {
-				r, l, err := sm.failoverAttempt(ctx, buffer, upstreamURL, 0)
-				lease = l
-				return r, err
-			}
-		}
 		resp = sm.serveSlateAndRetry(ctx, buffer, redial, uerr)
 		buffer.slating.Store(false)
 		if resp != nil && !buffer.failover {
@@ -1143,10 +1153,43 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 					utils.ErrorLog("Error reading from upstream: %v", rerr)
 				}
 			}
+			if r := sm.reconnect(ctx, buffer, redial); r != nil {
+				_ = resp.Body.Close()
+				resp = r
+				continue
+			}
 			sm.stopStreamLocking(buffer.streamID)
 			return
 		}
 	}
+}
+
+// reconnect redials the upstream of a stream that ended while a paused viewer
+// or a catchup reader protects it, so its recording goes on in the same disk
+// buffer (the readers would otherwise lose it). It returns nil, and the
+// stream stops, when it is unprotected, stopping, or every attempt failed.
+func (sm *SessionManager) reconnect(ctx context.Context, buffer *StreamBuffer, redial func() (*http.Response, *UpstreamError)) *http.Response {
+	backoff := sm.reconnectBackoff
+	for attempt := 1; attempt <= reconnectAttempts; attempt++ {
+		if sm.stopRequested(ctx, buffer) || !(buffer.paused.Load() || buffer.hasReaders()) {
+			return nil
+		}
+		t := time.NewTimer(backoff)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return nil
+		}
+		backoff *= 2
+		utils.InfoLog("Upstream ended for %s; reconnecting (attempt %d/%d)", sm.streamLabel(buffer.streamID), attempt, reconnectAttempts)
+		resp, uerr := redial()
+		if uerr == nil {
+			return resp
+		}
+		utils.WarnLog("Reconnect of %s failed: %s", sm.streamLabel(buffer.streamID), sm.failoverReason(uerr))
+	}
+	return nil
 }
 
 // watchPreemption stops the stream when the arbiter wants lease back for
@@ -1450,6 +1493,14 @@ func (sm *SessionManager) BeginCatchupRead(username, id string) (end func(stalle
 				buffer.readers[username] = n - 1
 			}
 			buffer.readersMu.Unlock()
+			if !buffer.active {
+				// The last reader of a stopped stream starts its files' grace,
+				// unless a newer stream of the channel replaced them.
+				if !buffer.hasReaders() && sm.catchupManager.GetBuffer(buffer.diskBuffer.StreamID()) == buffer.diskBuffer {
+					sm.catchupManager.StopBuffer(buffer.diskBuffer.StreamID())
+				}
+				return
+			}
 			if sm.streamBuffers[buffer.streamID] == buffer {
 				sm.lastViewerGone(buffer, username)
 			}
@@ -1492,9 +1543,14 @@ func (sm *SessionManager) stopStream(streamID string) {
 
 	// Stop disk buffer with grace period so in-flight timeshift readers can finish.
 	// TiviMate closes the live connection BEFORE opening timeshift, so we must keep
-	// the file alive briefly.
+	// the file alive briefly. While catchup readers remain, only writing stops:
+	// the last reader's end starts the grace (see BeginCatchupRead).
 	if buffer.diskBuffer != nil && sm.catchupManager != nil {
-		sm.catchupManager.StopBuffer(buffer.diskBuffer.StreamID())
+		if buffer.hasReaders() {
+			buffer.diskBuffer.Stop()
+		} else {
+			sm.catchupManager.StopBuffer(buffer.diskBuffer.StreamID())
+		}
 	}
 
 	// Update the stream session

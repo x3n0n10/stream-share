@@ -13,6 +13,9 @@ the "no recording" slate.
 Seen with a real player: a recording from 16:51 to 16:55 was replaced when the
 channel restarted at 16:56:54; the player's next rewind to 16:53 found nothing.
 
+Builds on PR #84 (`catchup.Manager.Hold`: every read holds a buffer, and a
+stopped buffer is deleted one grace after the stop or its last read).
+
 ## Goals
 
 - When a channel's live stream starts while its previous recording still
@@ -36,8 +39,8 @@ channel restarted at 16:56:54; the player's next rewind to 16:53 found nothing.
    channel's registered, stopped buffer and restarts writing on it: the
    current file becomes the previous one (as a rotation does) and a new
    current file is opened. One buffer object, the same two-file window and
-   the same deletion rules; reads hold the same buffer, so `Hold` keeps
-   working unchanged. The wall-clock index already handles a gap: a time in
+   the same deletion rules; reads hold the same buffer object, so #84's
+   `Hold` applies unchanged. The wall-clock index already handles a gap: a time in
    the gap maps to the last byte before it.
 2. **Keep the old buffer next to the new one** (a list of buffers per
    channel, searched by time). More state, a second deletion path per
@@ -48,17 +51,22 @@ channel restarted at 16:56:54; the player's next rewind to 16:53 found nothing.
 
 ## Design
 
-- `DiskBuffer.Restart(now time.Time) error`: only on a stopped buffer whose
-  drain loop has finished. It rotates current → prev (the file evicted from
-  prev is removed after `rotationGracePeriod`, exactly as a size rotation
-  does; readers with an open handle keep reading it), opens a new current
-  file, resets the stop state and starts a new drain loop. On failure the
-  buffer stays stopped and `StartBuffer` falls back to today's behaviour
-  (delete and start fresh).
-- `StartBuffer(id)`: if a buffer for `id` is registered and stopped, cancel
-  its pending grace and `Restart` it instead of deleting it; otherwise as
-  today. A buffer that is still writing (a second live stream of the same
-  channel cannot exist) keeps today's handling.
+- Pull the promote/evict tail of `rotate()` (current → prev, new current
+  segment, delayed removal of the evicted prev after `rotationGracePeriod`)
+  into one helper used by both `rotate()` and the new `Restart`, so there is
+  one rotation rule. Readers with an open handle keep reading an evicted file.
+- `DiskBuffer.Restart() error`: only on a stopped buffer whose drain loop has
+  finished (`DrainDone` closed). It promotes/evicts through that helper —
+  except when the current file is empty (`total == 0`), where it reuses it,
+  so a flapping provider cannot push older minutes out — creates a fresh
+  `writeCh` and `drainDone`, clears `stopped` and `rotateFailing`, and starts
+  a new drain loop. On any failure the buffer stays stopped and
+  `StartBuffer` falls back to today's behaviour (delete and start fresh).
+- `StartBuffer(id)` (which already cancels a pending grace): if the
+  registered buffer for `id` is stopped and its drain loop has finished,
+  `Restart` it instead of deleting it; if the drain loop has not finished
+  yet, fall back to today's behaviour. A buffer still writing cannot happen
+  (one live stream per channel).
 - Deletion stays single-owner in the catchup manager: the resumed buffer is
   the same object, so holds, grace and `Cleanup` apply as before. `Delete`
   already removes both files.

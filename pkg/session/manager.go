@@ -836,9 +836,16 @@ func (sm *SessionManager) SetVODLeftHook(fn func(streamID string)) {
 	sm.streamLock.Unlock()
 }
 
-// PauseStallTimeout is how long a viewer of a recorded stream may stall
-// before it counts as a pause (see SetPauseStallTimeout).
-func (sm *SessionManager) PauseStallTimeout() time.Duration {
+// CatchupIdleLimit is how long a catchup read may wait on one write before it
+// ends as a pause: the pause grace, since players read ahead from the disk
+// buffer and then idle for long stretches (the pause stall timeout when the
+// grace is off).
+func (sm *SessionManager) CatchupIdleLimit() time.Duration {
+	sm.streamLock.RLock()
+	defer sm.streamLock.RUnlock()
+	if sm.pauseGrace > 0 {
+		return sm.pauseGrace
+	}
 	return sm.pauseStallTimeout
 }
 

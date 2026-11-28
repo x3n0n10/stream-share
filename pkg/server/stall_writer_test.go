@@ -28,15 +28,18 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lucasduport/stream-share/pkg/session"
 )
 
 // deadlineWriter is a ResponseWriter honoring write deadlines: with block
 // set, a write waits for the deadline and fails as a timed-out socket does;
-// with err set, writes fail at once with it.
+// with idle set, a write takes that long (a client idling) and fails only
+// past the deadline; with err set, writes fail at once with it.
 type deadlineWriter struct {
 	*httptest.ResponseRecorder
 	deadline time.Time
 	block    bool
+	idle     time.Duration
 	err      error
 }
 
@@ -49,6 +52,12 @@ func (w *deadlineWriter) Write(p []byte) (int, error) {
 	if w.block {
 		time.Sleep(time.Until(w.deadline))
 		return 0, os.ErrDeadlineExceeded
+	}
+	if w.idle > 0 {
+		time.Sleep(w.idle)
+		if time.Now().After(w.deadline) {
+			return 0, os.ErrDeadlineExceeded
+		}
 	}
 	return w.ResponseRecorder.Write(p)
 }
@@ -112,4 +121,33 @@ func TestStallWriter(t *testing.T) {
 			t.Fatalf("err = %v, stalled = %v, body %q", err, sw.stalled, rec.Body.String())
 		}
 	})
+}
+
+// A catchup read gets the pause grace as its idle limit: a player idling
+// past the pause stall timeout (it read ahead from the disk buffer) is not
+// cut; one idling past the grace is. With the grace off, the pause stall
+// timeout applies.
+func TestCatchupIdleLimit(t *testing.T) {
+	sm := session.NewSessionManager(nil)
+	defer sm.Stop()
+	sm.SetPauseStallTimeout(50 * time.Millisecond)
+	sm.SetPauseGrace(400 * time.Millisecond)
+	if got := sm.CatchupIdleLimit(); got != 400*time.Millisecond {
+		t.Fatalf("CatchupIdleLimit = %s, want the pause grace", got)
+	}
+
+	rec := httptest.NewRecorder()
+	sw := stallWriterFor(&deadlineWriter{ResponseRecorder: rec, idle: 150 * time.Millisecond}, sm.CatchupIdleLimit())
+	if _, err := sw.Write([]byte("x")); err != nil || sw.stalled || rec.Body.String() != "x" {
+		t.Fatalf("idle past the stall timeout, within the grace: err = %v, stalled = %v", err, sw.stalled)
+	}
+	sw = stallWriterFor(&deadlineWriter{ResponseRecorder: httptest.NewRecorder(), idle: 600 * time.Millisecond}, sm.CatchupIdleLimit())
+	if _, err := sw.Write([]byte("x")); err == nil || !sw.stalled {
+		t.Fatalf("idle past the grace: err = %v, stalled = %v; want a stall", err, sw.stalled)
+	}
+
+	sm.SetPauseGrace(0)
+	if got := sm.CatchupIdleLimit(); got != 50*time.Millisecond {
+		t.Fatalf("CatchupIdleLimit with the grace off = %s, want the pause stall timeout", got)
+	}
 }

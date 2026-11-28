@@ -179,10 +179,10 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 	// A client reading the catchup buffer (e.g. resuming after a pause)
 	// watches the channel: its live stream keeps recording and keeps its
 	// provider slot until the read ends.
-	// Each write gets the pause stall timeout: a reader that stops taking data
-	// (a pause, a half-open socket) ends the read, as a pause.
+	// Each write gets the catchup idle limit: a reader that stops taking data
+	// that long (a pause, a half-open socket) ends the read, as a pause.
 	if c.sessionManager != nil {
-		w := newStallWriter(ctx.Writer, c.sessionManager.PauseStallTimeout())
+		w := newStallWriter(ctx.Writer, c.sessionManager.CatchupIdleLimit())
 		ctx.Writer = w
 		end := c.sessionManager.BeginCatchupRead(c.resolveRequestUsername(ctx), idRaw)
 		defer func() {

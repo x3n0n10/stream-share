@@ -61,6 +61,14 @@ func (s *StreamSession) AddViewer(username string) {
 	s.LastRequested = time.Now()
 }
 
+// HasViewer reports whether username watches the stream session.
+func (s *StreamSession) HasViewer(username string) bool {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	_, ok := s.Viewers[username]
+	return ok
+}
+
 // RemoveViewer removes a viewer from the stream session
 func (s *StreamSession) RemoveViewer(username string) bool {
 	s.lock.Lock()

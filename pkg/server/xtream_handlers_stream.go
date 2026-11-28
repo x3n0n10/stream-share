@@ -213,14 +213,16 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 		return
 	}
 
-	// Buffer exhausted — transition seamlessly to the live upstream so TiviMate
-	// catches up and continues watching without reconnecting on its own.
+	// Buffer exhausted — transition seamlessly to the live stream so TiviMate
+	// catches up and continues watching without reconnecting on its own. It
+	// joins the channel's shared stream, or needs a provider slot like any
+	// live start (a direct connection would fight the slot holder).
 	liveURL, err := url.Parse(c.providerStreamURL("live", idRaw))
 	if err != nil {
 		return
 	}
 	utils.DebugLog("Catchup: buffer exhausted for %s, transitioning to live upstream", c.streamLabel(idRaw))
-	c.stream(ctx, liveURL)
+	c.multiplexedStream(ctx, liveURL)
 }
 
 // proxyTimeshift streams the provider's own catchup recording, with the start
@@ -438,7 +440,9 @@ func newStallWriter(w gin.ResponseWriter, timeout time.Duration) *stallWriter {
 }
 
 func (w *stallWriter) Write(p []byte) (int, error) {
-	_ = w.rc.SetWriteDeadline(time.Now().Add(w.timeout)) // unsupported writers just block
+	if w.timeout > 0 { // 0: no limit
+		_ = w.rc.SetWriteDeadline(time.Now().Add(w.timeout)) // unsupported writers just block
+	}
 	n, err := w.ResponseWriter.Write(p)
 	if errors.Is(err, os.ErrDeadlineExceeded) {
 		w.stalled = true

@@ -838,15 +838,11 @@ func (sm *SessionManager) SetVODLeftHook(fn func(streamID string)) {
 
 // CatchupIdleLimit is how long a catchup read may wait on one write before it
 // ends as a pause: the pause grace, since players read ahead from the disk
-// buffer and then idle for long stretches (the pause stall timeout when the
-// grace is off).
+// buffer and then idle for long stretches. 0 (pause handling off): no limit.
 func (sm *SessionManager) CatchupIdleLimit() time.Duration {
 	sm.streamLock.RLock()
 	defer sm.streamLock.RUnlock()
-	if sm.pauseGrace > 0 {
-		return sm.pauseGrace
-	}
-	return sm.pauseStallTimeout
+	return sm.pauseGrace
 }
 
 // newStreamClient allocates a connection for username with a unique client
@@ -950,8 +946,9 @@ func (b *StreamBuffer) watchedBeyond(username string, guests bool) bool {
 // deliver enqueues a chunk for one client, applying back-pressure.
 //
 // A client with room (or one already gone) is served without a timer. Once its
-// buffer is full: on a stream with a disk buffer, any client still full after
-// pauseStallTimeout is closed, so a pause never stops the recording. Otherwise,
+// buffer is full: on a stream with a disk buffer and a pause grace, any client
+// still full after pauseStallTimeout is closed, so a pause never stops the
+// recording. Otherwise,
 // when sole is true (the only viewer) it blocks until the client accepts the
 // chunk or disconnects — reproducing a direct connection's TCP back-pressure;
 // with multiple viewers a client whose buffer stays full past
@@ -965,7 +962,8 @@ func (sm *SessionManager) deliver(buffer *StreamBuffer, cl *streamClient, chunk 
 		return false
 	default:
 	}
-	if sole && buffer.diskBuffer == nil {
+	pausable := buffer.diskBuffer != nil && sm.pauseGrace > 0
+	if sole && !pausable {
 		select {
 		case cl.ch <- chunk:
 		case <-cl.done:
@@ -974,7 +972,7 @@ func (sm *SessionManager) deliver(buffer *StreamBuffer, cl *streamClient, chunk 
 		return false
 	}
 	timeout := sm.clientStallTimeout
-	if buffer.diskBuffer != nil {
+	if pausable {
 		timeout = sm.pauseStallTimeout
 	}
 	stall := time.NewTimer(timeout)
@@ -1337,7 +1335,8 @@ func (sm *SessionManager) RemoveClient(streamID, username, clientKey string) {
 	}
 
 	buffer.clientsLock.Lock()
-	if cl, ok := buffer.clients[clientKey]; ok {
+	cl, removed := buffer.clients[clientKey]
+	if removed {
 		// Leaving with a full buffer (stall timeout, or TiviMate closing
 		// while paused) is a stall; a guest's never protects the stream.
 		if cl.stalled() {
@@ -1363,14 +1362,20 @@ func (sm *SessionManager) RemoveClient(streamID, username, clientKey string) {
 	// never blocks the global stream map.
 	historyID := sm.captureLiveHistoryID(username, streamID)
 
+	// A handler's call after the pump already removed its stalled client
+	// changes nothing worth logging.
+	left := removed
 	if streamSession, exists := sm.streamSessions[streamID]; exists {
+		left = left || streamSession.HasViewer(username)
 		streamSession.RemoveViewer(username)
 	}
 	sm.lastViewerGone(buffer, username)
 
 	sm.streamLock.Unlock()
 	sm.closeHistoryRow(historyID)
-	utils.InfoLog("User %s removed from %s", username, sm.streamLabel(streamID))
+	if left {
+		utils.InfoLog("User %s removed from %s", username, sm.streamLabel(streamID))
+	}
 }
 
 // lastViewerGone decides what happens to buffer once username, its last client

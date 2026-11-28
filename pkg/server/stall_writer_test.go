@@ -55,7 +55,7 @@ func (w *deadlineWriter) Write(p []byte) (int, error) {
 	}
 	if w.idle > 0 {
 		time.Sleep(w.idle)
-		if time.Now().After(w.deadline) {
+		if !w.deadline.IsZero() && time.Now().After(w.deadline) {
 			return 0, os.ErrDeadlineExceeded
 		}
 	}
@@ -146,8 +146,13 @@ func TestCatchupIdleLimit(t *testing.T) {
 		t.Fatalf("idle past the grace: err = %v, stalled = %v; want a stall", err, sw.stalled)
 	}
 
+	// Pause handling off: a rewind read is never cut, however long it idles.
 	sm.SetPauseGrace(0)
-	if got := sm.CatchupIdleLimit(); got != 50*time.Millisecond {
-		t.Fatalf("CatchupIdleLimit with the grace off = %s, want the pause stall timeout", got)
+	if got := sm.CatchupIdleLimit(); got != 0 {
+		t.Fatalf("CatchupIdleLimit with the grace off = %s, want 0 (no limit)", got)
+	}
+	sw = stallWriterFor(&deadlineWriter{ResponseRecorder: httptest.NewRecorder(), idle: 100 * time.Millisecond}, sm.CatchupIdleLimit())
+	if _, err := sw.Write([]byte("x")); err != nil || sw.stalled {
+		t.Fatalf("no idle limit: err = %v, stalled = %v; want no deadline", err, sw.stalled)
 	}
 }

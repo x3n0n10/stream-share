@@ -329,3 +329,21 @@ func TestLeavePreviousStreamLeavesOtherUsersStream(t *testing.T) {
 		t.Fatal("alice's paused stream must stay")
 	}
 }
+
+// With the pause grace off (pause handling disabled), a sole viewer of a
+// recorded channel who stops reading is not closed: the pump waits on it as
+// on any sole viewer.
+func TestSoleStallNotClosedWithoutPauseGrace(t *testing.T) {
+	sm, base := pauseManager(t, 1)
+	sm.SetPauseGrace(0)
+	_, key := startLive(t, sm, base, "alice", "42")
+	done, ok := sm.GetClientDone("42.ts", key)
+	if !ok {
+		t.Fatal("client not attached")
+	}
+	select {
+	case <-done:
+		t.Fatal("a stalled sole viewer must not be closed when pause handling is off")
+	case <-time.After(600 * time.Millisecond): // 3x the pause stall timeout
+	}
+}

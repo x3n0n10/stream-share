@@ -40,6 +40,7 @@ type Manager struct {
 	mu              sync.Mutex
 	buffers         map[string]*DiskBuffer   // streamID → buffer (active or in grace period)
 	graceCancels    map[string]chan struct{} // streamID → cancel chan for grace goroutine
+	holds           map[*DiskBuffer]int      // buffer → catchup reads holding its files (see Hold)
 	upstreamCatchup map[string]bool          // streamID → has native tv_archive=1
 	noArchive       map[string]time.Time     // streamID → when the provider had no recording despite tv_archive=1
 }
@@ -60,6 +61,7 @@ func New(enabled bool, dir string, duration int) *Manager {
 		grace:           gracePeriod,
 		buffers:         make(map[string]*DiskBuffer),
 		graceCancels:    make(map[string]chan struct{}),
+		holds:           make(map[*DiskBuffer]int),
 		upstreamCatchup: make(map[string]bool),
 		noArchive:       make(map[string]time.Time),
 	}
@@ -101,10 +103,12 @@ func (m *Manager) StartBuffer(streamID string) *DiskBuffer {
 		delete(m.graceCancels, streamID)
 	}
 
-	// Remove and clean up any existing buffer
+	// Remove and clean up any existing buffer; a held one goes on its last release.
 	if existing, ok := m.buffers[streamID]; ok {
 		existing.Stop()
-		_ = existing.Delete()
+		if m.holds[existing] == 0 {
+			_ = existing.Delete()
+		}
 		delete(m.buffers, streamID)
 	}
 
@@ -123,31 +127,85 @@ func (m *Manager) GetBuffer(streamID string) *DiskBuffer {
 	if !m.enabled {
 		return nil
 	}
-	bare := strings.TrimSuffix(streamID, filepath.Ext(streamID))
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.buffers[bare]
+	_, buf := m.lookup(streamID)
+	return buf
 }
 
-// StopBuffer stops writing to the buffer but keeps the file alive for gracePeriod,
-// allowing in-flight timeshift requests to finish reading.
+// lookup finds the buffer for streamID with or without an extension, and
+// returns its bare id. The caller holds m.mu.
+func (m *Manager) lookup(streamID string) (bare string, buf *DiskBuffer) {
+	bare = strings.TrimSuffix(streamID, filepath.Ext(streamID))
+	return bare, m.buffers[bare]
+}
+
+// Hold returns the buffer for streamID (active or in grace period, with or
+// without an extension) and keeps its files until release (idempotent) is
+// called: the one owner of when a buffer's files may go. It returns nil and a
+// no-op release when there is none.
+func (m *Manager) Hold(streamID string) (buf *DiskBuffer, release func()) {
+	if !m.enabled {
+		return nil, func() {}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	bare, buf := m.lookup(streamID)
+	if buf == nil {
+		return nil, func() {}
+	}
+	m.holds[buf]++
+	if cancel, ok := m.graceCancels[bare]; ok { // the last release re-arms it
+		close(cancel)
+		delete(m.graceCancels, bare)
+	}
+	var once sync.Once
+	return buf, func() { once.Do(func() { m.release(bare, buf) }) }
+}
+
+func (m *Manager) release(streamID string, buf *DiskBuffer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.holds[buf]--; m.holds[buf] > 0 {
+		return
+	}
+	delete(m.holds, buf)
+	switch {
+	case m.buffers[streamID] != buf: // replaced (or cleaned up) while held
+		deleteFiles(buf)
+	case buf.Stopped():
+		m.armGrace(streamID, buf)
+	}
+}
+
+// StopBuffer stops writing to the buffer but keeps its files for the grace
+// period, so a player's following timeshift requests still find them. They
+// go a grace after the later of the stop and the last held read's release.
 func (m *Manager) StopBuffer(streamID string) {
 	if !m.enabled {
 		return
 	}
 
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	buf, ok := m.buffers[streamID]
 	if !ok {
-		m.mu.Unlock()
 		return
 	}
-
 	buf.Stop()
+	if m.holds[buf] == 0 { // else the last release arms it
+		m.armGrace(streamID, buf)
+	}
+}
 
+// armGrace (re)starts the grace after which buf's files are deleted, unless
+// StartBuffer replaced buf; Hold cancels it. The caller holds m.mu.
+func (m *Manager) armGrace(streamID string, buf *DiskBuffer) {
+	if cancel, ok := m.graceCancels[streamID]; ok {
+		close(cancel)
+	}
 	cancel := make(chan struct{})
 	m.graceCancels[streamID] = cancel
-	m.mu.Unlock()
 
 	go func() {
 		select {
@@ -158,14 +216,12 @@ func (m *Manager) StopBuffer(streamID string) {
 
 		m.mu.Lock()
 		defer m.mu.Unlock()
-
-		// Only delete if this buffer is still the registered one (StartBuffer may have replaced it)
-		if current, exists := m.buffers[streamID]; exists && current == buf {
-			if err := buf.Delete(); err != nil && !os.IsNotExist(err) {
-				utils.WarnLog("Catchup: failed to delete buffer file %s: %v", buf.FilePath(), err)
-			}
-			delete(m.buffers, streamID)
+		if m.graceCancels[streamID] == cancel {
 			delete(m.graceCancels, streamID)
+		}
+		if current, exists := m.buffers[streamID]; exists && current == buf {
+			deleteFiles(buf)
+			delete(m.buffers, streamID)
 			utils.DebugLog("Catchup: grace period expired, deleted buffer for stream %s", streamID)
 		}
 	}()
@@ -187,12 +243,20 @@ func (m *Manager) Cleanup() {
 
 	for streamID, buf := range m.buffers {
 		buf.Stop()
-		if err := buf.Delete(); err != nil && !os.IsNotExist(err) {
-			utils.WarnLog("Catchup: cleanup failed to delete %s: %v", buf.FilePath(), err)
-		}
+		deleteFiles(buf)
 		delete(m.buffers, streamID)
 	}
+	for buf := range m.holds { // replaced buffers still held
+		deleteFiles(buf)
+	}
 	utils.InfoLog("Catchup: all buffers cleaned up")
+}
+
+// deleteFiles stops buf and removes its files, logging a failure.
+func deleteFiles(buf *DiskBuffer) {
+	if err := buf.Delete(); err != nil && !os.IsNotExist(err) {
+		utils.WarnLog("Catchup: failed to delete buffer file %s: %v", buf.FilePath(), err)
+	}
 }
 
 // CleanupOldFiles removes stale *.ts buffer files left from a previous run.

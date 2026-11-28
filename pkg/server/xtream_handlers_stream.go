@@ -162,8 +162,12 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 	}
 	utils.DebugLog("Catchup: timeshift start raw=%q parsed=%s (unix=%d)", start, startTime.Format(time.RFC3339), startTime.Unix())
 
-	buf := c.catchupManager.GetBuffer(idRaw)
+	// The hold keeps a stopped stream's files past their grace while this
+	// read runs; it is released before the hand-off to live.
+	buf, release := c.catchupManager.Hold(idRaw)
+	defer release()
 	if buf == nil || !bufferCovers(buf, startTime) {
+		release() // not read: the provider answers
 		// Some providers keep recordings for channels their list does not flag
 		// as archived, so ask; it answers with the recording or a slate. The
 		// paused live stream of this channel, if any, holds the provider
@@ -202,6 +206,7 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 	offset := buf.OffsetForTime(startTime)
 	utils.DebugLog("Catchup: serving %s from local buffer at offset %d / %d bytes (start raw=%q parsed=%s)", c.streamLabel(idRaw), offset, buf.BytesBuffered(), start, startTime.Format(time.RFC3339))
 	c.serveFromCatchupBuffer(ctx, buf, startTime)
+	release()
 
 	// If the client disconnected or the handler aborted, we're done.
 	select {

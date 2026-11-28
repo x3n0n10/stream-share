@@ -129,3 +129,92 @@ func TestRotateFailureKeepsRecording(t *testing.T) {
 		t.Fatalf("buffered %d bytes, want %d", got, 2*indexSampleInterval)
 	}
 }
+
+// startedFile starts a buffer for id on m and waits for its file to exist.
+func startedFile(t *testing.T, m *Manager, id string) string {
+	t.Helper()
+	file := m.StartBuffer(id).FilePath()
+	if !waitFor(time.Second, func() bool { _, err := os.Stat(file); return err == nil }) {
+		t.Fatalf("buffer file %s never appeared", file)
+	}
+	return file
+}
+
+func waitFor(d time.Duration, ok func() bool) bool {
+	for deadline := time.Now().Add(d); !ok(); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			return false
+		}
+	}
+	return true
+}
+
+func exists(file string) bool { _, err := os.Stat(file); return err == nil }
+
+// A read held on a stopped buffer — started before or during its grace —
+// keeps its files past the grace; they go a grace after the release.
+func TestHoldKeepsStoppedBuffer(t *testing.T) {
+	for _, holdFirst := range []bool{false, true} {
+		m := New(true, t.TempDir(), 1)
+		m.SetGracePeriod(50 * time.Millisecond)
+		file := startedFile(t, m, "7")
+		var release func()
+		if holdFirst {
+			_, release = m.Hold("7.ts")
+		}
+		m.StopBuffer("7")
+		if !holdFirst {
+			time.Sleep(20 * time.Millisecond) // within the grace
+			var buf *DiskBuffer
+			buf, release = m.Hold("7.ts")
+			if buf == nil {
+				t.Fatal("Hold found no buffer during the grace")
+			}
+		}
+		time.Sleep(150 * time.Millisecond) // 3x the grace
+		if !exists(file) {
+			t.Fatalf("holdFirst=%v: file deleted while held", holdFirst)
+		}
+		release()
+		release() // idempotent
+		time.Sleep(20 * time.Millisecond)
+		if !exists(file) {
+			t.Fatalf("holdFirst=%v: file deleted before a grace after the release", holdFirst)
+		}
+		if !waitFor(time.Second, func() bool { return !exists(file) }) {
+			t.Fatalf("holdFirst=%v: file kept after the release's grace", holdFirst)
+		}
+		if b, _ := m.Hold("7"); b != nil {
+			t.Fatal("deleted buffer still held")
+		}
+	}
+}
+
+// StartBuffer replacing a held, stopped buffer keeps the old files for the
+// reader and never deletes the new buffer's; Cleanup removes both.
+func TestStartBufferReplacesHeldBuffer(t *testing.T) {
+	m := New(true, t.TempDir(), 1)
+	m.SetGracePeriod(50 * time.Millisecond)
+	oldFile := startedFile(t, m, "7")
+	_, release := m.Hold("7")
+	m.StopBuffer("7")
+	newFile := startedFile(t, m, "7")
+	if !exists(oldFile) {
+		t.Fatal("replacement deleted the held buffer's file")
+	}
+	release()
+	if !waitFor(time.Second, func() bool { return !exists(oldFile) }) {
+		t.Fatal("replaced buffer's file kept after its last release")
+	}
+	time.Sleep(150 * time.Millisecond)
+	if !exists(newFile) {
+		t.Fatal("the new buffer's file was deleted")
+	}
+
+	_, release = m.Hold("7")
+	defer release()
+	m.Cleanup()
+	if exists(newFile) {
+		t.Fatal("Cleanup kept a held buffer's file")
+	}
+}

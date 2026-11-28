@@ -20,11 +20,13 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -323,5 +325,62 @@ func TestCatchupReaderFollowsRotation(t *testing.T) {
 	}
 	if got, want := w.Body.Len(), limit+limit/4; got != want {
 		t.Fatalf("reader got %d bytes, want %d (data after the rotation lost)", got, want)
+	}
+}
+
+// blockingWriter holds every write until release closes, like a player
+// taking data slowly.
+type blockingWriter struct {
+	*httptest.ResponseRecorder
+	writing chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *blockingWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.writing) })
+	<-w.release
+	return w.ResponseRecorder.Write(p)
+}
+
+// A live stream stops with nobody reading its catchup buffer; a timeshift
+// read that starts within the grace keeps the files past the grace while it
+// runs (the player's next request must still find them).
+func TestTimeshiftReadDuringGraceKeepsBuffer(t *testing.T) {
+	cm := catchup.New(true, t.TempDir(), 1)
+	cm.SetGracePeriod(50 * time.Millisecond)
+	start := time.Now()
+	buf := cm.StartBuffer("5")
+	buf.Write(bytes.Repeat([]byte{'a'}, 4096))
+	for deadline := time.Now().Add(3 * time.Second); buf.BytesBuffered() < 4096; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("buffer never got the data")
+		}
+	}
+	file := buf.FilePath()
+	cm.StopBuffer("5") // the stream stopped, no reader
+
+	w := &blockingWriter{ResponseRecorder: httptest.NewRecorder(), writing: make(chan struct{}), release: make(chan struct{})}
+	ctx, _ := gin.CreateTestContext(w)
+	reqCtx, cancel := context.WithCancel(context.Background())
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/", nil).WithContext(reqCtx)
+	ctx.Params = gin.Params{{Key: "duration", Value: "60"}, {Key: "start", Value: strconv.FormatInt(start.Unix(), 10)}, {Key: "id", Value: "5.ts"}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		(&Config{catchupManager: cm}).xtreamStreamTimeshift(ctx)
+	}()
+	select {
+	case <-w.writing:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the read never started")
+	}
+	time.Sleep(150 * time.Millisecond) // 3x the grace, the read still running
+	_, statErr := os.Stat(file)
+	cancel()
+	close(w.release)
+	<-done
+	if statErr != nil {
+		t.Fatalf("catchup file deleted under a running read: %v", statErr)
 	}
 }

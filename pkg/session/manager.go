@@ -1519,15 +1519,7 @@ func (sm *SessionManager) BeginCatchupRead(username, id string) (end func(stalle
 				buffer.readers[username] = n - 1
 			}
 			buffer.readersMu.Unlock()
-			if !buffer.active {
-				// The last reader of a stopped stream starts its files' grace,
-				// unless a newer stream of the channel replaced them.
-				if !buffer.hasReaders() && sm.catchupManager.GetBuffer(buffer.diskBuffer.StreamID()) == buffer.diskBuffer {
-					sm.catchupManager.StopBuffer(buffer.diskBuffer.StreamID())
-				}
-				return
-			}
-			if sm.streamBuffers[buffer.streamID] == buffer {
+			if buffer.active && sm.streamBuffers[buffer.streamID] == buffer {
 				sm.lastViewerGone(buffer, username)
 			}
 		})
@@ -1569,14 +1561,10 @@ func (sm *SessionManager) stopStream(streamID string) {
 
 	// Stop disk buffer with grace period so in-flight timeshift readers can finish.
 	// TiviMate closes the live connection BEFORE opening timeshift, so we must keep
-	// the file alive briefly. While catchup readers remain, only writing stops:
-	// the last reader's end starts the grace (see BeginCatchupRead).
+	// the file alive briefly. Catchup reads hold the files past the grace
+	// (catchup.Manager.Hold).
 	if buffer.diskBuffer != nil && sm.catchupManager != nil {
-		if buffer.hasReaders() {
-			buffer.diskBuffer.Stop()
-		} else {
-			sm.catchupManager.StopBuffer(buffer.diskBuffer.StreamID())
-		}
+		sm.catchupManager.StopBuffer(buffer.diskBuffer.StreamID())
 	}
 
 	// Update the stream session

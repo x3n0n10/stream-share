@@ -172,6 +172,7 @@ func TestStoppedBufferKeptWhileRead(t *testing.T) {
 	}
 	file := buffer.diskBuffer.FilePath()
 	end := sm.BeginCatchupRead("alice", "42")
+	_, release := sm.catchupManager.Hold("42") // what the timeshift handler does
 
 	sm.stopStreamLocking("42.ts")
 	time.Sleep(150 * time.Millisecond) // 3x the grace
@@ -180,6 +181,7 @@ func TestStoppedBufferKeptWhileRead(t *testing.T) {
 	}
 
 	end(false)
+	release()
 	if !waitUntil(2*time.Second, func() bool { _, err := os.Stat(file); return os.IsNotExist(err) }) {
 		t.Fatal("catchup file should be deleted a grace after the last reader left")
 	}

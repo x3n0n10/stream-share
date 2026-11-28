@@ -231,6 +231,9 @@ func (b *DiskBuffer) Delete() error {
 	return os.Remove(cur)
 }
 
+// Stopped reports whether Stop was called.
+func (b *DiskBuffer) Stopped() bool { return atomic.LoadInt32(&b.stopped) != 0 }
+
 func (b *DiskBuffer) DrainDone() <-chan struct{} { return b.drainDone }
 func (b *DiskBuffer) StreamID() string           { return b.streamID }
 

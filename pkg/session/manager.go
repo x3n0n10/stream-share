@@ -79,6 +79,9 @@ type SessionManager struct {
 	// slotWait bounds how long a live start waits for a slot about to free:
 	// the viewer's previous channel, or a leaving guest (see acquirePolite).
 	slotWait time.Duration
+	// vodLeft is told when a viewer switched away from a VOD view (see
+	// SetVODLeftHook). Guarded by streamLock.
+	vodLeft func(streamID string)
 	// failoverTargets lists the fallback instances for a live channel start
 	// (nil: no failover). failoverOwnTimeout and failoverPeerTimeout bound
 	// the own and each fallback dial: with slotWait and one fallback, a start
@@ -227,6 +230,14 @@ type StreamBuffer struct {
 	// within a pause grace of such a stall: the stream keeps its slot.
 	lastStallAt atomic.Int64
 	paused      atomic.Bool
+}
+
+// noteStall records that user stopped taking data; only a household
+// viewer's stall can pause the stream (see lastViewerGone).
+func (b *StreamBuffer) noteStall(user string) {
+	if isHousehold(user) {
+		b.lastStallAt.Store(time.Now().UnixNano())
+	}
 }
 
 // clearPause forgets a pause and the stall behind it, so an old stall cannot
@@ -640,35 +651,9 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 	userSession.LastActive = time.Now()
 	sm.userLock.Unlock()
 
-	// Handle case where user switches streams
 	takeover := false
 	if prevStreamID != "" && prevStreamID != streamID {
-		sm.streamLock.Lock()
-		prevBuffer, hasBuffer := sm.streamBuffers[prevStreamID]
-		// Leave a previous stream alone while someone else still watches it:
-		// another user, or another device of this user (a second live
-		// connection besides the one switching away). Stalled connections (a
-		// reconnect's half-open socket) don't count.
-		if !hasBuffer || !prevBuffer.active || !prevBuffer.watchedBeyond(username, true) {
-			if hasBuffer && prevBuffer.active {
-				takeover = prevBuffer.ownSlot.Load()
-				sm.stopStream(prevStreamID)
-			}
-			// A previous stream without a live buffer (e.g. a VOD view) still
-			// lists this user as a viewer: release that too.
-			if prevStream, ok := sm.streamSessions[prevStreamID]; ok {
-				prevStream.RemoveViewer(username)
-			}
-			sm.streamLock.Unlock()
-			// Close the departing viewer's history row for the previous stream.
-			sm.closeLiveHistory(username, prevStreamID)
-		} else {
-			// Kept only for guests: still wait for the slot, which the new
-			// channel takes once this viewer's old connection leaves and the
-			// previous stream drops to Share class.
-			takeover = prevBuffer.ownSlot.Load() && !prevBuffer.watchedBeyond(username, false)
-			sm.streamLock.Unlock()
-		}
+		takeover = sm.leavePrevious(username, prevStreamID)
 	}
 
 	// Check if this stream is already active
@@ -685,6 +670,11 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		// A viewer returned — cancel any pending pause-grace stop.
 		if sm.cancelPendingStop(streamID) {
 			utils.DebugLog("%s resumed before pause grace expired; continuing uninterrupted", sm.streamLabel(streamID))
+		}
+		// A household viewer back on the stream ends any pause: an old stall
+		// must not turn a later stop into one.
+		if isHousehold(username) {
+			existingBuffer.clearPause()
 		}
 
 		joinTitle := streamType
@@ -741,7 +731,7 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 		ready:       make(chan struct{}),
 		slateOK:     slateEligible(streamType) && !IsFailoverIdentity(username),
 		failover: sm.failoverTargets != nil && streamType == "live" &&
-			!IsShareIdentity(username) && !IsFailoverIdentity(username),
+			isHousehold(username),
 		takeover: takeover,
 		readers:  map[string]int{},
 	}
@@ -765,6 +755,83 @@ func (sm *SessionManager) RequestStream(username, streamID, streamType, streamTi
 
 	utils.InfoLog("Started new %s for user %s", sm.streamLabel(streamID), username)
 	return streamBuffer, client.key, nil
+}
+
+// leavePrevious applies the switch rule (see RequestStream) to username's
+// previous stream prevStreamID: stopped when nobody else watches it, else
+// left to its other viewers. It reports whether the next start is a takeover,
+// i.e. waits up to slotWait for the slot the previous stream frees: it held
+// one (a live buffer, or a VOD view, whose download keeps it a moment).
+func (sm *SessionManager) leavePrevious(username, prevStreamID string) (takeover bool) {
+	sm.streamLock.Lock()
+	prevBuffer, hasBuffer := sm.streamBuffers[prevStreamID]
+	// Leave a previous stream alone while someone else still watches it:
+	// another user, or another device of this user (a second live
+	// connection besides the one switching away). Stalled connections (a
+	// reconnect's half-open socket) don't count.
+	if hasBuffer && prevBuffer.active && prevBuffer.watchedBeyond(username, true) {
+		// Kept only for guests: still wait for the slot, which the new
+		// stream takes once this viewer's old connection leaves and the
+		// previous stream drops to Share class.
+		takeover = prevBuffer.ownSlot.Load() && !prevBuffer.watchedBeyond(username, false)
+		sm.streamLock.Unlock()
+		return takeover
+	}
+	vodLeft := false
+	if hasBuffer && prevBuffer.active {
+		takeover = prevBuffer.ownSlot.Load()
+		sm.stopStream(prevStreamID)
+	}
+	// A previous stream without a live buffer (e.g. a VOD view) still
+	// lists this user as a viewer: release that too.
+	if prevStream, ok := sm.streamSessions[prevStreamID]; ok {
+		prevStream.RemoveViewer(username)
+		if !hasBuffer && prevStream.StreamType != "live" {
+			takeover, vodLeft = true, true
+		}
+	}
+	hook := sm.vodLeft
+	sm.streamLock.Unlock()
+	if vodLeft && hook != nil {
+		hook(prevStreamID)
+	}
+	// Close the departing viewer's history row for the previous stream.
+	sm.closeLiveHistory(username, prevStreamID)
+	return takeover
+}
+
+// LeavePreviousStream applies RequestStream's switch rule for username
+// starting streamID outside RequestStream (a movie or series), so their own
+// previous stream never makes it "in use". It reports a takeover: the start
+// should wait up to SlotWait for the slot the previous stream frees.
+func (sm *SessionManager) LeavePreviousStream(username, streamID string) (takeover bool) {
+	sm.userLock.Lock()
+	prev := ""
+	if us, ok := sm.userSessions[username]; ok {
+		prev = us.StreamID
+	}
+	sm.userLock.Unlock()
+	return prev != "" && prev != streamID && sm.leavePrevious(username, prev)
+}
+
+// SlotWait is how long a takeover waits for the slot its viewer's previous
+// stream frees.
+func (sm *SessionManager) SlotWait() time.Duration {
+	return sm.slotWait
+}
+
+// SetVODLeftHook sets fn, called with a VOD view's stream ID when its viewer
+// switched away, so the server lets that download's slot go at once.
+func (sm *SessionManager) SetVODLeftHook(fn func(streamID string)) {
+	sm.streamLock.Lock()
+	sm.vodLeft = fn
+	sm.streamLock.Unlock()
+}
+
+// PauseStallTimeout is how long a viewer of a recorded stream may stall
+// before it counts as a pause (see SetPauseStallTimeout).
+func (sm *SessionManager) PauseStallTimeout() time.Duration {
+	return sm.pauseStallTimeout
 }
 
 // newStreamClient allocates a connection for username with a unique client
@@ -791,6 +858,12 @@ func (cl *streamClient) stalled() bool {
 // (which would let either stop the other's channel on a switch).
 const ShareIdentityPrefix = "share:"
 
+// isHousehold reports whether user is a household viewer: not a share link's
+// guest nor a forwarded (failover) client.
+func isHousehold(user string) bool {
+	return !IsShareIdentity(user) && !IsFailoverIdentity(user)
+}
+
 // IsShareIdentity reports whether username is a share link's identity.
 func IsShareIdentity(username string) bool {
 	return strings.HasPrefix(username, ShareIdentityPrefix)
@@ -808,7 +881,7 @@ func (b *StreamBuffer) audienceClass() provider.Class {
 	defer b.clientsLock.RUnlock()
 	class := provider.Background
 	for _, cl := range b.clients {
-		if !IsShareIdentity(cl.user) && !IsFailoverIdentity(cl.user) {
+		if isHousehold(cl.user) {
 			return provider.Foreground
 		}
 		class = provider.Share
@@ -846,7 +919,7 @@ func (b *StreamBuffer) watchedBeyond(username string, guests bool) bool {
 	defer b.clientsLock.RUnlock()
 	live := 0
 	for _, cl := range b.clients {
-		if !guests && (IsShareIdentity(cl.user) || IsFailoverIdentity(cl.user)) {
+		if !guests && !isHousehold(cl.user) {
 			continue
 		}
 		if cl.user != username {
@@ -1203,8 +1276,8 @@ func (sm *SessionManager) RemoveClient(streamID, username, clientKey string) {
 	if cl, ok := buffer.clients[clientKey]; ok {
 		// Leaving with a full buffer (stall timeout, or TiviMate closing
 		// while paused) is a stall; a guest's never protects the stream.
-		if cl.stalled() && !IsShareIdentity(cl.user) && !IsFailoverIdentity(cl.user) {
-			buffer.lastStallAt.Store(time.Now().UnixNano())
+		if cl.stalled() {
+			buffer.noteStall(cl.user)
 		}
 		cl.close()
 		delete(buffer.clients, clientKey)
@@ -1339,8 +1412,9 @@ func (sm *SessionManager) ReleasePausedStream(id string) bool {
 // (with or without an extension): while the read lasts the live stream counts
 // as watched, so it keeps its provider slot and is not stopped. It cancels a
 // pending pause-grace stop. The returned end (idempotent) ends the read; it is
-// a no-op when no live stream of the channel runs.
-func (sm *SessionManager) BeginCatchupRead(username, id string) (end func()) {
+// a no-op when no live stream of the channel runs. stalled tells that the read
+// ended because the client stopped taking data: a household reader's pause.
+func (sm *SessionManager) BeginCatchupRead(username, id string) (end func(stalled bool)) {
 	bare := bareID(id)
 	sm.streamLock.Lock()
 	defer sm.streamLock.Unlock()
@@ -1352,7 +1426,7 @@ func (sm *SessionManager) BeginCatchupRead(username, id string) (end func()) {
 		}
 	}
 	if buffer == nil {
-		return func() {}
+		return func(bool) {}
 	}
 	if sm.cancelPendingStop(buffer.streamID) {
 		utils.DebugLog("%s resumed via catchup before pause grace expired; continuing uninterrupted", sm.streamLabel(buffer.streamID))
@@ -1362,8 +1436,11 @@ func (sm *SessionManager) BeginCatchupRead(username, id string) (end func()) {
 	buffer.readersMu.Unlock()
 
 	var once sync.Once
-	return func() {
+	return func(stalled bool) {
 		once.Do(func() {
+			if stalled {
+				buffer.noteStall(username)
+			}
 			sm.streamLock.Lock()
 			defer sm.streamLock.Unlock()
 			buffer.readersMu.Lock()

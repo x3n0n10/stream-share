@@ -297,3 +297,32 @@ func TestShareClassSitsBetweenBackgroundAndForeground(t *testing.T) {
 	}
 	hh.Release()
 }
+
+// WaitGrant returns once a slot frees within d, false when none does, and at
+// once when one is free.
+func TestWaitGrant(t *testing.T) {
+	a := New(fixed(1))
+	if !a.WaitGrant(context.Background(), Foreground, 0) {
+		t.Fatal("a free slot should be granted at once")
+	}
+	fg, _ := flag(true)
+	l, err := a.Acquire(context.Background(), "holder", fg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if a.WaitGrant(context.Background(), Foreground, 100*time.Millisecond) {
+		t.Fatal("no slot frees: want false")
+	}
+	if d := time.Since(start); d < 100*time.Millisecond || d > time.Second {
+		t.Fatalf("waited %s, want about 100ms", d)
+	}
+	time.AfterFunc(50*time.Millisecond, l.Release)
+	start = time.Now()
+	if !a.WaitGrant(context.Background(), Foreground, 2*time.Second) {
+		t.Fatal("the released slot should be granted")
+	}
+	if d := time.Since(start); d > pollInterval {
+		t.Fatalf("woke after %s, want the release to wake it", d)
+	}
+}

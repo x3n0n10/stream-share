@@ -268,6 +268,36 @@ func (a *Arbiter) WouldGrant(c Class) bool {
 	return a.lowerHolderLocked(c) != nil
 }
 
+// WaitGrant waits up to d (and while ctx lasts) until WouldGrant(c), woken by
+// slot changes and re-checked every pollInterval, as a waiting request is.
+func (a *Arbiter) WaitGrant(ctx context.Context, c Class, d time.Duration) bool {
+	if a.WouldGrant(c) {
+		return true
+	}
+	deadline := time.NewTimer(d)
+	defer deadline.Stop()
+	for {
+		a.mu.Lock()
+		ch := a.changed
+		a.mu.Unlock()
+		timer := time.NewTimer(pollInterval)
+		select {
+		case <-ch:
+		case <-timer.C:
+		case <-deadline.C:
+			timer.Stop()
+			return a.WouldGrant(c)
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		}
+		timer.Stop()
+		if a.WouldGrant(c) {
+			return true
+		}
+	}
+}
+
 func (a *Arbiter) preemptLocked(l *Lease, forLabel string) {
 	if !l.preemptedAt.IsZero() {
 		return

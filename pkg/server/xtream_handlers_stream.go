@@ -21,6 +21,7 @@ package server
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -178,8 +179,16 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 	// A client reading the catchup buffer (e.g. resuming after a pause)
 	// watches the channel: its live stream keeps recording and keeps its
 	// provider slot until the read ends.
+	// Each write gets the pause stall timeout: a reader that stops taking data
+	// (a pause, a half-open socket) ends the read, as a pause.
 	if c.sessionManager != nil {
-		defer c.sessionManager.BeginCatchupRead(c.resolveRequestUsername(ctx), idRaw)()
+		w := newStallWriter(ctx.Writer, c.sessionManager.PauseStallTimeout())
+		ctx.Writer = w
+		end := c.sessionManager.BeginCatchupRead(c.resolveRequestUsername(ctx), idRaw)
+		defer func() {
+			_ = w.rc.SetWriteDeadline(time.Time{}) // a kept-alive connection serves on unbounded
+			end(w.stalled)
+		}()
 	}
 	// Reading the buffer of a channel learned to lack provider recordings keeps
 	// it learned, so its catchup does not bounce off the provider once a day.
@@ -410,6 +419,28 @@ func alignToTSPacket(f *os.File, startOffset int64) {
 	_, _ = f.Seek(startOffset, io.SeekStart)
 }
 
+// stallWriter bounds each write to timeout and remembers whether one timed
+// out (the client stopped reading).
+type stallWriter struct {
+	gin.ResponseWriter
+	rc      *http.ResponseController
+	timeout time.Duration
+	stalled bool
+}
+
+func newStallWriter(w gin.ResponseWriter, timeout time.Duration) *stallWriter {
+	return &stallWriter{ResponseWriter: w, rc: http.NewResponseController(w), timeout: timeout}
+}
+
+func (w *stallWriter) Write(p []byte) (int, error) {
+	_ = w.rc.SetWriteDeadline(time.Now().Add(w.timeout)) // unsupported writers just block
+	n, err := w.ResponseWriter.Write(p)
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		w.stalled = true
+	}
+	return n, err
+}
+
 // serveFromCatchupBuffer serves a timeshift request from the local disk buffer.
 // It resolves the correct file for startTime (which may be the previous file after a
 // rotation), serves that file to completion, then seamlessly continues from the current
@@ -533,7 +564,13 @@ func (c *Config) streamVODWithCache(ctx *gin.Context, basePath, defaultExt strin
 		return
 	}
 
-	defer c.registerVODView(c.resolveRequestUsername(ctx), idRaw, basePath, idRaw)()
+	// The viewer's own previous stream never makes this one "in use".
+	username := c.resolveRequestUsername(ctx)
+	var slotWait time.Duration // how long to wait for the slot the previous stream frees
+	if c.sessionManager != nil && c.sessionManager.LeavePreviousStream(username, idRaw) {
+		slotWait = c.sessionManager.SlotWait()
+	}
+	defer c.registerVODView(username, idRaw, basePath, idRaw)()
 
 	if c.VODCacheEnabled && c.db != nil {
 		if entry := c.cachedVODEntry(idRaw); entry != nil {
@@ -556,9 +593,10 @@ func (c *Config) streamVODWithCache(ctx *gin.Context, basePath, defaultExt strin
 		// one-connection provider cut the download, and vice versa.
 		upstream, dest, _ := c.resolveVODTarget(basePath, defaultExt, id, false)
 		expires := time.Now().Add(7 * 24 * time.Hour)
-		// Every slot watched: a new download would only wait, so say so. The
-		// check/acquire race is accepted.
-		if _, running := c.inProgressDownloads.Load(idRaw); !running && !c.providerSlots.WouldGrant(provider.Foreground) {
+		// Every slot watched: a new download would only wait, so say so (after
+		// waiting for the slot of the viewer's previous stream, if it held
+		// one). The check/acquire race is accepted.
+		if _, running := c.inProgressDownloads.Load(idRaw); !running && !c.providerSlots.WaitGrant(ctx.Request.Context(), provider.Foreground, slotWait) {
 			utils.InfoLog("Refusing %s for %s: every provider connection is in use by other viewers", basePath, c.vodLabel(idRaw))
 			ctx.String(http.StatusServiceUnavailable, "All provider connections are in use by other viewers.\n")
 			return
@@ -583,6 +621,14 @@ func (c *Config) streamVODWithCache(ctx *gin.Context, basePath, defaultExt strin
 	}
 	utils.DebugLog("VOD %s streaming request - proxying to upstream: %s", basePath, utils.MaskURL(rpURL.String()))
 	c.stream(ctx, rpURL)
+}
+
+// vodViewerLeft lets the download of VOD view streamID give its slot up as
+// soon as its readers are gone: its viewer switched to another stream.
+func (c *Config) vodViewerLeft(streamID string) {
+	if v, ok := c.inProgressDownloads.Load(streamID); ok {
+		v.(*vodDownload).viewerLeft()
+	}
 }
 
 func (c *Config) xtreamStreamMovie(ctx *gin.Context) {

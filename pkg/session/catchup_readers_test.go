@@ -67,7 +67,7 @@ func readerManager(t *testing.T, capacity int, grace time.Duration) (*SessionMan
 func TestCatchupReaderKeepsSlot(t *testing.T) {
 	sm, base := readerManager(t, 1, time.Minute)
 	end := sm.BeginCatchupRead("alice", "42")
-	defer end()
+	defer end(false)
 
 	buffer, _ := startLive(t, sm, base, "bob", "43")
 	if uerr := waitReady(t, buffer); uerr == nil || uerr.Key != KeyAllInUse {
@@ -86,7 +86,7 @@ func TestCatchupReaderEndStartsPauseGrace(t *testing.T) {
 	if !streamActive(sm, "42.ts") {
 		t.Fatal("stream stopped under a reader")
 	}
-	end()
+	end(false)
 	deadline := time.Now().Add(2 * time.Second)
 	for streamActive(sm, "42.ts") {
 		if time.Now().After(deadline) {
@@ -100,7 +100,7 @@ func TestCatchupReaderEndStartsPauseGrace(t *testing.T) {
 func TestOtherViewersSwitchKeepsReadersStream(t *testing.T) {
 	sm, base := readerManager(t, 2, time.Minute)
 	end := sm.BeginCatchupRead("alice", "42")
-	defer end()
+	defer end(false)
 
 	_, key := startLive(t, sm, base, "bob", "42")
 	if !receiving(sm, "42.ts", key, 3*time.Second) {
@@ -116,7 +116,7 @@ func TestOtherViewersSwitchKeepsReadersStream(t *testing.T) {
 func TestOwnSwitchIgnoresOwnReader(t *testing.T) {
 	sm, base := readerManager(t, 1, time.Minute)
 	end := sm.BeginCatchupRead("alice", "42")
-	defer end()
+	defer end(false)
 
 	_, key := startLive(t, sm, base, "alice", "43")
 	if streamActive(sm, "42.ts") {
@@ -136,8 +136,8 @@ func TestEndAfterStopLeavesNoReader(t *testing.T) {
 	buffer := sm.streamBuffers["42.ts"]
 	sm.stopStream("42.ts")
 	sm.streamLock.Unlock()
-	end()
-	end()
+	end(false)
+	end(false)
 
 	buffer.readersMu.Lock()
 	defer buffer.readersMu.Unlock()
@@ -151,7 +151,7 @@ func TestEndAfterStopLeavesNoReader(t *testing.T) {
 func TestClientLeavingKeepsReadersStream(t *testing.T) {
 	sm, base := readerManager(t, 2, time.Minute)
 	end := sm.BeginCatchupRead("alice", "42")
-	defer end()
+	defer end(false)
 
 	_, key := startLive(t, sm, base, "bob", "42")
 	if !receiving(sm, "42.ts", key, 3*time.Second) {
@@ -174,7 +174,7 @@ func TestClientLeavingKeepsReadersStream(t *testing.T) {
 func TestReaderSessionDoesNotExpire(t *testing.T) {
 	sm, _ := readerManager(t, 1, time.Minute)
 	end := sm.BeginCatchupRead("alice", "42")
-	defer end()
+	defer end(false)
 	sm.SetSessionTimeout(50 * time.Millisecond)
 	time.Sleep(100 * time.Millisecond)
 	sm.cleanupExpiredSessions()
@@ -195,7 +195,7 @@ func TestCatchupReadSkipsVODWithSameID(t *testing.T) {
 		stopChan: make(chan struct{}), ready: make(chan struct{})}
 	sm.streamBuffers["42.mkv"] = vod
 	end := sm.BeginCatchupRead("alice", "42")
-	defer end()
+	defer end(false)
 	if vod.hasReaders() {
 		t.Fatal("the catchup read was counted on a VOD stream")
 	}

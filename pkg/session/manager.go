@@ -260,6 +260,10 @@ func (b *StreamBuffer) hasReaders() bool {
 	return len(b.readers) > 0
 }
 
+// protected reports whether a paused viewer or a catchup reader keeps this
+// stream with no live clients.
+func (b *StreamBuffer) protected() bool { return b.paused.Load() || b.hasReaders() }
+
 // hasReader reports whether username reads this channel's catchup buffer.
 func (b *StreamBuffer) hasReader(username string) bool {
 	b.readersMu.Lock()
@@ -878,7 +882,7 @@ func IsShareIdentity(username string) bool {
 // paused it, Share while only guests (share-link or forwarded clients) do,
 // Background when nobody does.
 func (b *StreamBuffer) audienceClass() provider.Class {
-	if b.hasReaders() || b.paused.Load() {
+	if b.protected() {
 		return provider.Foreground
 	}
 	b.clientsLock.RLock()
@@ -1171,7 +1175,7 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 func (sm *SessionManager) reconnect(ctx context.Context, buffer *StreamBuffer, redial func() (*http.Response, *UpstreamError)) *http.Response {
 	backoff := sm.reconnectBackoff
 	for attempt := 1; attempt <= reconnectAttempts; attempt++ {
-		if sm.stopRequested(ctx, buffer) || !(buffer.paused.Load() || buffer.hasReaders()) {
+		if sm.stopRequested(ctx, buffer) || !buffer.protected() {
 			return nil
 		}
 		t := time.NewTimer(backoff)

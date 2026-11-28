@@ -22,6 +22,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -220,4 +221,30 @@ func enableSlates(t *testing.T, e *shareEnv) {
 	}
 	e.c.sessionManager.SetSlateProvider(catchupSlate{clip})
 	e.c.sessionManager.SetSlateRetryMax(20 * time.Second)
+}
+
+// A household viewer refused because every provider connection is watched gets
+// the IN_USE slate, or a plain 503 with the message when slates are off.
+func TestHouseholdInUseAnswersSlateOr503(t *testing.T) {
+	for _, slates := range []bool{true, false} {
+		e, _ := failoverServer(t, 1, false)
+		holdViewerSlot(t, e.c.providerSlots)
+		if slates {
+			enableSlates(t, e)
+			e.c.sessionManager.SetSlateRetryMax(300 * time.Millisecond) // the clip repeats until this
+		}
+		resp, err := http.Get(e.front.URL + "/household/10")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if slates {
+			if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "video/mp2t" || !bytes.HasPrefix(body, []byte("SLATE")) {
+				t.Errorf("slates on: got %d %q len=%d, want 200 video/mp2t with slate bytes", resp.StatusCode, resp.Header.Get("Content-Type"), len(body))
+			}
+		} else if resp.StatusCode != http.StatusServiceUnavailable || string(body) != "All provider connections are in use by other viewers.\n" {
+			t.Errorf("slates off: got %d %q, want 503 with the in-use message", resp.StatusCode, body)
+		}
+	}
 }

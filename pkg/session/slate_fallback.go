@@ -313,16 +313,28 @@ func playClip(ctx context.Context, stop <-chan struct{}, clipPath string, write 
 // has no recording for that time; anything else keeps its usual wording. ok is
 // false when slates are off or the clip cannot be rendered: answer as before.
 func (sm *SessionManager) CatchupSlateClip(streamID string, status int, err error) (clipPath string, ok bool) {
-	if sm.slateRetryMax <= 0 || sm.slateProvider == nil || !sm.slateProvider.Available() {
-		return "", false
-	}
 	uerr := classifyUpstream(err, status)
 	if err == nil && status == http.StatusNotFound {
 		uerr = &UpstreamError{Key: KeyNoRecording}
 	}
-	clipPath, cerr := sm.slateProvider.Clip(sm.slateViewFor(streamID, uerr))
-	if cerr != nil {
-		utils.WarnLog("Error slate: cannot render the catchup slate for %s: %v", sm.streamLabel(streamID), cerr)
+	return sm.slateClip(streamID, uerr, "catchup")
+}
+
+// InUseSlateClip renders the IN_USE slate for a viewer refused because every
+// provider connection is watched. ok is false when slates are off or the clip
+// cannot be rendered.
+func (sm *SessionManager) InUseSlateClip(streamID string) (clipPath string, ok bool) {
+	return sm.slateClip(streamID, &UpstreamError{Key: KeyAllInUse}, "in-use")
+}
+
+// slateClip renders the slate for uerr; what names the case in the log.
+func (sm *SessionManager) slateClip(streamID string, uerr *UpstreamError, what string) (string, bool) {
+	if sm.slateRetryMax <= 0 || sm.slateProvider == nil || !sm.slateProvider.Available() {
+		return "", false
+	}
+	clipPath, err := sm.slateProvider.Clip(sm.slateViewFor(streamID, uerr))
+	if err != nil {
+		utils.WarnLog("Error slate: cannot render the %s slate for %s: %v", what, sm.streamLabel(streamID), err)
 		return "", false
 	}
 	return clipPath, true

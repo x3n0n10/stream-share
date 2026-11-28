@@ -341,11 +341,16 @@ func (c *Config) serveCatchupSlate(ctx *gin.Context, idRaw string, status int, e
 		_ = resp.Body.Close() // don't hold a provider socket for the slate's minutes
 	}
 	utils.InfoLog("Catchup: provider could not serve %s (status %d, err %v); showing a slate", c.streamLabel(idRaw), status, err)
+	c.playSlate(ctx, clip)
+	return true
+}
+
+// playSlate answers 200 and repeats the slate clip to this one viewer.
+func (c *Config) playSlate(ctx *gin.Context, clip string) {
 	ctx.Header("Content-Type", "video/mp2t")
 	ctx.Header("Cache-Control", "no-cache")
 	ctx.Status(http.StatusOK)
 	c.sessionManager.PlayCatchupSlate(ctx.Request.Context(), ctx.Writer, clip)
-	return true
 }
 
 // bufferCovers tells whether the buffer holds start. Players send whole
@@ -795,6 +800,18 @@ func (c *Config) awaitUpstreamStart(ctx *gin.Context, buffer *session.StreamBuff
 				ctx.AbortWithStatus(failoverStatus(startErr))
 				return false
 			}
+		}
+		if startErr := buffer.StartError(); startErr != nil && startErr.Key == session.KeyAllInUse {
+			// The stream was stopped, so no slate arrives on dataChan: play
+			// the in-use slate to this viewer alone, or refuse with 503.
+			c.sessionManager.RemoveClient(streamID, username, clientKey)
+			if clip, ok := c.sessionManager.InUseSlateClip(streamID); ok {
+				c.playSlate(ctx, clip)
+				return false
+			}
+			ctx.String(http.StatusServiceUnavailable, "All provider connections are in use by other viewers.\n")
+			ctx.Abort()
+			return false
 		}
 		if startErr := buffer.StartError(); startErr != nil {
 			// The session manager serves an error slate for eligible live

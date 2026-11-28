@@ -1157,9 +1157,10 @@ func (sm *SessionManager) streamToClients(buffer *StreamBuffer, upstreamURL *url
 					utils.ErrorLog("Error reading from upstream: %v", rerr)
 				}
 			}
-			if r := sm.reconnect(ctx, buffer, redial); r != nil {
-				_ = resp.Body.Close()
-				resp = r
+			// The dead connection must not count against the provider's
+			// limit during the backoff.
+			_ = resp.Body.Close()
+			if resp = sm.reconnect(ctx, buffer, redial); resp != nil {
 				continue
 			}
 			sm.stopStreamLocking(buffer.streamID)
@@ -1218,37 +1219,46 @@ func (sm *SessionManager) watchPreemption(ctx context.Context, buffer *StreamBuf
 // slowest healthy client has taken the current one.
 func (sm *SessionManager) fanOut(buffer *StreamBuffer, chunk []byte) {
 	buffer.clientsLock.RLock()
-	names := make([]string, 0, len(buffer.clients))
 	targets := make([]*streamClient, 0, len(buffer.clients))
-	for name, cl := range buffer.clients {
-		names = append(names, name)
+	for _, cl := range buffer.clients {
 		targets = append(targets, cl)
 	}
 	buffer.clientsLock.RUnlock()
+
+	// drop delivers chunk to cl and removes cl if it stalled. A stalled sole
+	// client (paused on a recorded stream) is removed here too: a paused
+	// player may keep its socket open, leaving its handler blocked in Write,
+	// and the stream must be marked paused now. The handler's later
+	// RemoveClient is a no-op.
+	drop := func(cl *streamClient, sole bool) {
+		if !sm.deliver(buffer, cl, chunk, sole) {
+			return
+		}
+		if sole {
+			utils.DebugLog("Closed stalled client %s of %s (paused?)", cl.user, sm.streamLabel(buffer.streamID))
+		} else {
+			utils.WarnLog("Dropping slow client %s from %s (buffer stalled)", cl.user, sm.streamLabel(buffer.streamID))
+		}
+		sm.RemoveClient(buffer.streamID, cl.user, cl.key)
+	}
 
 	switch len(targets) {
 	case 0:
 		return
 	case 1:
 		// Sole viewer: deliver inline on the pump goroutine (no fan-out
-		// goroutine or WaitGroup). A closed sole client (paused on a recorded
-		// stream) ends its HTTP handler, which removes it itself.
-		if sm.deliver(buffer, targets[0], chunk, true) {
-			utils.DebugLog("Closed stalled client %s of %s (paused?)", targets[0].user, sm.streamLabel(buffer.streamID))
-		}
+		// goroutine or WaitGroup).
+		drop(targets[0], true)
 		return
 	}
 
 	var wg sync.WaitGroup
 	wg.Add(len(targets))
-	for i := range targets {
-		go func(name string, cl *streamClient) {
+	for _, cl := range targets {
+		go func(cl *streamClient) {
 			defer wg.Done()
-			if sm.deliver(buffer, cl, chunk, false) {
-				utils.WarnLog("Dropping slow client %s from %s (buffer stalled)", cl.user, sm.streamLabel(buffer.streamID))
-				sm.RemoveClient(buffer.streamID, cl.user, cl.key)
-			}
-		}(names[i], targets[i])
+			drop(cl, false)
+		}(cl)
 	}
 	wg.Wait()
 }

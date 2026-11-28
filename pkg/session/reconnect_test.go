@@ -184,3 +184,24 @@ func TestStoppedBufferKeptWhileRead(t *testing.T) {
 		t.Fatal("catchup file should be deleted a grace after the last reader left")
 	}
 }
+
+// A paused player can keep its socket open, so its handler never removes the
+// client: the pump removes the stalled sole viewer itself, which pauses (and
+// so protects) the stream, and a following upstream drop reconnects.
+func TestStalledSoleViewerPausesWithoutHandler(t *testing.T) {
+	var opens int64
+	drop := make(chan struct{})
+	sm, base := reconnectManager(t, &opens, drop, false)
+	buffer, _ := startLive(t, sm, base, "alice", "42") // never read, never removed
+
+	if !waitUntil(2*time.Second, buffer.protected) {
+		t.Fatal("the stalled sole viewer should pause the stream without its handler")
+	}
+	close(drop)
+	if !waitUntil(3*time.Second, func() bool { return atomic.LoadInt64(&opens) >= 2 }) {
+		t.Fatalf("upstream opens = %d, want a reconnect", atomic.LoadInt64(&opens))
+	}
+	if !streamActive(sm, "42.ts") {
+		t.Fatal("the paused stream must stay active")
+	}
+}

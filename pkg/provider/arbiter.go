@@ -32,7 +32,9 @@
 //
 // Between the two sits the Share class: something watched through a share link
 // (a guest). It preempts background holders but yields to the household: a
-// Foreground request preempts a Share holder, never the reverse.
+// Foreground request preempts a Share holder, never the reverse. Watched
+// requests of the same class never preempt each other: first come, first
+// served.
 package provider
 
 import (
@@ -69,22 +71,6 @@ func (c Class) String() string {
 	}
 }
 
-// Mode says how far an Acquire may go to get a slot.
-type Mode int
-
-const (
-	// Resume may preempt background holders (when the caller is in the
-	// foreground) but never another foreground holder. Used when a holder
-	// that was preempted or retrying wants its slot back, so two foreground
-	// consumers cannot take the slot from each other in turn.
-	Resume Mode = iota
-	// Fresh is a new consumer: in the foreground it may also preempt the
-	// oldest holder of its own class when no lower one is left. The provider
-	// cannot serve both anyway, and would cut the older connection itself;
-	// the most recent request (e.g. the item a viewer just switched to) wins.
-	Fresh
-)
-
 // preemptGrace is how long a foreground request waits for a preempted holder
 // to give its slot back before taking a slot anyway. Holders close their
 // connection at their next read, so this only matters if one is stuck.
@@ -110,7 +96,6 @@ type waiter struct {
 	seq   uint64
 	label string
 	class func() Class
-	mode  Mode
 }
 
 // Lease is a granted slot. Release it when the connection is closed for good
@@ -140,7 +125,7 @@ func noopLease(label string) *Lease {
 // Acquire waits for a slot for the connection named label. foreground reports,
 // whenever asked, whether something is being watched through it (the household:
 // Foreground, else Background). It returns an error only when ctx ends first.
-func (a *Arbiter) Acquire(ctx context.Context, label string, foreground func() bool, mode Mode) (*Lease, error) {
+func (a *Arbiter) Acquire(ctx context.Context, label string, foreground func() bool) (*Lease, error) {
 	if foreground == nil {
 		foreground = func() bool { return false }
 	}
@@ -149,12 +134,12 @@ func (a *Arbiter) Acquire(ctx context.Context, label string, foreground func() b
 			return Foreground
 		}
 		return Background
-	}, mode)
+	})
 }
 
 // AcquireClass is Acquire for a holder whose priority is class, asked whenever
 // a decision is made (a stream's audience can change while it waits or holds).
-func (a *Arbiter) AcquireClass(ctx context.Context, label string, class func() Class, mode Mode) (*Lease, error) {
+func (a *Arbiter) AcquireClass(ctx context.Context, label string, class func() Class) (*Lease, error) {
 	if a == nil {
 		return noopLease(label), nil
 	}
@@ -163,7 +148,7 @@ func (a *Arbiter) AcquireClass(ctx context.Context, label string, class func() C
 	}
 	a.mu.Lock()
 	a.seq++
-	w := &waiter{seq: a.seq, label: label, class: class, mode: mode}
+	w := &waiter{seq: a.seq, label: label, class: class}
 	a.waiters = append(a.waiters, w)
 	var waitingSince time.Time
 	for {
@@ -176,13 +161,6 @@ func (a *Arbiter) AcquireClass(ctx context.Context, label string, class func() C
 		}
 		if c > Background {
 			victim := a.lowerHolderLocked(c)
-			if victim == nil && mode == Fresh {
-				victim = a.oldestHolderOfClassLocked(c)
-				if victim != nil && victim.preemptedAt.IsZero() {
-					utils.WarnLog("Provider slot: %s and %s are both being watched but the provider allows %d connection(s); %s takes over",
-						victim.label, label, capacity, label)
-				}
-			}
 			if victim != nil {
 				a.preemptLocked(victim, label)
 				if waitingSince.IsZero() {
@@ -273,24 +251,6 @@ func (a *Arbiter) lowerHolderLocked(c Class) *Lease {
 	return pick
 }
 
-// oldestHolderOfClassLocked returns the holder of class c granted first,
-// preferring one already being preempted.
-func (a *Arbiter) oldestHolderOfClassLocked(c Class) *Lease {
-	var pick *Lease
-	for l := range a.held {
-		if l.class() != c {
-			continue
-		}
-		if !l.preemptedAt.IsZero() {
-			return l
-		}
-		if pick == nil || l.seq < pick.seq {
-			pick = l
-		}
-	}
-	return pick
-}
-
 // WouldGrant reports whether a request of class c would get a slot now,
 // without waiting: there is no limit, a slot is free, or a lower-class holder
 // can be preempted. Used to turn away a request that would only wait (e.g. a
@@ -306,6 +266,36 @@ func (a *Arbiter) WouldGrant(c Class) bool {
 		return true
 	}
 	return a.lowerHolderLocked(c) != nil
+}
+
+// WaitGrant waits up to d (and while ctx lasts) until WouldGrant(c), woken by
+// slot changes and re-checked every pollInterval, as a waiting request is.
+func (a *Arbiter) WaitGrant(ctx context.Context, c Class, d time.Duration) bool {
+	if a.WouldGrant(c) {
+		return true
+	}
+	deadline := time.NewTimer(d)
+	defer deadline.Stop()
+	for {
+		a.mu.Lock()
+		ch := a.changed
+		a.mu.Unlock()
+		timer := time.NewTimer(pollInterval)
+		select {
+		case <-ch:
+		case <-timer.C:
+		case <-deadline.C:
+			timer.Stop()
+			return a.WouldGrant(c)
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		}
+		timer.Stop()
+		if a.WouldGrant(c) {
+			return true
+		}
+	}
 }
 
 func (a *Arbiter) preemptLocked(l *Lease, forLabel string) {

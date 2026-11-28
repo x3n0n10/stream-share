@@ -127,6 +127,9 @@ type vodDownload struct {
 	// foreground for provider-slot arbitration.
 	readers      int
 	lastReaderAt time.Time
+	// left: the viewer switched to another stream, so no grace once the
+	// readers are gone (cleared by the next reader).
+	left bool
 
 	// Sequential download rate (bytes/s, smoothed), to judge whether a read
 	// ahead is worth a window.
@@ -148,6 +151,7 @@ var vodReaderGrace = 5 * time.Second
 func (d *vodDownload) addReader() {
 	d.mu.Lock()
 	d.readers++
+	d.left = false
 	d.mu.Unlock()
 }
 
@@ -165,7 +169,14 @@ func (d *vodDownload) removeReader() {
 func (d *vodDownload) foreground() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.readers > 0 || (!d.lastReaderAt.IsZero() && time.Since(d.lastReaderAt) < vodReaderGrace)
+	return d.readers > 0 || (!d.left && !d.lastReaderAt.IsZero() && time.Since(d.lastReaderAt) < vodReaderGrace)
+}
+
+// viewerLeft ends the grace: the viewer switched to another stream.
+func (d *vodDownload) viewerLeft() {
+	d.mu.Lock()
+	d.left = true
+	d.mu.Unlock()
 }
 
 // notifyLocked wakes every waiter. The caller holds d.mu.

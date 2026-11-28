@@ -21,6 +21,7 @@ package server
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -34,6 +35,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/lucasduport/stream-share/pkg/catchup"
+	"github.com/lucasduport/stream-share/pkg/provider"
 	"github.com/lucasduport/stream-share/pkg/session"
 	"github.com/lucasduport/stream-share/pkg/types"
 	"github.com/lucasduport/stream-share/pkg/utils"
@@ -174,11 +176,19 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 		return
 	}
 
-	// A client is actively reading the catchup buffer (e.g. resuming after a
-	// pause) — cancel any pending pause-grace stop so recording continues
-	// uninterrupted and there's no gap once the buffer catches up to live.
+	// A client reading the catchup buffer (e.g. resuming after a pause)
+	// watches the channel: its live stream keeps recording and keeps its
+	// provider slot until the read ends.
+	// Each write gets the catchup idle limit: a reader that stops taking data
+	// that long (a pause, a half-open socket) ends the read, as a pause.
 	if c.sessionManager != nil {
-		c.sessionManager.NotifyCatchupActivity(idRaw)
+		w := newStallWriter(ctx.Writer, c.sessionManager.CatchupIdleLimit())
+		ctx.Writer = w
+		end := c.sessionManager.BeginCatchupRead(c.resolveRequestUsername(ctx), idRaw)
+		defer func() {
+			_ = w.rc.SetWriteDeadline(time.Time{}) // a kept-alive connection serves on unbounded
+			end(w.stalled)
+		}()
 	}
 	// Reading the buffer of a channel learned to lack provider recordings keeps
 	// it learned, so its catchup does not bounce off the provider once a day.
@@ -203,14 +213,16 @@ func (c *Config) xtreamStreamTimeshift(ctx *gin.Context) {
 		return
 	}
 
-	// Buffer exhausted — transition seamlessly to the live upstream so TiviMate
-	// catches up and continues watching without reconnecting on its own.
+	// Buffer exhausted — transition seamlessly to the live stream so TiviMate
+	// catches up and continues watching without reconnecting on its own. It
+	// joins the channel's shared stream, or needs a provider slot like any
+	// live start (a direct connection would fight the slot holder).
 	liveURL, err := url.Parse(c.providerStreamURL("live", idRaw))
 	if err != nil {
 		return
 	}
 	utils.DebugLog("Catchup: buffer exhausted for %s, transitioning to live upstream", c.streamLabel(idRaw))
-	c.stream(ctx, liveURL)
+	c.multiplexedStream(ctx, liveURL)
 }
 
 // proxyTimeshift streams the provider's own catchup recording, with the start
@@ -331,11 +343,16 @@ func (c *Config) serveCatchupSlate(ctx *gin.Context, idRaw string, status int, e
 		_ = resp.Body.Close() // don't hold a provider socket for the slate's minutes
 	}
 	utils.InfoLog("Catchup: provider could not serve %s (status %d, err %v); showing a slate", c.streamLabel(idRaw), status, err)
+	c.playSlate(ctx, clip)
+	return true
+}
+
+// playSlate answers 200 and repeats the slate clip to this one viewer.
+func (c *Config) playSlate(ctx *gin.Context, clip string) {
 	ctx.Header("Content-Type", "video/mp2t")
 	ctx.Header("Cache-Control", "no-cache")
 	ctx.Status(http.StatusOK)
 	c.sessionManager.PlayCatchupSlate(ctx.Request.Context(), ctx.Writer, clip)
-	return true
 }
 
 // bufferCovers tells whether the buffer holds start. Players send whole
@@ -407,6 +424,30 @@ func alignToTSPacket(f *os.File, startOffset int64) {
 	}
 	// No boundary found; restore original position.
 	_, _ = f.Seek(startOffset, io.SeekStart)
+}
+
+// stallWriter bounds each write to timeout and remembers whether one timed
+// out (the client stopped reading).
+type stallWriter struct {
+	gin.ResponseWriter
+	rc      *http.ResponseController
+	timeout time.Duration
+	stalled bool
+}
+
+func newStallWriter(w gin.ResponseWriter, timeout time.Duration) *stallWriter {
+	return &stallWriter{ResponseWriter: w, rc: http.NewResponseController(w), timeout: timeout}
+}
+
+func (w *stallWriter) Write(p []byte) (int, error) {
+	if w.timeout > 0 { // 0: no limit
+		_ = w.rc.SetWriteDeadline(time.Now().Add(w.timeout)) // unsupported writers just block
+	}
+	n, err := w.ResponseWriter.Write(p)
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		w.stalled = true
+	}
+	return n, err
 }
 
 // serveFromCatchupBuffer serves a timeshift request from the local disk buffer.
@@ -532,7 +573,13 @@ func (c *Config) streamVODWithCache(ctx *gin.Context, basePath, defaultExt strin
 		return
 	}
 
-	defer c.registerVODView(c.resolveRequestUsername(ctx), idRaw, basePath, idRaw)()
+	// The viewer's own previous stream never makes this one "in use".
+	username := c.resolveRequestUsername(ctx)
+	var slotWait time.Duration // how long to wait for the slot the previous stream frees
+	if c.sessionManager != nil && c.sessionManager.LeavePreviousStream(username, idRaw) {
+		slotWait = c.sessionManager.SlotWait()
+	}
+	defer c.registerVODView(username, idRaw, basePath, idRaw)()
 
 	if c.VODCacheEnabled && c.db != nil {
 		if entry := c.cachedVODEntry(idRaw); entry != nil {
@@ -555,6 +602,14 @@ func (c *Config) streamVODWithCache(ctx *gin.Context, basePath, defaultExt strin
 		// one-connection provider cut the download, and vice versa.
 		upstream, dest, _ := c.resolveVODTarget(basePath, defaultExt, id, false)
 		expires := time.Now().Add(7 * 24 * time.Hour)
+		// Every slot watched: a new download would only wait, so say so (after
+		// waiting for the slot of the viewer's previous stream, if it held
+		// one). The check/acquire race is accepted.
+		if _, running := c.inProgressDownloads.Load(idRaw); !running && !c.providerSlots.WaitGrant(ctx.Request.Context(), provider.Foreground, slotWait) {
+			utils.InfoLog("Refusing %s for %s: every provider connection is in use by other viewers", basePath, c.vodLabel(idRaw))
+			ctx.String(http.StatusServiceUnavailable, "All provider connections are in use by other viewers.\n")
+			return
+		}
 		dl := c.startBackgroundDownload(upstream, dest, idRaw, basePath, expires, func() {
 			if err := c.db.UpsertVODCache(&types.VODCacheEntry{StreamID: idRaw, Type: basePath, FilePath: dest, Status: "downloading", ExpiresAt: expires, CreatedAt: time.Now()}); err != nil {
 				utils.ErrorLog("Failed to record %s cache entry for %s: %v", basePath, idRaw, err)
@@ -575,6 +630,14 @@ func (c *Config) streamVODWithCache(ctx *gin.Context, basePath, defaultExt strin
 	}
 	utils.DebugLog("VOD %s streaming request - proxying to upstream: %s", basePath, utils.MaskURL(rpURL.String()))
 	c.stream(ctx, rpURL)
+}
+
+// vodViewerLeft lets the download of VOD view streamID give its slot up as
+// soon as its readers are gone: its viewer switched to another stream.
+func (c *Config) vodViewerLeft(streamID string) {
+	if v, ok := c.inProgressDownloads.Load(streamID); ok {
+		v.(*vodDownload).viewerLeft()
+	}
 }
 
 func (c *Config) xtreamStreamMovie(ctx *gin.Context) {
@@ -741,6 +804,18 @@ func (c *Config) awaitUpstreamStart(ctx *gin.Context, buffer *session.StreamBuff
 				ctx.AbortWithStatus(failoverStatus(startErr))
 				return false
 			}
+		}
+		if startErr := buffer.StartError(); startErr != nil && startErr.Key == session.KeyAllInUse {
+			// The stream was stopped, so no slate arrives on dataChan: play
+			// the in-use slate to this viewer alone, or refuse with 503.
+			c.sessionManager.RemoveClient(streamID, username, clientKey)
+			if clip, ok := c.sessionManager.InUseSlateClip(streamID); ok {
+				c.playSlate(ctx, clip)
+				return false
+			}
+			ctx.String(http.StatusServiceUnavailable, "All provider connections are in use by other viewers.\n")
+			ctx.Abort()
+			return false
 		}
 		if startErr := buffer.StartError(); startErr != nil {
 			// The session manager serves an error slate for eligible live

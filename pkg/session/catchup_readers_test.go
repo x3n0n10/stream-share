@@ -1,0 +1,202 @@
+/*
+ * stream-share is a project to efficiently share the use of an IPTV service.
+ * Copyright (C) 2025  Lucas Duport
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package session
+
+import (
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/lucasduport/stream-share/pkg/catchup"
+	"github.com/lucasduport/stream-share/pkg/provider"
+)
+
+// catchupTestManager is a manager over srv with catchup recording, a pause
+// grace and capacity provider slots. Its streams stop before srv closes.
+func catchupTestManager(t *testing.T, srv *httptest.Server, capacity int, grace time.Duration) *SessionManager {
+	t.Helper()
+	t.Cleanup(srv.Close)
+	sm := newTestManager()
+	t.Cleanup(sm.Stop)
+	t.Cleanup(func() { // before srv.Close, which waits for paused upstreams
+		sm.streamLock.Lock()
+		defer sm.streamLock.Unlock()
+		for id := range sm.streamBuffers {
+			sm.stopStream(id)
+		}
+	})
+	sm.SetProviderSlots(provider.New(func() int { return capacity }))
+	sm.SetCatchupManager(catchup.New(true, t.TempDir(), 1))
+	sm.SetPauseGrace(grace)
+	return sm
+}
+
+// readerManager is a catchupTestManager where alice watched 42.ts and then
+// left it (the stream is kept for the pause grace).
+func readerManager(t *testing.T, capacity int, grace time.Duration) (*SessionManager, string) {
+	t.Helper()
+	var opens int64
+	srv := countingUpstream(t, &opens)
+	sm := catchupTestManager(t, srv, capacity, grace)
+	_, key := startLive(t, sm, srv.URL, "alice", "42")
+	if !receiving(sm, "42.ts", key, 3*time.Second) {
+		t.Fatal("stream should play")
+	}
+	removeKey(sm, "42.ts", key)
+	return sm, srv.URL
+}
+
+// A viewer reading the catchup buffer watches the channel: a second watched
+// start is turned away instead of taking the slot.
+func TestCatchupReaderKeepsSlot(t *testing.T) {
+	sm, base := readerManager(t, 1, time.Minute)
+	end := sm.BeginCatchupRead("alice", "42")
+	defer end(false)
+
+	buffer, _ := startLive(t, sm, base, "bob", "43")
+	if uerr := waitReady(t, buffer); uerr == nil || uerr.Key != KeyAllInUse {
+		t.Fatalf("StartError = %+v, want %s", uerr, KeyAllInUse)
+	}
+	if !streamActive(sm, "42.ts") {
+		t.Fatal("the read stream must keep its slot")
+	}
+}
+
+// The last reader leaving starts the pause grace.
+func TestCatchupReaderEndStartsPauseGrace(t *testing.T) {
+	sm, _ := readerManager(t, 1, 200*time.Millisecond)
+	end := sm.BeginCatchupRead("alice", "42")
+	time.Sleep(400 * time.Millisecond) // past the grace: the reader keeps it
+	if !streamActive(sm, "42.ts") {
+		t.Fatal("stream stopped under a reader")
+	}
+	end(false)
+	deadline := time.Now().Add(2 * time.Second)
+	for streamActive(sm, "42.ts") {
+		if time.Now().After(deadline) {
+			t.Fatal("stream still running after the reader left and the grace expired")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// Another viewer switching away does not stop a stream someone reads.
+func TestOtherViewersSwitchKeepsReadersStream(t *testing.T) {
+	sm, base := readerManager(t, 2, time.Minute)
+	end := sm.BeginCatchupRead("alice", "42")
+	defer end(false)
+
+	_, key := startLive(t, sm, base, "bob", "42")
+	if !receiving(sm, "42.ts", key, 3*time.Second) {
+		t.Fatal("bob should watch 42")
+	}
+	startLive(t, sm, base, "bob", "43")
+	if !streamActive(sm, "42.ts") {
+		t.Fatal("bob's switch stopped the stream alice reads")
+	}
+}
+
+// A viewer's own reader does not keep their previous channel on a switch.
+func TestOwnSwitchIgnoresOwnReader(t *testing.T) {
+	sm, base := readerManager(t, 1, time.Minute)
+	end := sm.BeginCatchupRead("alice", "42")
+	defer end(false)
+
+	_, key := startLive(t, sm, base, "alice", "43")
+	if streamActive(sm, "42.ts") {
+		t.Fatal("alice's own reader kept her previous channel")
+	}
+	if !receiving(sm, "43.ts", key, 3*time.Second) {
+		t.Fatal("the new channel should play")
+	}
+}
+
+// Ending a read after its stream stopped leaves no reader behind, and a
+// second end changes nothing.
+func TestEndAfterStopLeavesNoReader(t *testing.T) {
+	sm, _ := readerManager(t, 1, time.Minute)
+	end := sm.BeginCatchupRead("alice", "42")
+	sm.streamLock.Lock()
+	buffer := sm.streamBuffers["42.ts"]
+	sm.stopStream("42.ts")
+	sm.streamLock.Unlock()
+	end(false)
+	end(false)
+
+	buffer.readersMu.Lock()
+	defer buffer.readersMu.Unlock()
+	if len(buffer.readers) != 0 {
+		t.Fatalf("readers = %v, want empty", buffer.readers)
+	}
+}
+
+// The last client leaving a stream someone reads neither stops it nor starts
+// its pause grace.
+func TestClientLeavingKeepsReadersStream(t *testing.T) {
+	sm, base := readerManager(t, 2, time.Minute)
+	end := sm.BeginCatchupRead("alice", "42")
+	defer end(false)
+
+	_, key := startLive(t, sm, base, "bob", "42")
+	if !receiving(sm, "42.ts", key, 3*time.Second) {
+		t.Fatal("bob should watch 42")
+	}
+	removeKey(sm, "42.ts", key)
+	if !streamActive(sm, "42.ts") {
+		t.Fatal("bob leaving stopped the stream alice reads")
+	}
+	sm.streamLock.RLock()
+	_, pending := sm.pendingStops["42.ts"]
+	sm.streamLock.RUnlock()
+	if pending {
+		t.Fatal("a pause grace started while alice reads")
+	}
+}
+
+// A long catchup read makes no new requests; the reader's session must not
+// expire under it and stop the stream it reads.
+func TestReaderSessionDoesNotExpire(t *testing.T) {
+	sm, _ := readerManager(t, 1, time.Minute)
+	end := sm.BeginCatchupRead("alice", "42")
+	defer end(false)
+	sm.SetSessionTimeout(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
+	sm.cleanupExpiredSessions()
+	if !streamActive(sm, "42.ts") {
+		t.Fatal("session expiry stopped the stream alice reads")
+	}
+	if sm.GetUserSession("alice") == nil {
+		t.Fatal("alice's session expired while she reads")
+	}
+}
+
+// A catchup read targets the stream with a disk buffer, never a VOD sharing
+// its bare id.
+func TestCatchupReadSkipsVODWithSameID(t *testing.T) {
+	sm := newTestManager()
+	defer sm.Stop()
+	vod := &StreamBuffer{streamID: "42.mkv", active: true, readers: map[string]int{},
+		stopChan: make(chan struct{}), ready: make(chan struct{})}
+	sm.streamBuffers["42.mkv"] = vod
+	end := sm.BeginCatchupRead("alice", "42")
+	defer end(false)
+	if vod.hasReaders() {
+		t.Fatal("the catchup read was counted on a VOD stream")
+	}
+}

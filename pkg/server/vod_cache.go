@@ -93,7 +93,6 @@ func (c *Config) fetchToFile(ctx context.Context, dl *vodDownload, upstream, des
 	// resumes where it stopped.
 	label := "download of " + vodCachedLabel(streamID)
 	var lease *provider.Lease
-	slotMode := provider.Fresh
 	parked := false
 	release := func() {
 		if lease != nil {
@@ -111,7 +110,7 @@ func (c *Config) fetchToFile(ctx context.Context, dl *vodDownload, upstream, des
 			return true
 		}
 		release()
-		l, aErr := c.providerSlots.Acquire(ctx, label, dl.foreground, slotMode)
+		l, aErr := c.providerSlots.Acquire(ctx, label, dl.foreground)
 		if aErr != nil {
 			return false
 		}
@@ -119,7 +118,6 @@ func (c *Config) fetchToFile(ctx context.Context, dl *vodDownload, upstream, des
 			utils.InfoLog("Provider slot: resuming %s at %s/%s", label, utils.HumanBytes(downloaded), utils.HumanBytes(total))
 			parked = false
 		}
-		slotMode = provider.Resume
 		lease = l
 		return true
 	}

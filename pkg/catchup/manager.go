@@ -35,6 +35,7 @@ type Manager struct {
 	enabled  bool
 	dir      string
 	duration int // hours — controls both advertised window and disk retention
+	grace    time.Duration
 
 	mu              sync.Mutex
 	buffers         map[string]*DiskBuffer   // streamID → buffer (active or in grace period)
@@ -56,6 +57,7 @@ func New(enabled bool, dir string, duration int) *Manager {
 		enabled:         enabled,
 		dir:             dir,
 		duration:        duration,
+		grace:           gracePeriod,
 		buffers:         make(map[string]*DiskBuffer),
 		graceCancels:    make(map[string]chan struct{}),
 		upstreamCatchup: make(map[string]bool),
@@ -66,6 +68,9 @@ func New(enabled bool, dir string, duration int) *Manager {
 
 // IsEnabled returns whether the catchup feature is active.
 func (m *Manager) IsEnabled() bool { return m.enabled }
+
+// SetGracePeriod sets how long a stopped buffer's files are kept (tests).
+func (m *Manager) SetGracePeriod(d time.Duration) { m.grace = d }
 
 // AdvertisedHours returns the number of hours to advertise in tv_archive_duration.
 func (m *Manager) AdvertisedHours() int { return m.duration }
@@ -146,7 +151,7 @@ func (m *Manager) StopBuffer(streamID string) {
 
 	go func() {
 		select {
-		case <-time.After(gracePeriod):
+		case <-time.After(m.grace):
 		case <-cancel:
 			return
 		}

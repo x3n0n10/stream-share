@@ -27,12 +27,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/lucasduport/stream-share/pkg/config"
 	"github.com/lucasduport/stream-share/pkg/database"
+	"github.com/lucasduport/stream-share/pkg/provider"
 )
 
 // laggyProvider models a provider that allows max connections per account but
@@ -297,4 +299,52 @@ func TestProgressiveMidFileSeekSpacesNewConnections(t *testing.T) {
 			}
 		})
 	}
+}
+
+// With every provider slot held by a viewer a new movie/series download would
+// only wait, so the request is turned away; joining a running download is fine.
+func TestVODAnswers503WhenEverySlotIsWatched(t *testing.T) {
+	files := &fakeVODProvider{data: randomBytes(t, 1<<10), chunk: 1 << 10}
+	c, front := slotTestServer(t, files, 1)
+	holdViewerSlot(t, c.providerSlots)
+
+	resp, body, err := getRange(t, front.URL+"/series/601.mkv", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), "All provider connections are in use by other viewers.") {
+		t.Fatalf("got %d %q, want 503 with the in-use message", resp.StatusCode, body)
+	}
+	if n := atomic.LoadInt32(&files.requests); n != 0 {
+		t.Fatalf("upstream got %d request(s), want 0", n)
+	}
+}
+
+func TestVODJoinsRunningDownloadWhenEverySlotIsWatched(t *testing.T) {
+	// 2 MB at 100 ms per 64 KB chunk keeps the download running ~3 s.
+	files := &fakeVODProvider{data: randomBytes(t, 2<<20), chunk: 64 << 10, delay: 100 * time.Millisecond}
+	c, front := slotTestServer(t, files, 2)
+
+	resp, _, err := getRange(t, front.URL+"/series/602.mkv", "bytes=0-1023")
+	if err != nil || resp.StatusCode >= 400 {
+		t.Fatalf("first request: %v %v", resp, err)
+	}
+	if _, busy := c.inProgressDownloads.Load("602"); !busy {
+		t.Fatal("download is not running after the first request")
+	}
+	holdViewerSlot(t, c.providerSlots)
+	resp, _, err = getRange(t, front.URL+"/series/602.mkv", "bytes=0-1023")
+	if err != nil || resp.StatusCode == http.StatusServiceUnavailable {
+		t.Fatalf("joining request: %v %v, want not 503", resp, err)
+	}
+}
+
+// holdViewerSlot takes a slot as a watched viewer until the test ends.
+func holdViewerSlot(t *testing.T, slots *provider.Arbiter) {
+	t.Helper()
+	lease, err := slots.AcquireClass(context.Background(), "viewer", func() provider.Class { return provider.Foreground })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(lease.Release)
 }

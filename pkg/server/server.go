@@ -272,6 +272,7 @@ func (c *Config) setupDatabaseAndSessions() error {
 	c.sessionManager = session.NewSessionManager(db)
 	c.sessionManager.SetNameResolver(c.resolveStreamName)
 	c.sessionManager.SetProviderSlots(c.providerSlots)
+	c.sessionManager.SetVODLeftHook(c.vodViewerLeft)
 	utils.InfoLog("Session manager initialized with database connection")
 
 	// Seed in-memory name indices from DB so names are available before the first API call.

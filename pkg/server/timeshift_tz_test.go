@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,7 @@ import (
 
 	"github.com/lucasduport/stream-share/pkg/catchup"
 	"github.com/lucasduport/stream-share/pkg/config"
+	"github.com/lucasduport/stream-share/pkg/provider"
 	"github.com/lucasduport/stream-share/pkg/session"
 	"github.com/lucasduport/stream-share/pkg/slate"
 	xtreamapi "github.com/lucasduport/stream-share/pkg/xtream"
@@ -427,5 +429,80 @@ func TestProviderArchiveMissLearned(t *testing.T) {
 				t.Fatalf("learned = %v, want %v", learned, tc.learns)
 			}
 		})
+	}
+}
+
+// When the catchup buffer runs out, the hand-off to live goes through the
+// session manager: with the provider's only connection watched elsewhere it
+// is refused instead of opening a second upstream connection.
+func TestTimeshiftHandOffToLiveNeedsSlot(t *testing.T) {
+	var mu sync.Mutex
+	var asked []string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked = append(asked, r.URL.Path)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		if r.URL.Path != "/live/user/prov/43.ts" {
+			_, _ = w.Write([]byte("x"))
+			return
+		}
+		for r.Context().Err() == nil { // the watched channel streams on
+			if _, err := w.Write(make([]byte, 4096)); err != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+			time.Sleep(5 * time.Millisecond)
+		}
+	}))
+	t.Cleanup(up.Close)
+	var c *Config
+	front, _ := viewerRouteFixtureWith(t, "", func(cfg *Config) {
+		c = cfg
+		c.XtreamBaseURL = up.URL
+		c.catchupManager = catchup.New(true, t.TempDir(), 3)
+		stopBuffer(t, c.catchupManager.StartBuffer("42")) // stopped: serving it ends at EOF
+		c.sessionManager.SetProviderSlots(provider.New(func() int { return 1 }))
+	})
+	// Another household viewer watches channel 43 on the only connection.
+	liveURL, err := url.Parse(up.URL + "/live/user/prov/43.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	buffer, key, err := c.sessionManager.RequestStream("bob", "43.ts", "live", "43", liveURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-buffer.Ready()
+	if buffer.StartError() != nil {
+		t.Fatalf("channel 43 should start: %v", buffer.StartError())
+	}
+	defer c.sessionManager.RemoveClient("43.ts", "bob", key) // stops 43 before up.Close
+	ch, _ := c.sessionManager.GetClientChannel("43.ts", key)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() { // bob keeps watching
+		for {
+			select {
+			case <-ch:
+			case <-stop:
+				return
+			}
+		}
+	}()
+
+	resp, err := http.Get(front + "/timeshift/me/pw/60/" + time.Now().UTC().Truncate(time.Minute).Format(timeshiftLayout) + "/42.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, p := range asked {
+		if p == "/live/user/prov/42.ts" {
+			t.Fatalf("the hand-off opened a second provider connection: %v", asked)
+		}
 	}
 }

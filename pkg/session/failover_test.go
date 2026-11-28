@@ -923,24 +923,38 @@ func TestSecondViewerJoinsFallbackStream(t *testing.T) {
 	}
 }
 
-func TestWithoutTargetsNewestStillWins(t *testing.T) {
+func TestWithoutTargetsFirstComeKeepsSlot(t *testing.T) {
 	own := newFakeUpstream(t, 'O', 0)
 	sm, _ := failoverRig(t, nil)
 	aliceWatches(t, sm, own)
 
-	_, bob := watch(t, sm, "bob", "ch2", "live", own.URL)
-	if !served(sm, "ch2", bob, 'O', 5*time.Second) {
-		t.Fatal("bob's stream should play")
+	buffer, _ := watch(t, sm, "bob", "ch2", "live", own.URL)
+	if uerr := waitReady(t, buffer); uerr == nil || uerr.Key != KeyAllInUse {
+		t.Fatalf("bob's start = %v, want %s", uerr, KeyAllInUse)
 	}
-	if !waitStopped(sm, "ch1", 3*time.Second) {
-		t.Fatal("bob's start should cut alice's stream")
+	if waitStopped(sm, "ch1", 500*time.Millisecond) {
+		t.Fatal("bob's start must not cut alice's stream")
 	}
 }
 
-// A slating stream's own retry dial has no timeout: a hung provider must still
-// give the slot back at once when the household needs it (not after
-// preemptGrace, over the limit).
-func TestSlateRetryOwnDialYieldsToPreemption(t *testing.T) {
+// A viewer's own switch waits for the slot their previous channel frees.
+func TestOwnSwitchGetsTheSlot(t *testing.T) {
+	own := newFakeUpstream(t, 'O', 0)
+	sm, _ := failoverRig(t, nil)
+	aliceWatches(t, sm, own)
+
+	_, key := watch(t, sm, "alice", "ch2", "live", own.URL)
+	if !served(sm, "ch2", key, 'O', 5*time.Second) {
+		t.Fatal("alice's new channel should play")
+	}
+}
+
+// hungSlateRetry starts viewer's stream ch2 on an own provider that fails the
+// first dial, then hangs the slate retry's own dial while holding the slot. It
+// returns the manager, its slots, the slating buffer and an upstream for a
+// second viewer's channel.
+func hungSlateRetry(t *testing.T, viewer string) (*SessionManager, *provider.Arbiter, *StreamBuffer, *fakeUpstream) {
+	t.Helper()
 	var ownRequests atomic.Int64
 	own := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if ownRequests.Add(1) == 1 {
@@ -957,10 +971,10 @@ func TestSlateRetryOwnDialYieldsToPreemption(t *testing.T) {
 	other := newFakeUpstream(t, 'A', 0)
 	sm, slots := failoverRig(t, newFakeSlate(t, bytes.Repeat([]byte("S"), 2048)), target(t, "Spare", spare.URL))
 
-	buffer, bob := watch(t, sm, "bob", "ch2", "live", own.URL)
+	buffer, key := watch(t, sm, viewer, "ch2", "live", own.URL)
 	stop := make(chan struct{})
-	defer close(stop)
-	go keepDraining(sm, "ch2", bob, stop)
+	t.Cleanup(func() { close(stop) })
+	go keepDraining(sm, "ch2", key, stop)
 	if waitReady(t, buffer) == nil {
 		t.Fatal("the stream should have failed to start")
 	}
@@ -971,19 +985,23 @@ func TestSlateRetryOwnDialYieldsToPreemption(t *testing.T) {
 	if !buffer.ownSlot.Load() {
 		t.Fatal("the slate retry should be holding the own slot in its hung dial")
 	}
+	return sm, slots, buffer, other
+}
 
-	_, alice := watch(t, sm, "alice", "ch1", "timeshift", other.URL)
-	if !served(sm, "ch1", alice, 'A', 3*time.Second) {
-		t.Fatal("the household start should get the slot promptly")
+// A slating stream's own retry dial has no timeout; first come, first served,
+// so a later watched start does not take its slot but is turned away.
+func TestSlateRetryOwnDialKeepsSlot(t *testing.T) {
+	sm, slots, buffer, other := hungSlateRetry(t, "bob")
+
+	abuf, _ := watch(t, sm, "alice", "ch1", "timeshift", other.URL)
+	if uerr := waitReady(t, abuf); uerr == nil || uerr.Key != KeyAllInUse {
+		t.Fatalf("alice's start = %v, want %s", uerr, KeyAllInUse)
 	}
-	if !waitStopped(sm, "ch2", 2*time.Second) {
-		t.Fatal("the preempted stream should stop")
-	}
-	if buffer.ownSlot.Load() {
-		t.Fatal("the preempted stream should hold no own slot")
+	if !buffer.ownSlot.Load() {
+		t.Fatal("the slating stream should keep its own slot")
 	}
 	if n := len(slots.Snapshot().Held); n != 1 {
-		t.Fatalf("%d slots held, want 1 (the preempted lease released)", n)
+		t.Fatalf("%d slots held, want 1 (the slating stream's)", n)
 	}
 }
 
@@ -1054,5 +1072,26 @@ func TestFallbackReadErrorLogsName(t *testing.T) {
 	}
 	if strings.Contains(out, spare.URL[len("http://"):]) {
 		t.Fatalf("log names the fallback's address: %q", out)
+	}
+}
+
+// A guest-only slating stream is Share class: its hung own retry dial must
+// give the slot back at once when a household viewer starts another channel
+// (not after preemptGrace, over the limit).
+func TestGuestSlateRetryOwnDialYieldsToHousehold(t *testing.T) {
+	sm, slots, buffer, other := hungSlateRetry(t, ShareIdentityPrefix+"abc123")
+
+	_, alice := watch(t, sm, "alice", "ch1", "timeshift", other.URL)
+	if !served(sm, "ch1", alice, 'A', 3*time.Second) {
+		t.Fatal("the household start should get the slot promptly")
+	}
+	if !waitStopped(sm, "ch2", 2*time.Second) {
+		t.Fatal("the preempted guest stream should stop")
+	}
+	if buffer.ownSlot.Load() {
+		t.Fatal("the preempted stream should hold no own slot")
+	}
+	if n := len(slots.Snapshot().Held); n != 1 {
+		t.Fatalf("%d slots held, want 1 (the preempted lease released)", n)
 	}
 }

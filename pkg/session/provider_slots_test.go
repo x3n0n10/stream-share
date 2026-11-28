@@ -40,7 +40,7 @@ func TestLiveStreamPreemptsBackgroundDownload(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	background, err := slots.Acquire(ctx, "background download", func() bool { return false }, provider.Fresh)
+	background, err := slots.Acquire(ctx, "background download", func() bool { return false })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestLiveStreamPreemptsBackgroundDownload(t *testing.T) {
 		<-background.Preempted()
 		close(paused)
 		background.Release()
-		l, aerr := slots.Acquire(ctx, "background download", func() bool { return false }, provider.Resume)
+		l, aerr := slots.Acquire(ctx, "background download", func() bool { return false })
 		if aerr == nil {
 			resumed <- l
 		}
